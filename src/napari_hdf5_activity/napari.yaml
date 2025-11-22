@@ -1,37 +1,29 @@
+# name: napari-hdf5-activity
+# display_name: HDF5 Activity Analysis
+# version: "0.1.0"
+# contributions:
+#   commands:
+#     - id: napari-hdf5-activity.get_reader
+#       python_name: napari_hdf5_activity._reader:napari_get_reader
+#       title: HDF5 Reader
+#     - id: napari-hdf5-activity.analysis_widget
+#       python_name: napari_hdf5_activity._widget:napari_provide_dock_widget
+#       title: HDF5 Activity Analysis Widget
+#   readers:
+#     - command: napari-hdf5-activity.get_reader
+#       accepts_directories: true
+#       filename_patterns: ["*.h5", "*.hdf5"]
+#   widgets:
+#     - command: napari-hdf5-activity.analysis_widget
+#       display_name: HDF5 Activity Analysis
 name: napari-hdf5-activity
-display_name: Hdf5 Activity
-# use 'hidden' to remove plugin from napari hub search results
-visibility: public
-# see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
-categories: ["Annotation", "Segmentation", "Acquisition"]
+display_name: HDF5 Activity Analysis
+version: "0.1.0"
 contributions:
   commands:
-    - id: napari-hdf5-activity.get_reader
-      python_name: napari_hdf5_activity._reader:napari_get_reader
-      title: Open data with Hdf5 Activity
-    - id: napari-hdf5-activity.make_container_widget
-      python_name: napari_hdf5_activity:ImageThreshold
-      title: Make threshold Container widget
-    - id: napari-hdf5-activity.make_magic_widget
-      python_name: napari_hdf5_activity:threshold_magic_widget
-      title: Make threshold magic widget
-    - id: napari-hdf5-activity.make_function_widget
-      python_name: napari_hdf5_activity:threshold_autogenerate_widget
-      title: Make threshold function widget
-    - id: napari-hdf5-activity.make_qwidget
-      python_name: napari_hdf5_activity:ExampleQWidget
-      title: Make example QWidget
-  readers:
-    - command: napari-hdf5-activity.get_reader
-      accepts_directories: false
-      filename_patterns: ['*.npy']
+    - id: napari-hdf5-activity.analysis_widget
+      python_name: napari_hdf5_activity._widget:HDF5AnalysisWidget
+      title: HDF5 Activity Analysis Widget
   widgets:
-    - command: napari-hdf5-activity.make_container_widget
-      display_name: Container Threshold
-    - command: napari-hdf5-activity.make_magic_widget
-      display_name: Magic Threshold
-    - command: napari-hdf5-activity.make_function_widget
-      autogenerate: true
-      display_name: Autogenerate Threshold
-    - command: napari-hdf5-activity.make_qwidget
-      display_name: Example QWidget
+    - command: napari-hdf5-activity.analysis_widget
+      display_name: HDF5 Activity Analysis
