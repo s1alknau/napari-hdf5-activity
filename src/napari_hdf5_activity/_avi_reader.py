@@ -272,135 +272,158 @@ def load_avi_batch_timeseries(
     }
 
     total_videos = len(video_paths)
-
-    # Determine number of parallel workers
-    num_workers = min(6, os.cpu_count() or 4)
-    print(f"\nLoading {total_videos} videos using {num_workers} parallel workers...")
-
-    # Phase 1: Load all videos in parallel
-    results = {}
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all video loading tasks
-        futures = {
-            executor.submit(
-                _load_single_video_for_batch, idx, path, target_frame_interval
-            ): idx
-            for idx, path in enumerate(video_paths)
-        }
-
-        # Collect results as they complete (in any order)
-        completed_count = 0
-        for future in as_completed(futures):
-            video_idx = futures[future]
-            video_idx_result, metadata, frames_with_idx, error_msg = future.result(
-                timeout=120
-            )
-
-            completed_count += 1
-
-            # Update progress during loading phase
-            if progress_callback:
-                percent = (completed_count / total_videos) * 50  # Loading is first 50%
-                video_name = (
-                    Path(video_paths[video_idx]).name
-                    if video_idx < len(video_paths)
-                    else f"video {video_idx}"
-                )
-                progress_callback(
-                    percent, f"Loaded {completed_count}/{total_videos} videos"
-                )
-
-            # Store result (even if error, to maintain order)
-            results[video_idx_result] = (metadata, frames_with_idx, error_msg)
-
-            # Log completion
-            if error_msg:
-                print(f"  ✗ Video {video_idx_result + 1}/{total_videos}: {error_msg}")
-            else:
-                video_name = metadata["name"]
-                print(
-                    f"  ✓ Video {video_idx_result + 1}/{total_videos}: {video_name} ({metadata['sampled_frames']} frames)"
-                )
-
-    print("\nAll videos loaded. Processing results in order...\n")
-
-    # Phase 2: Process results in correct temporal order
     current_time_offset = 0.0
 
-    for video_idx in sorted(results.keys()):
-        metadata, frames_with_idx, error_msg = results[video_idx]
+    # Determine number of parallel workers and chunk size
+    num_workers = min(6, os.cpu_count() or 4)
+    # Process videos in chunks to avoid memory overflow
+    # Each video ~200 frames * 1080 * 1920 * 1 byte = ~400MB
+    # Chunk size of 10 videos = ~4GB which is manageable
+    chunk_size = 10
 
-        # Update progress during processing phase
-        if progress_callback:
-            percent = 50 + (video_idx / total_videos) * 50  # Processing is second 50%
-            progress_callback(
-                percent, f"Processing video {video_idx + 1}/{total_videos}"
-            )
+    print(
+        f"\nProcessing {total_videos} videos in chunks of {chunk_size} using {num_workers} parallel workers..."
+    )
 
-        # Check for errors - STOP at first error
-        if error_msg:
-            print(f"ERROR at video {video_idx + 1}: {error_msg}")
-            print(
-                f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
-            )
-            break
-
-        if metadata is None or frames_with_idx is None:
-            print(f"ERROR at video {video_idx + 1}: Missing data")
-            print(
-                f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
-            )
-            break
-
-        # Extract metadata
-        video_path = metadata["path"]
-        video_name = metadata["name"]
-        video_fps = metadata["fps"]
-        video_duration = metadata["duration"]
-        frames_per_sample = metadata["frames_per_sample"]
-
-        print(f"Processing video {video_idx + 1}/{total_videos}: {video_name}")
-        print(f"  Video FPS: {video_fps}")
-        print(f"  Target interval: {target_frame_interval}s")
-        print(f"  Sampling every {frames_per_sample} frames")
-
-        # Calculate timestamps for this video's frames
-        video_frames = []
-        video_timestamps = []
-
-        for frame_idx, frame in frames_with_idx:
-            video_frames.append(frame)
-
-            # Calculate actual timestamp with correct offset
-            frame_time = (frame_idx / video_fps) + current_time_offset
-            video_timestamps.append(frame_time)
-
-        # Add to combined results
-        all_frames.extend(video_frames)
-        all_timestamps.extend(video_timestamps)
-
-        # Update time offset for next video
-        current_time_offset += video_duration
-
-        # Store video metadata
-        combined_metadata["videos"].append(
-            {
-                "path": video_path,
-                "index": video_idx,
-                "fps": video_fps,
-                "frame_count": metadata["frame_count"],
-                "duration": video_duration,
-                "sampled_frames": len(video_frames),
-                "time_start": video_timestamps[0] if video_timestamps else 0,
-                "time_end": video_timestamps[-1] if video_timestamps else 0,
-                "frames_per_sample": frames_per_sample,
-            }
-        )
+    # Process videos in chunks
+    for chunk_start in range(0, total_videos, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total_videos)
+        chunk_paths = video_paths[chunk_start:chunk_end]
+        chunk_indices = range(chunk_start, chunk_end)
 
         print(
-            f"  Sampled {len(video_frames)} frames from {metadata['frame_count']} total"
+            f"\n--- Processing chunk: videos {chunk_start + 1}-{chunk_end} ({len(chunk_paths)} videos) ---"
         )
-        print(f"  Time range: {video_timestamps[0]:.1f}s - {video_timestamps[-1]:.1f}s")
+
+        # Phase 1: Load chunk videos in parallel
+        results = {}
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit chunk video loading tasks
+            futures = {
+                executor.submit(
+                    _load_single_video_for_batch, idx, path, target_frame_interval
+                ): idx
+                for idx, path in zip(chunk_indices, chunk_paths)
+            }
+
+            # Collect results as they complete (in any order)
+            completed_count = 0
+            for future in as_completed(futures):
+                video_idx = futures[future]
+                video_idx_result, metadata, frames_with_idx, error_msg = future.result(
+                    timeout=120
+                )
+
+                completed_count += 1
+
+                # Update progress during loading phase
+                if progress_callback:
+                    # Calculate overall progress
+                    overall_completed = chunk_start + completed_count
+                    percent = (overall_completed / total_videos) * 100
+                    progress_callback(
+                        percent, f"Loaded {overall_completed}/{total_videos} videos"
+                    )
+
+                # Store result (even if error, to maintain order)
+                results[video_idx_result] = (metadata, frames_with_idx, error_msg)
+
+                # Log completion
+                if error_msg:
+                    print(
+                        f"  ✗ Video {video_idx_result + 1}/{total_videos}: {error_msg}"
+                    )
+                else:
+                    video_name = metadata["name"]
+                    print(
+                        f"  ✓ Video {video_idx_result + 1}/{total_videos}: {video_name} ({metadata['sampled_frames']} frames)"
+                    )
+
+        print(f"Chunk loaded. Processing {len(results)} videos in order...")
+
+        # Phase 2: Process chunk results in correct temporal order
+        stop_processing = False
+
+        for video_idx in sorted(results.keys()):
+            metadata, frames_with_idx, error_msg = results[video_idx]
+
+            # Check for errors - STOP at first error
+            if error_msg:
+                print(f"ERROR at video {video_idx + 1}: {error_msg}")
+                print(
+                    f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
+                )
+                stop_processing = True
+                break
+
+            if metadata is None or frames_with_idx is None:
+                print(f"ERROR at video {video_idx + 1}: Missing data")
+                print(
+                    f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
+                )
+                stop_processing = True
+                break
+
+            # Extract metadata
+            video_path = metadata["path"]
+            video_name = metadata["name"]
+            video_fps = metadata["fps"]
+            video_duration = metadata["duration"]
+            frames_per_sample = metadata["frames_per_sample"]
+
+            print(f"Processing video {video_idx + 1}/{total_videos}: {video_name}")
+            print(f"  Video FPS: {video_fps}")
+            print(f"  Target interval: {target_frame_interval}s")
+            print(f"  Sampling every {frames_per_sample} frames")
+
+            # Calculate timestamps for this video's frames
+            video_frames = []
+            video_timestamps = []
+
+            for frame_idx, frame in frames_with_idx:
+                video_frames.append(frame)
+
+                # Calculate actual timestamp with correct offset
+                frame_time = (frame_idx / video_fps) + current_time_offset
+                video_timestamps.append(frame_time)
+
+            # Add to combined results
+            all_frames.extend(video_frames)
+            all_timestamps.extend(video_timestamps)
+
+            # Update time offset for next video
+            current_time_offset += video_duration
+
+            # Store video metadata
+            combined_metadata["videos"].append(
+                {
+                    "path": video_path,
+                    "index": video_idx,
+                    "fps": video_fps,
+                    "frame_count": metadata["frame_count"],
+                    "duration": video_duration,
+                    "sampled_frames": len(video_frames),
+                    "time_start": video_timestamps[0] if video_timestamps else 0,
+                    "time_end": video_timestamps[-1] if video_timestamps else 0,
+                    "frames_per_sample": frames_per_sample,
+                }
+            )
+
+            print(
+                f"  Sampled {len(video_frames)} frames from {metadata['frame_count']} total"
+            )
+            print(
+                f"  Time range: {video_timestamps[0]:.1f}s - {video_timestamps[-1]:.1f}s"
+            )
+
+        # Free memory from this chunk
+        del results
+
+        # If we encountered an error, stop processing remaining chunks
+        if stop_processing:
+            break
+
+        print(f"Chunk complete. Total frames so far: {len(all_frames)}")
 
     if not all_frames:
         raise ValueError("No frames could be loaded from any video")
