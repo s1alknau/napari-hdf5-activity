@@ -1619,7 +1619,9 @@ class HDF5AnalysisWidget(QWidget):
 
         # Load all frames from batch
         self._log_message(f"Loading {len(video_paths)} AVI files for analysis...")
-        frames, metadata = load_avi_batch_timeseries(video_paths, frame_interval)
+        frames, metadata = load_avi_batch_timeseries(
+            video_paths, frame_interval, progress_callback
+        )
 
         total_frames = len(frames)
         self._log_message(f"Loaded {total_frames} frames, starting analysis...")
