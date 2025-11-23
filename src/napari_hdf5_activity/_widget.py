@@ -2021,8 +2021,26 @@ class HDF5AnalysisWidget(QWidget):
             }
 
         try:
-            # ROI detection
-            first_frame = get_first_frame(current_file)
+            # ROI detection - get first frame from viewer layer or file
+            first_frame = None
+
+            # Try to get frame from existing napari layer (for AVI batch)
+            if len(self.viewer.layers) > 0:
+                layer = self.viewer.layers[0]
+                if hasattr(layer, "data"):
+                    first_frame = layer.data
+                    if len(first_frame.shape) == 3 and first_frame.shape[0] > 1:
+                        # Multi-frame layer, take first frame
+                        first_frame = first_frame[0]
+                    self._log_message(
+                        f"Using frame from viewer layer: {layer.name} (shape: {first_frame.shape})"
+                    )
+
+            # Fallback: read from file (for HDF5)
+            if first_frame is None:
+                self._log_message("No frame in viewer, reading from file...")
+                first_frame = get_first_frame(current_file)
+
             if first_frame is None:
                 self._log_message("ERROR: Could not read first frame")
                 return
