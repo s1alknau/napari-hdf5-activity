@@ -2109,6 +2109,11 @@ class HDF5AnalysisWidget(QWidget):
                     x_sorted_indices = np.argsort(row_circles[:, 0])
                     row_sorted = row_circles[x_sorted_indices]
 
+                    # Reverse every odd row (0-indexed) for meandering pattern
+                    # Row 0: L→R, Row 1: R→L, Row 2: L→R, etc.
+                    if row_idx % 2 == 1:
+                        row_sorted = row_sorted[::-1]
+
                     sorted_circles.extend(row_sorted)
 
                 sorted_circles = np.array(sorted_circles, dtype=np.uint16)
