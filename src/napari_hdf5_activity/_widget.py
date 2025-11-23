@@ -2070,7 +2070,8 @@ class HDF5AnalysisWidget(QWidget):
             masks = []
             if circles is not None:
                 circles = np.uint16(np.around(circles))
-                # Use simple left-to-right, top-to-bottom sorting (not meandering)
+                # Sort all rows left-to-right, top-to-bottom
+                # Row 1: 1,2,3,4,5,6  Row 2: 7,8,9,10,11,12  Row 3: 13,14,15,16,17,18
                 sorted_circles = sort_circles_left_to_right(circles)
 
                 for idx, circle in enumerate(sorted_circles):
