@@ -5,7 +5,9 @@ This module handles reading AVI video files,
 making them compatible with the HDF5 analysis pipeline.
 """
 
+import os
 import numpy as np
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
 try:
