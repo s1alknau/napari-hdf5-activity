@@ -2070,9 +2070,15 @@ class HDF5AnalysisWidget(QWidget):
             masks = []
             if circles is not None:
                 circles = np.uint16(np.around(circles))
-                # Sort all rows left-to-right, top-to-bottom
-                # Row 1: 1,2,3,4,5,6  Row 2: 7,8,9,10,11,12  Row 3: 13,14,15,16,17,18
-                sorted_circles = sort_circles_left_to_right(circles)
+
+                # Remove extra dimension from HoughCircles if present
+                if len(circles.shape) == 3:
+                    circles = circles[0]
+
+                # Sort by Y first (rows), then by X (columns within each row)
+                # This gives: Row 1: 1,2,3,4,5,6  Row 2: 7,8,9,10,11,12  Row 3: 13,14,15,16,17,18
+                sorted_circles = sorted(circles, key=lambda c: (c[1], c[0]))
+                sorted_circles = np.array(sorted_circles, dtype=np.uint16)
 
                 for idx, circle in enumerate(sorted_circles):
                     mask = np.zeros(gray_frame.shape, dtype=np.uint8)
