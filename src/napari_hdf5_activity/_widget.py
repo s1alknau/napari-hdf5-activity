@@ -2075,9 +2075,42 @@ class HDF5AnalysisWidget(QWidget):
                 if len(circles.shape) == 3:
                     circles = circles[0]
 
-                # Sort by Y first (rows), then by X (columns within each row)
-                # This gives: Row 1: 1,2,3,4,5,6  Row 2: 7,8,9,10,11,12  Row 3: 13,14,15,16,17,18
-                sorted_circles = sorted(circles, key=lambda c: (c[1], c[0]))
+                # Robust row-based sorting for multi-well plates
+                # Detect number of rows (assuming 18 wells = 3 rows × 6 cols)
+                num_circles = len(circles)
+                if num_circles == 18:
+                    expected_rows = 3
+                elif num_circles == 12:
+                    expected_rows = 3
+                elif num_circles == 24:
+                    expected_rows = 4
+                elif num_circles == 6:
+                    expected_rows = 2
+                else:
+                    expected_rows = int(np.sqrt(num_circles))
+
+                # Sort all circles by Y coordinate
+                y_sorted_indices = np.argsort(circles[:, 1])
+                y_sorted = circles[y_sorted_indices]
+
+                # Group into rows
+                circles_per_row = num_circles // expected_rows
+                sorted_circles = []
+
+                for row_idx in range(expected_rows):
+                    start_idx = row_idx * circles_per_row
+                    end_idx = start_idx + circles_per_row
+                    if row_idx == expected_rows - 1:
+                        end_idx = num_circles  # Include remaining circles in last row
+
+                    row_circles = y_sorted[start_idx:end_idx]
+
+                    # Sort this row by X coordinate (left to right)
+                    x_sorted_indices = np.argsort(row_circles[:, 0])
+                    row_sorted = row_circles[x_sorted_indices]
+
+                    sorted_circles.extend(row_sorted)
+
                 sorted_circles = np.array(sorted_circles, dtype=np.uint16)
 
                 for idx, circle in enumerate(sorted_circles):
