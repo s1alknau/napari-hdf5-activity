@@ -150,35 +150,18 @@ viewer = napari.Viewer()
 
 ### Example 2: Batch AVI Processing
 
-**Prepare metadata file** (`metadata.json`):
-```json
-{
-  "video_settings": {
-    "fps": 5.0,
-    "frame_interval": 5.0
-  },
-  "lighting_conditions": {
-    "white_led": {
-      "status": "scheduled",
-      "light_periods": [
-        {"start_hour": 7, "end_hour": 19, "description": "Day 1"}
-      ]
-    }
-  }
-}
-```
+**Through napari UI:**
+1. Click "Load File"
+2. Hold Ctrl/Cmd and select multiple AVI files
+3. Plugin loads all videos as temporal batch
+4. Detect ROIs on first frame
+5. Process Data → analyzes all frames
+6. Generate Plots and Export
 
-**Process videos:**
-```bash
-python process_avi_batch.py --dir /path/to/videos --interval 5.0
-```
-
-Or through napari UI:
-1. Load Directory → Select folder with AVIs
-2. Plugin loads all videos as temporal batch
-3. Detect ROIs on first frame
-4. Process Data → analyzes all frames
-5. Lighting conditions automatically shown from metadata
+**Or load from directory:**
+1. Click "Load Directory" → Select folder with AVIs
+2. All AVI files loaded as batch (sorted alphabetically)
+3. Continue with ROI detection and analysis
 
 ### Example 3: Calibration-Based Analysis
 
@@ -212,39 +195,7 @@ AVI videos are sampled at configurable intervals (default: 5 seconds):
 | 30 FPS    | 5s       | Every 150th    | 0.2 FPS       |
 | 5 FPS     | 5s       | Every 25th     | 0.2 FPS       |
 
-### Metadata Format
-
-Place `metadata.json` next to your AVI files:
-
-```json
-{
-  "video_settings": {
-    "fps": 5.0,
-    "frame_interval": 5.0,
-    "camera": "IR camera",
-    "illumination": "continuous IR, white LED for light phases"
-  },
-  "lighting_conditions": {
-    "ir_led": {
-      "status": "always_on",
-      "power_percent": 100
-    },
-    "white_led": {
-      "status": "scheduled",
-      "schedule_type": "custom",
-      "light_periods": [
-        {"start_hour": 7, "end_hour": 19, "description": "Day 1: 07:00-19:00"},
-        {"start_hour": 31, "end_hour": 43, "description": "Day 2: 07:00-19:00"}
-      ]
-    }
-  }
-}
-```
-
-**Generate metadata:**
-```bash
-python create_avi_metadata.py --output metadata.json --fps 5.0 --interval 5.0 --days 3
-```
+Frame interval is automatically calculated based on video FPS and target interval (default: 5s).
 
 ### Memory Efficiency
 
@@ -334,8 +285,8 @@ python create_avi_metadata.py --output metadata.json --fps 5.0 --interval 5.0 --
 
 **Solutions:**
 - Install opencv: `pip install opencv-python`
-- Check metadata.json is in same folder as AVI files
 - Verify AVI codec is supported (MJPEG, H264, etc.)
+- Check if file is corrupted
 
 ### Issue: "Structure detection failed" error
 
@@ -390,7 +341,7 @@ python create_avi_metadata.py --output metadata.json --fps 5.0 --interval 5.0 --
 - **Light Phase**: White LED power > 0.5%
 - **Dark Phase**: White LED power ≤ 0.5% (IR only)
 - **IR LED**: Continuous 100% for video recording
-- **Source**: HDF5 timeseries or AVI metadata
+- **Source**: HDF5 timeseries only (not available for AVI files)
 
 ## Citation
 
@@ -468,4 +419,4 @@ This plugin was developed for analyzing activity and sleep behavior in marine or
 
 **Author**: s1alknau
 **Repository**: https://github.com/s1alknau/napari-hdf5-activity
-**Documentation**: See [AVI_USAGE_GUIDE.md](AVI_USAGE_GUIDE.md) for detailed AVI workflow
+**AVI Documentation**: See [AVI_INTEGRATION_README.md](AVI_INTEGRATION_README.md) for AVI file support details

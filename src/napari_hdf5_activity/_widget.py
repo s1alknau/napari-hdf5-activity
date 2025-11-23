@@ -3954,31 +3954,18 @@ class HDF5AnalysisWidget(QWidget):
             return None
 
     def _extract_led_data_from_avi(self):
-        """Extract LED data from AVI metadata file.
+        """AVI files don't contain LED data.
+
+        LED data is only available in HDF5 files.
+        For AVIs, plots will not show lighting conditions.
 
         Returns:
-            dict or None: Dictionary with LED data or None
+            None (AVIs don't have LED data)
         """
-        try:
-            from ._avi_reader import AVIVideoReader
-
-            with AVIVideoReader(self.file_path) as reader:
-                led_data = reader.extract_led_data()
-
-                if led_data:
-                    self._log_message(
-                        f"Extracted LED data from AVI metadata: {len(led_data.get('times', []))} points"
-                    )
-                else:
-                    self._log_message(
-                        "No LED data in AVI metadata, will use legacy 12h cycles"
-                    )
-
-                return led_data
-
-        except Exception as e:
-            self._log_message(f"Could not extract LED data from AVI: {e}")
-            return None
+        self._log_message(
+            "AVI files don't contain LED data - lighting conditions will not be shown in plots"
+        )
+        return None
 
     def apply_time_range(self):
         """Apply time range and regenerate plot."""
