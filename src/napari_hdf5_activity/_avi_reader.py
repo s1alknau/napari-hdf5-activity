@@ -1,16 +1,12 @@
 """
 _avi_reader.py - AVI video file reader module
 
-This module handles reading AVI video files and associated metadata,
+This module handles reading AVI video files,
 making them compatible with the HDF5 analysis pipeline.
-
-Compatible with existing MATLAB workflow (ActivityExtractorPolyp_v20230105.m)
 """
 
 import numpy as np
-import json
 from typing import Dict, List, Tuple, Optional, Any
-from pathlib import Path
 
 try:
     import cv2
@@ -51,61 +47,14 @@ class AVIVideoReader:
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.duration = self.frame_count / self.fps if self.fps > 0 else 0
 
-        # Load metadata if available
-        self.metadata = self._load_metadata()
-
-    def _load_metadata(self) -> Dict[str, Any]:
-        """
-        Load metadata from JSON file next to AVI file.
-
-        Searches for:
-        - video_name.json
-        - video_name_metadata.json
-        - experiment_metadata.json (in parent directory)
-
-        Returns:
-            Dictionary with metadata
-        """
-        video_dir = Path(self.video_path).parent
-        video_name = Path(self.video_path).stem
-
-        # Try multiple metadata file locations
-        metadata_candidates = [
-            video_dir / f"{video_name}.json",
-            video_dir / f"{video_name}_metadata.json",
-            video_dir / "metadata.json",
-            video_dir / "experiment_metadata.json",
-        ]
-
-        for meta_path in metadata_candidates:
-            if meta_path.exists():
-                try:
-                    with open(meta_path, "r") as f:
-                        metadata = json.load(f)
-                    print(f"Loaded metadata from: {meta_path}")
-                    return metadata
-                except Exception as e:
-                    print(f"Error loading metadata from {meta_path}: {e}")
-
-        # No metadata found, return defaults
-        print(f"No metadata file found for {video_name}, using defaults")
-        return self._create_default_metadata()
-
-    def _create_default_metadata(self) -> Dict[str, Any]:
-        """Create default metadata based on video properties."""
-        return {
+        # Simple metadata from video properties
+        self.metadata = {
             "fps": self.fps,
             "frame_interval": 5.0,  # Default: 5 seconds between frames (like HDF5)
-            "sampling_rate": 1,  # Process every frame by default
             "resolution": {"width": self.width, "height": self.height},
             "duration": self.duration,
             "frame_count": self.frame_count,
             "source": "avi",
-            "led_schedule": {
-                "type": "legacy_12h",
-                "light_start_hour": 7,
-                "light_end_hour": 19,
-            },
         }
 
     def get_frame(self, frame_index: int) -> Optional[np.ndarray]:
@@ -163,76 +112,13 @@ class AVIVideoReader:
 
     def extract_led_data(self) -> Optional[Dict[str, List]]:
         """
-        Extract LED data from metadata.
+        AVI files don't contain LED data.
+        LED data is only available in HDF5 files.
 
         Returns:
-            Dictionary with 'times', 'white_powers', 'ir_powers' or None
+            None (AVIs don't have LED data)
         """
-        if "timeseries" in self.metadata:
-            timeseries = self.metadata["timeseries"]
-
-            result = {}
-            if "timestamps" in timeseries:
-                result["times"] = timeseries["timestamps"]
-            else:
-                # Generate timestamps based on fps
-                frame_interval = self.metadata.get("frame_interval", 1.0 / self.fps)
-                result["times"] = [i * frame_interval for i in range(self.frame_count)]
-
-            if "led_white_power_percent" in timeseries:
-                result["white_powers"] = timeseries["led_white_power_percent"]
-
-            if "led_ir_power_percent" in timeseries:
-                result["ir_powers"] = timeseries["led_ir_power_percent"]
-
-            if "white_powers" in result:
-                return result
-
-        # Check for LED schedule
-        if "led_schedule" in self.metadata:
-            schedule = self.metadata["led_schedule"]
-            if schedule.get("type") == "custom" and "light_periods" in schedule:
-                # Convert light periods to LED power timeseries
-                return self._convert_schedule_to_led_data(schedule["light_periods"])
-
         return None
-
-    def _convert_schedule_to_led_data(
-        self, light_periods: List[Dict]
-    ) -> Dict[str, List]:
-        """
-        Convert light schedule to LED power timeseries.
-
-        Args:
-            light_periods: List of dicts with 'start_hour' and 'end_hour'
-
-        Returns:
-            Dictionary with LED data
-        """
-        frame_interval = self.metadata.get("frame_interval", 1.0 / self.fps)
-        times = [i * frame_interval for i in range(self.frame_count)]
-        white_powers = []
-
-        for time_sec in times:
-            time_hours = time_sec / 3600.0
-            day_hour = time_hours % 24  # Hour within 24h day
-
-            # Check if time is in any light period
-            is_light = False
-            for period in light_periods:
-                start = period.get("start_hour", 7)
-                end = period.get("end_hour", 19)
-                if start <= day_hour < end:
-                    is_light = True
-                    break
-
-            white_powers.append(100.0 if is_light else 0.0)
-
-        return {
-            "times": times,
-            "white_powers": white_powers,
-            "ir_powers": [100.0] * len(times),  # IR always on
-        }
 
     def get_metadata_dict(self) -> Dict[str, Any]:
         """Get metadata dictionary compatible with HDF5 format."""
