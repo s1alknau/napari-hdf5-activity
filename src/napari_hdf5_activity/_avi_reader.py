@@ -5,10 +5,12 @@ This module handles reading AVI video files,
 making them compatible with the HDF5 analysis pipeline.
 """
 
+import json
 import os
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import cv2
@@ -176,6 +178,63 @@ def load_avi_with_metadata(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
         return frames, metadata
 
 
+def _load_single_video_for_batch(
+    video_idx: int,
+    video_path: str,
+    target_frame_interval: float,
+) -> Tuple[int, Optional[Dict], Optional[List], str]:
+    """
+    Load a single video for batch processing (used in parallel).
+
+    Args:
+        video_idx: Index of this video in the batch
+        video_path: Path to the video file
+        target_frame_interval: Target time interval between frames
+
+    Returns:
+        Tuple of (video_idx, metadata_dict, frames_list, error_message)
+        If error occurs, metadata and frames will be None and error_message will be set.
+    """
+    video_name = Path(video_path).name
+
+    try:
+        with AVIVideoReader(video_path) as reader:
+            video_fps = reader.fps
+            frames_per_sample = max(1, int(video_fps * target_frame_interval))
+
+            # Sample frames at target interval
+            video_frames = []
+            for frame_idx in range(0, reader.frame_count, frames_per_sample):
+                frame = reader.get_frame(frame_idx)
+                if frame is not None:
+                    video_frames.append((frame_idx, frame))
+
+            if not video_frames:
+                return (
+                    video_idx,
+                    None,
+                    None,
+                    f"No frames could be read from {video_name}",
+                )
+
+            # Return metadata needed for timestamp calculation
+            metadata = {
+                "path": video_path,
+                "name": video_name,
+                "index": video_idx,
+                "fps": video_fps,
+                "frame_count": reader.frame_count,
+                "duration": reader.duration,
+                "sampled_frames": len(video_frames),
+                "frames_per_sample": frames_per_sample,
+            }
+
+            return video_idx, metadata, video_frames, ""
+
+    except Exception as e:
+        return video_idx, None, None, f"Error loading {video_name}: {str(e)}"
+
+
 def load_avi_batch_timeseries(
     video_paths: List[str],
     target_frame_interval: float = 5.0,
@@ -212,69 +271,136 @@ def load_avi_batch_timeseries(
         "source_type": "avi_batch",
     }
 
-    current_time_offset = 0.0
     total_videos = len(video_paths)
 
-    for video_idx, video_path in enumerate(video_paths):
-        video_name = Path(video_path).name
-        print(f"Processing video {video_idx + 1}/{total_videos}: {video_name}")
+    # Determine number of parallel workers
+    num_workers = min(6, os.cpu_count() or 4)
+    print(f"\nLoading {total_videos} videos using {num_workers} parallel workers...")
 
-        # Update progress
+    # Phase 1: Load all videos in parallel
+    results = {}
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all video loading tasks
+        futures = {
+            executor.submit(
+                _load_single_video_for_batch, idx, path, target_frame_interval
+            ): idx
+            for idx, path in enumerate(video_paths)
+        }
+
+        # Collect results as they complete (in any order)
+        completed_count = 0
+        for future in as_completed(futures):
+            video_idx = futures[future]
+            video_idx_result, metadata, frames_with_idx, error_msg = future.result(
+                timeout=120
+            )
+
+            completed_count += 1
+
+            # Update progress during loading phase
+            if progress_callback:
+                percent = (completed_count / total_videos) * 50  # Loading is first 50%
+                video_name = (
+                    Path(video_paths[video_idx]).name
+                    if video_idx < len(video_paths)
+                    else f"video {video_idx}"
+                )
+                progress_callback(
+                    percent, f"Loaded {completed_count}/{total_videos} videos"
+                )
+
+            # Store result (even if error, to maintain order)
+            results[video_idx_result] = (metadata, frames_with_idx, error_msg)
+
+            # Log completion
+            if error_msg:
+                print(f"  ✗ Video {video_idx_result + 1}/{total_videos}: {error_msg}")
+            else:
+                video_name = metadata["name"]
+                print(
+                    f"  ✓ Video {video_idx_result + 1}/{total_videos}: {video_name} ({metadata['sampled_frames']} frames)"
+                )
+
+    print("\nAll videos loaded. Processing results in order...\n")
+
+    # Phase 2: Process results in correct temporal order
+    current_time_offset = 0.0
+
+    for video_idx in sorted(results.keys()):
+        metadata, frames_with_idx, error_msg = results[video_idx]
+
+        # Update progress during processing phase
         if progress_callback:
-            percent = (video_idx / total_videos) * 100
-            progress_callback(percent, f"Loading video {video_idx + 1}/{total_videos}: {video_name}")
+            percent = 50 + (video_idx / total_videos) * 50  # Processing is second 50%
+            progress_callback(
+                percent, f"Processing video {video_idx + 1}/{total_videos}"
+            )
 
-        with AVIVideoReader(video_path) as reader:
-            # Calculate how many frames to skip to achieve target interval
-            video_fps = reader.fps
-            frames_per_sample = max(1, int(video_fps * target_frame_interval))
+        # Check for errors - STOP at first error
+        if error_msg:
+            print(f"ERROR at video {video_idx + 1}: {error_msg}")
+            print(
+                f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
+            )
+            break
 
-            print(f"  Video FPS: {video_fps}")
-            print(f"  Target interval: {target_frame_interval}s")
-            print(f"  Sampling every {frames_per_sample} frames")
+        if metadata is None or frames_with_idx is None:
+            print(f"ERROR at video {video_idx + 1}: Missing data")
+            print(
+                f"STOPPING: Processing only videos up to this point ({video_idx} videos)"
+            )
+            break
 
-            # Sample frames at target interval
-            video_frames = []
-            video_timestamps = []
+        # Extract metadata
+        video_path = metadata["path"]
+        video_name = metadata["name"]
+        video_fps = metadata["fps"]
+        video_duration = metadata["duration"]
+        frames_per_sample = metadata["frames_per_sample"]
 
-            for frame_idx in range(0, reader.frame_count, frames_per_sample):
-                frame = reader.get_frame(frame_idx)
-                if frame is not None:
-                    video_frames.append(frame)
+        print(f"Processing video {video_idx + 1}/{total_videos}: {video_name}")
+        print(f"  Video FPS: {video_fps}")
+        print(f"  Target interval: {target_frame_interval}s")
+        print(f"  Sampling every {frames_per_sample} frames")
 
-                    # Calculate actual timestamp
-                    frame_time = (frame_idx / video_fps) + current_time_offset
-                    video_timestamps.append(frame_time)
+        # Calculate timestamps for this video's frames
+        video_frames = []
+        video_timestamps = []
 
-            if video_frames:
-                all_frames.extend(video_frames)
-                all_timestamps.extend(video_timestamps)
+        for frame_idx, frame in frames_with_idx:
+            video_frames.append(frame)
 
-                # Update time offset for next video
-                video_duration = reader.duration
-                current_time_offset += video_duration
+            # Calculate actual timestamp with correct offset
+            frame_time = (frame_idx / video_fps) + current_time_offset
+            video_timestamps.append(frame_time)
 
-                # Store video metadata
-                combined_metadata["videos"].append(
-                    {
-                        "path": video_path,
-                        "index": video_idx,
-                        "fps": video_fps,
-                        "frame_count": reader.frame_count,
-                        "duration": video_duration,
-                        "sampled_frames": len(video_frames),
-                        "time_start": video_timestamps[0] if video_timestamps else 0,
-                        "time_end": video_timestamps[-1] if video_timestamps else 0,
-                        "frames_per_sample": frames_per_sample,
-                    }
-                )
+        # Add to combined results
+        all_frames.extend(video_frames)
+        all_timestamps.extend(video_timestamps)
 
-                print(
-                    f"  Sampled {len(video_frames)} frames from {reader.frame_count} total"
-                )
-                print(
-                    f"  Time range: {video_timestamps[0]:.1f}s - {video_timestamps[-1]:.1f}s"
-                )
+        # Update time offset for next video
+        current_time_offset += video_duration
+
+        # Store video metadata
+        combined_metadata["videos"].append(
+            {
+                "path": video_path,
+                "index": video_idx,
+                "fps": video_fps,
+                "frame_count": metadata["frame_count"],
+                "duration": video_duration,
+                "sampled_frames": len(video_frames),
+                "time_start": video_timestamps[0] if video_timestamps else 0,
+                "time_end": video_timestamps[-1] if video_timestamps else 0,
+                "frames_per_sample": frames_per_sample,
+            }
+        )
+
+        print(
+            f"  Sampled {len(video_frames)} frames from {metadata['frame_count']} total"
+        )
+        print(f"  Time range: {video_timestamps[0]:.1f}s - {video_timestamps[-1]:.1f}s")
 
     if not all_frames:
         raise ValueError("No frames could be loaded from any video")
