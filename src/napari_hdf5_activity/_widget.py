@@ -1610,62 +1610,37 @@ class HDF5AnalysisWidget(QWidget):
         progress_callback,
         frame_interval: float,
     ):
-        """Process AVI batch by loading all frames and analyzing them."""
+        """Process AVI batch with streaming analysis - no need to load all frames."""
         import time
-        from ._avi_reader import load_avi_batch_timeseries
-        from ._reader import process_chunk
+        from ._avi_reader import process_avi_batch_streaming
 
         start_time = time.time()
 
-        # Load all frames from batch
-        self._log_message(f"Loading {len(video_paths)} AVI files for analysis...")
-        frames, metadata = load_avi_batch_timeseries(
-            video_paths, frame_interval, progress_callback
+        # Stream process all videos - loads and analyzes chunk by chunk
+        self._log_message(
+            f"Starting streaming analysis of {len(video_paths)} AVI files..."
         )
+        self._log_message("Using memory-efficient streaming: load → analyze → discard")
 
-        total_frames = len(frames)
-        self._log_message(f"Loaded {total_frames} frames, starting analysis...")
-
-        # Process frames in chunks (similar to HDF5 processing)
-        roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
-
-        # Remove channel dimension if present
-        if frames.shape[-1] == 1:
-            frames = frames[:, :, :, 0]
-
-        total_chunks = (total_frames + chunk_size - 1) // chunk_size
-
-        for chunk_idx in range(total_chunks):
-            if self._cancel_requested:
-                raise RuntimeError("Analysis canceled")
-
-            start_idx = chunk_idx * chunk_size
-            end_idx = min(start_idx + chunk_size, total_frames)
-            chunk = frames[start_idx:end_idx]
-
-            # Process chunk
-            chunk_results = process_chunk(
-                chunk, masks, start_idx * frame_interval, frame_interval
-            )
-
-            # Merge results
-            for roi_idx in chunk_results:
-                roi_changes[roi_idx].extend(chunk_results[roi_idx])
-
-            # Update progress
-            if progress_callback:
-                percent = ((chunk_idx + 1) / total_chunks) * 100
-                msg = f"Processing AVI chunk {chunk_idx + 1}/{total_chunks}"
-                progress_callback(percent, msg)
-
-        # Sort results by time
-        for roi_idx in roi_changes:
-            roi_changes[roi_idx].sort(key=lambda x: x[0])
+        roi_changes, metadata = process_avi_batch_streaming(
+            video_paths,
+            masks,
+            target_frame_interval=frame_interval,
+            chunk_size=chunk_size,
+            progress_callback=progress_callback,
+        )
 
         total_duration = metadata["total_duration"]
         proc_time = time.time() - start_time
 
-        self._log_message(f"AVI batch processing complete in {proc_time:.2f}s")
+        self._log_message(
+            f"✓ AVI batch streaming analysis complete in {proc_time:.2f}s"
+        )
+        self._log_message(f"  Total frames analyzed: {metadata['total_frames']}")
+        self._log_message(
+            f"  Total duration: {total_duration:.1f}s ({total_duration/60:.1f}min)"
+        )
+        self._log_message(f"  ROIs tracked: {len(roi_changes)}")
 
         return video_paths[0], roi_changes, total_duration
 
@@ -1693,7 +1668,9 @@ class HDF5AnalysisWidget(QWidget):
 
             # For memory efficiency: Only open first video to get basic info
             # Full metadata will be calculated during analysis
-            self._log_message("Getting metadata from first video only (memory efficient)...")
+            self._log_message(
+                "Getting metadata from first video only (memory efficient)..."
+            )
 
             batch_metadata = {
                 "videos": [],
