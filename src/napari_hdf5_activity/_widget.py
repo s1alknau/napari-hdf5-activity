@@ -1689,41 +1689,16 @@ class HDF5AnalysisWidget(QWidget):
             self.avi_batch_paths = file_paths
             self.avi_batch_interval = target_interval
 
-            # Calculate total metadata without loading all frames
-            total_duration = 0.0
-            total_frames_estimate = 0
+            # For memory efficiency: Only open first video to get basic info
+            # Full metadata will be calculated during analysis
+            self._log_message("Getting metadata from first video only (memory efficient)...")
+
             batch_metadata = {
                 "videos": [],
                 "source_type": "avi_batch",
                 "target_frame_interval": target_interval,
+                "video_count": len(file_paths),
             }
-
-            for video_idx, video_path in enumerate(file_paths):
-                with AVIVideoReader(video_path) as reader:
-                    video_fps = reader.fps
-                    frames_per_sample = max(1, int(video_fps * target_interval))
-                    sampled_frames = len(
-                        range(0, reader.frame_count, frames_per_sample)
-                    )
-
-                    batch_metadata["videos"].append(
-                        {
-                            "path": video_path,
-                            "index": video_idx,
-                            "fps": video_fps,
-                            "frame_count": reader.frame_count,
-                            "duration": reader.duration,
-                            "sampled_frames": sampled_frames,
-                            "frames_per_sample": frames_per_sample,
-                        }
-                    )
-
-                    total_duration += reader.duration
-                    total_frames_estimate += sampled_frames
-
-            batch_metadata["total_duration"] = total_duration
-            batch_metadata["total_frames_estimate"] = total_frames_estimate
-            batch_metadata["effective_fps"] = 1.0 / target_interval
 
             # Load ONLY first frame from first video for ROI detection
             self._log_message(f"Opening first video: {file_paths[0]}")
@@ -1732,6 +1707,15 @@ class HDF5AnalysisWidget(QWidget):
                 first_frame = reader.get_frame(0)
                 if first_frame is None:
                     raise ValueError("Could not load first frame from first video")
+
+                # Get basic info from first video only
+                video_fps = reader.fps
+                frames_per_sample = max(1, int(video_fps * target_interval))
+
+                # Store metadata for first video
+                batch_metadata["first_video_fps"] = video_fps
+                batch_metadata["frames_per_sample"] = frames_per_sample
+                batch_metadata["effective_fps"] = 1.0 / target_interval
 
                 # Log frame info for debugging
                 self._log_message(f"First frame loaded successfully")
@@ -1768,18 +1752,18 @@ class HDF5AnalysisWidget(QWidget):
             # Store file path (use first file as reference)
             self.file_path = file_paths[0]
 
-            # Update UI
-            total_duration_min = total_duration / 60.0
+            # Update UI - simplified message (full metadata calculated during analysis)
             self.lbl_file_info.setText(
                 f"Loaded {len(file_paths)} AVI files as batch "
-                f"({total_frames_estimate} frames estimated, {total_duration_min:.1f} min) - First frame only"
+                f"(~{batch_metadata['effective_fps']:.2f} FPS effective) - First frame only"
             )
 
             self._log_message("Loaded first frame for ROI detection")
-            self._log_message(f"Total frames (estimated): {total_frames_estimate}")
-            self._log_message(f"Total duration: {total_duration_min:.1f} minutes")
+            self._log_message(f"Batch contains {len(file_paths)} video files")
             self._log_message(f"Effective FPS: {batch_metadata['effective_fps']:.2f}")
-            self._log_message("Note: Full frames will be loaded during processing")
+            self._log_message(f"Frame interval: {target_interval}s")
+            self._log_message("Note: Full metadata will be calculated during analysis")
+            self._log_message("Note: All frames will be loaded during processing")
 
             # Clear any existing ROI detection
             self.masks = []
