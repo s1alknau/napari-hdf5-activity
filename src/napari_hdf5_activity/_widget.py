@@ -1610,11 +1610,10 @@ class HDF5AnalysisWidget(QWidget):
         progress_callback,
         frame_interval: float,
     ):
-        """Process AVI batch by loading all frames and analyzing them with parallel processing."""
+        """Process AVI batch by loading all frames and analyzing them."""
         import time
         from ._avi_reader import load_avi_batch_timeseries
-        from ._reader import process_chunk_parallel
-        from multiprocessing import Pool, cpu_count
+        from ._reader import process_chunk
 
         start_time = time.time()
 
@@ -1625,50 +1624,39 @@ class HDF5AnalysisWidget(QWidget):
         )
 
         total_frames = len(frames)
-        self._log_message(f"Loaded {total_frames} frames, starting parallel analysis...")
+        self._log_message(f"Loaded {total_frames} frames, starting analysis...")
+
+        # Process frames in chunks (similar to HDF5 processing)
+        roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
         # Remove channel dimension if present
         if frames.shape[-1] == 1:
             frames = frames[:, :, :, 0]
 
-        # Get number of processes from UI or use CPU count
-        num_processes = getattr(self, 'num_processes', None)
-        if num_processes and hasattr(num_processes, 'value'):
-            num_processes = num_processes.value()
-        else:
-            num_processes = min(4, cpu_count())
-
-        self._log_message(f"Using {num_processes} parallel processes for analysis")
-
-        # Process frames in parallel chunks
         total_chunks = (total_frames + chunk_size - 1) // chunk_size
-        roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
-        # Prepare chunk arguments for parallel processing
-        chunk_args = []
         for chunk_idx in range(total_chunks):
+            if self._cancel_requested:
+                raise RuntimeError("Analysis canceled")
+
             start_idx = chunk_idx * chunk_size
             end_idx = min(start_idx + chunk_size, total_frames)
             chunk = frames[start_idx:end_idx]
-            chunk_args.append((chunk, masks, start_idx * frame_interval, frame_interval))
 
-        # Process chunks in parallel
-        with Pool(processes=num_processes) as pool:
-            results = []
-            for chunk_idx, chunk_result in enumerate(pool.starmap(process_chunk_parallel, chunk_args)):
-                if self._cancel_requested:
-                    pool.terminate()
-                    raise RuntimeError("Analysis canceled")
+            # Process chunk
+            chunk_results = process_chunk(
+                chunk, masks, start_idx * frame_interval, frame_interval
+            )
 
-                # Merge results
-                for roi_idx in chunk_result:
-                    roi_changes[roi_idx].extend(chunk_result[roi_idx])
+            # Merge results
+            for roi_idx in chunk_results:
+                roi_changes[roi_idx].extend(chunk_results[roi_idx])
 
-                # Update progress
-                if progress_callback:
-                    percent = ((chunk_idx + 1) / total_chunks) * 100
-                    msg = f"Processing AVI chunk {chunk_idx + 1}/{total_chunks} (parallel)"
-                    progress_callback(percent, msg)
+            # Update progress
+            if progress_callback:
+                percent = ((chunk_idx + 1) / total_chunks) * 100
+                msg = f"Processing AVI chunk {chunk_idx + 1}/{total_chunks}"
+                progress_callback(percent, msg)
 
         # Sort results by time
         for roi_idx in roi_changes:
@@ -1677,7 +1665,7 @@ class HDF5AnalysisWidget(QWidget):
         total_duration = metadata["total_duration"]
         proc_time = time.time() - start_time
 
-        self._log_message(f"AVI batch processing complete in {proc_time:.2f}s using {num_processes} cores")
+        self._log_message(f"AVI batch processing complete in {proc_time:.2f}s")
 
         return video_paths[0], roi_changes, total_duration
 
