@@ -10,14 +10,20 @@ import time
 import csv
 import pandas as pd
 import psutil
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import ticker
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.colors as mcolors
 
 from napari.qt.threading import thread_worker
-from qtpy.QtCore import QTimer, Signal
+from napari.utils.colormaps import DirectLabelColormap
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -26,6 +32,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -33,6 +40,8 @@ from qtpy.QtWidgets import (
     QWidget,
     QTextEdit,
     QCheckBox,
+    QSizePolicy,
+    QScrollArea,
 )
 
 try:
@@ -49,7 +58,6 @@ try:
         merge_results,
         process_hdf5_files,
         sort_circles_left_to_right,
-        sort_circles_meandering_auto,  # New function
     )
 
     DUAL_STRUCTURE_AVAILABLE = True
@@ -60,19 +68,27 @@ except ImportError as e:
     from ._reader import (
         napari_get_reader,
         get_first_frame,
-        sort_circles_meandering_auto,  # Should be available if left_to_right is
+        get_roi_colors,
+        merge_results,
+        process_hdf5_files,
+        sort_circles_left_to_right,
     )
+
 try:
     from ._metadata import (
+        extract_hdf5_metadata,
         extract_hdf5_metadata_timeseries,
         create_hdf5_metadata_timeseries_dataframe,
+        create_metadata_dataframe,
         write_metadata_to_csv,
         filter_hdf5_metadata_only,
+        create_individual_timeseries_sheets,
+        create_combined_timeseries_sheet,
     )
 
-    METADATA_AVAILABLE = True
+    metadata_functions_available = True
 
-    # Try to import Nematostella functions separately
+    # Versuche Nematostella-Funktionen separat zu importieren
     try:
         from ._metadata import (
             analyze_nematostella_hdf5_file,
@@ -84,8 +100,8 @@ try:
         nematostella_analysis_available = False
 
 except ImportError as e:
-    print(f"Warning: Metadata functions not available: {e}")
-    METADATA_AVAILABLE = False
+    print(f"Warning: Could not import enhanced metadata functions: {e}")
+    metadata_functions_available = False
     nematostella_analysis_available = False
 
 
@@ -234,6 +250,11 @@ class HDF5AnalysisWidget(QWidget):
     Handles only UI interactions and file operations.
     """
 
+    FULL_HD_WIDTH = 1920
+    FULL_HD_HEIGHT = 1080
+    OPTIMAL_WIDGET_WIDTH = 420  # ~22% der Bildschirmbreite
+    OPTIMAL_WIDGET_HEIGHT = 950  # ~88% der Bildschirmhöhe
+
     # Qt Signals
     progress_updated = Signal(int)
     status_updated = Signal(str)
@@ -243,14 +264,50 @@ class HDF5AnalysisWidget(QWidget):
         super().__init__()
         self.viewer = napari_viewer
 
-        # Initialize all attributes first
+        # Rest der Initialisierung...
         self._initialize_attributes()
-
-        # Setup UI after all attributes are initialized
-        self.setup_ui()
+        self.setup_fullhd_optimized_ui()
 
         # Connect signals
         self._connect_signals()
+
+        # Apply Full HD sizing
+        self._apply_fullhd_sizing()
+
+    def _apply_fullhd_sizing(self):
+        """Apply dynamic sizing based on available space."""
+        # Ermittle verfügbare Bildschirmhöhe
+        screen = QApplication.primaryScreen()
+        available_geometry = screen.availableGeometry()
+        available_height = available_geometry.height()
+
+        # Dynamische Berechnung - lasse 100px für Napari Interface
+        max_widget_height = available_height - 100
+
+        # Setze Größen dynamisch
+        self.setFixedWidth(self.OPTIMAL_WIDGET_WIDTH)
+        self.setMinimumHeight(min(800, max_widget_height))
+        self.setMaximumHeight(max_widget_height)
+
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+    def setup_fullhd_optimized_ui(self):
+        """Setup UI optimized for Full HD displays."""
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(4)
+        self.setLayout(main_layout)
+
+        # Create tab widget with Full HD optimized tabs
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabPosition(QTabWidget.North)
+
+        # Setup tabs with Full HD layouts - CALL ONCE HERE
+        self.setup_input_tab_fullhd()
+        self.setup_analysis_tab_fullhd()
+        self.setup_results_tab_fullhd()  # You need to create this
+
+        main_layout.addWidget(self.tab_widget)
 
     def _initialize_attributes(self):
         """Initialize all class attributes."""
@@ -353,7 +410,7 @@ class HDF5AnalysisWidget(QWidget):
                 if sample_data:
                     main_duration = (sample_data[-1][0] - sample_data[0][0]) / 60
                     self._log_message(
-                        "Main dataset stored successfully (PROCESSED DATA):"
+                        f"Main dataset stored successfully (PROCESSED DATA):"
                     )
                     self._log_message(
                         f"   Path: {os.path.basename(self.main_dataset_path)}"
@@ -382,7 +439,7 @@ class HDF5AnalysisWidget(QWidget):
                 self.main_labeled_frame = getattr(self, "labeled_frame", None)
                 self.main_dataset_stored = True
 
-                self._log_message("Main dataset file stored (NOT YET PROCESSED):")
+                self._log_message(f"Main dataset file stored (NOT YET PROCESSED):")
                 self._log_message(
                     f"   Path: {os.path.basename(self.main_dataset_path)}"
                 )
@@ -426,7 +483,7 @@ class HDF5AnalysisWidget(QWidget):
                 sample_data = self.merged_results[sample_roi]
                 restored_duration = (sample_data[-1][0] - sample_data[0][0]) / 60
 
-                self._log_message("Main dataset restored (PROCESSED DATA):")
+                self._log_message(f"Main dataset restored (PROCESSED DATA):")
                 self._log_message(f"   Path: {os.path.basename(self.file_path)}")
                 self._log_message(f"   ROIs: {len(self.merged_results)}")
                 self._log_message(f"   Duration: {restored_duration:.1f} minutes")
@@ -434,7 +491,7 @@ class HDF5AnalysisWidget(QWidget):
             # Case 2: We only have file path, need to ensure data gets loaded
             else:
                 self._log_message(
-                    "Main dataset file restored (WILL PROCESS DURING ANALYSIS):"
+                    f"Main dataset file restored (WILL PROCESS DURING ANALYSIS):"
                 )
                 self._log_message(f"   Path: {os.path.basename(self.file_path)}")
                 self._log_message("   Data will be loaded/processed during analysis")
@@ -465,48 +522,36 @@ class HDF5AnalysisWidget(QWidget):
             self._log_message(f"Traceback: {traceback.format_exc()}")
             return False
 
-    def setup_ui(self):
-        """Setup the user interface with all tabs."""
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Create tab widget
-        self.tab_widget = QTabWidget()
-        self.tab_input = QWidget()
-        self.tab_analysis = QWidget()
-        self.tab_results = QWidget()
-
-        self.tab_widget.addTab(self.tab_input, "Input")
-        self.tab_widget.addTab(self.tab_analysis, "Analysis")
-        self.tab_widget.addTab(self.tab_results, "Results")
-
-        layout.addWidget(self.tab_widget)
-
-        # Setup individual tabs
-        self.setup_input_tab()
-        self.setup_analysis_tab()
-        self.setup_results_tab()
-
-    def setup_input_tab(self):
+    def setup_input_tab_fullhd(self):
         """Setup the input tab with file loading and ROI detection parameters."""
+
+        # Create the tab widget FIRST
+        self.tab_input = QWidget()
+
+        # Create the main layout for this tab
         layout = QVBoxLayout()
-        self.tab_input.setLayout(layout)
+        self.tab_input.setLayout(layout)  # Set the layout ON the widget
+
+        # Add tab to tab widget
+        self.tab_widget.addTab(self.tab_input, "Input")
 
         # File loading section
         file_group = QGroupBox("Load Data")
         file_layout = QVBoxLayout()
         file_group.setLayout(file_layout)
+
         # Debug-Button hinzufügen
         self.btn_debug_structure = QPushButton("Debug HDF5 Structure")
         self.btn_debug_structure.setToolTip("Analyze HDF5 file structure")
         self.btn_debug_structure.clicked.connect(self.debug_current_file_structure)
         file_layout.addWidget(self.btn_debug_structure)
+
         # File loading buttons
-        self.btn_load_file = QPushButton("Load File")
-        self.btn_load_file.setToolTip("Load HDF5 file or AVI video(s) for analysis")
+        self.btn_load_file = QPushButton("Load HDF5 File")
+        self.btn_load_file.setToolTip("Load a single HDF5 file for analysis")
 
         self.btn_load_dir = QPushButton("Load Directory")
-        self.btn_load_dir.setToolTip("Load all HDF5/AVI files from a directory")
+        self.btn_load_dir.setToolTip("Load all HDF5 files from a directory")
 
         self.btn_detect_rois = QPushButton("Detect ROIs")
         self.btn_detect_rois.setToolTip(
@@ -523,6 +568,8 @@ class HDF5AnalysisWidget(QWidget):
 
         self.lbl_file_info = QLabel("No file loaded")
         file_layout.addWidget(self.lbl_file_info)
+
+        # Add the file group to the main layout
         layout.addWidget(file_group)
 
         # ROI Detection Parameters
@@ -595,348 +642,289 @@ class HDF5AnalysisWidget(QWidget):
         layout.addWidget(roi_management_group)
         layout.addStretch()
 
-    def setup_analysis_tab(self):
-        """Setup the analysis tab with threshold calculation methods."""
+    def _create_compact_basic_params(self):
+        """Create compact basic parameters for Full HD."""
+        group = QGroupBox("Basic Analysis Parameters")
         layout = QVBoxLayout()
-        self.tab_analysis.setLayout(layout)
+        layout.setSpacing(4)
 
-        # Basic Analysis Parameters
-        analysis_group = QGroupBox("Basic Analysis Parameters")
-        analysis_layout = QFormLayout()
-        analysis_group.setLayout(analysis_layout)
-
+        # Row 1: Frame Interval and End Time
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Frame Interval (s):"))
         self.frame_interval = QDoubleSpinBox()
         self.frame_interval.setRange(0.01, 60.0)
         self.frame_interval.setValue(5.0)
-        self.frame_interval.setSingleStep(0.1)
+        self.frame_interval.setFixedWidth(80)
         self.frame_interval.setToolTip("Time interval between frames in seconds")
-        analysis_layout.addRow("Frame Interval (s):", self.frame_interval)
+        row1.addWidget(self.frame_interval)
 
+        row1.addWidget(QLabel("End Time (s):"))
         self.time_end = QSpinBox()
         self.time_end.setRange(0, 1000000)
         self.time_end.setValue(0)
+        self.time_end.setFixedWidth(100)
         self.time_end.setToolTip("End time for analysis (0 = use full duration)")
-        analysis_layout.addRow("End Time (s):", self.time_end)
+        row1.addWidget(self.time_end)
+        row1.addStretch()
 
+        # Row 2: Chunk Size and Processes
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Chunk Size:"))
         self.chunk_size = QSpinBox()
         self.chunk_size.setRange(1, 10000)
         self.chunk_size.setValue(20)
+        self.chunk_size.setFixedWidth(80)
         self.chunk_size.setToolTip("Number of frames to process in each chunk")
-        analysis_layout.addRow("Chunk Size:", self.chunk_size)
+        row2.addWidget(self.chunk_size)
 
+        row2.addWidget(QLabel("Processes:"))
         self.num_processes = QSpinBox()
         self.num_processes.setRange(1, self.cpu_count)
         self.num_processes.setValue(self.optimal_processes)
+        self.num_processes.setFixedWidth(60)
         self.num_processes.setToolTip(
             f"Number of parallel processes (recommended: {self.optimal_processes})"
         )
-        analysis_layout.addRow("Number of Processes:", self.num_processes)
+        row2.addWidget(self.num_processes)
+        row2.addStretch()
 
-        layout.addWidget(analysis_group)
+        layout.addLayout(row1)
+        layout.addLayout(row2)
+        group.setLayout(layout)
+        return group
 
-        # Threshold Calculation Methods
-        threshold_group = QGroupBox("Threshold Calculation Method")
-        threshold_layout = QVBoxLayout()
-        threshold_group.setLayout(threshold_layout)
+    def _create_optimized_threshold_section(self):
+        """Create optimized threshold section for Full HD."""
+        group = QGroupBox("Threshold Calculation Method")
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
 
-        # Method-specific parameters (Tabs control the method selection)
+        # Method selection row
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method:"))
+        self.threshold_method = QComboBox()
+        self.threshold_method.addItems(
+            [
+                "Baseline (First Frames)",
+                "Calibration (Sedated Animals)",
+                "Adaptive (Smart Detection)",
+            ]
+        )
+        self.threshold_method.setCurrentText("Baseline (First Frames)")
+        self.threshold_method.setFixedWidth(200)
+        method_row.addWidget(self.threshold_method)
+        method_row.addStretch()
+        layout.addLayout(method_row)
+
+        # Method-specific parameters (compact tabs)
         self.threshold_params_stack = QTabWidget()
-        threshold_layout.addWidget(self.threshold_params_stack)
+        self.threshold_params_stack.setMaximumHeight(180)
 
-        # === METHOD 1: BASELINE ===
+        # Baseline tab (kompakt)
         baseline_tab = QWidget()
-        baseline_layout = QFormLayout()
-        baseline_tab.setLayout(baseline_layout)
+        baseline_layout = QVBoxLayout()
+        baseline_layout.setSpacing(4)
 
+        baseline_row1 = QHBoxLayout()
+        baseline_row1.addWidget(QLabel("Duration (min):"))
         self.baseline_duration_minutes = QDoubleSpinBox()
-        self.baseline_duration_minutes.setRange(1.0, 10000000000.0)
+        self.baseline_duration_minutes.setRange(1.0, 10000.0)
         self.baseline_duration_minutes.setValue(200.0)
-        self.baseline_duration_minutes.setSingleStep(1.0)
-        self.baseline_duration_minutes.setDecimals(1)
-        self.baseline_duration_minutes.setToolTip(
-            "Duration of baseline period in minutes"
-        )
-        baseline_layout.addRow(
-            "Baseline Duration (min):", self.baseline_duration_minutes
-        )
+        self.baseline_duration_minutes.setFixedWidth(80)
+        baseline_row1.addWidget(self.baseline_duration_minutes)
 
+        baseline_row1.addWidget(QLabel("Multiplier:"))
         self.threshold_multiplier = QDoubleSpinBox()
         self.threshold_multiplier.setRange(0.0, 5.0)
         self.threshold_multiplier.setValue(0.1)
-        self.threshold_multiplier.setSingleStep(0.1)
-        self.threshold_multiplier.setToolTip(
-            "Multiplier for hysteresis band (mean ± multiplier × std)"
-        )
-        baseline_layout.addRow("Threshold Multiplier:", self.threshold_multiplier)
+        self.threshold_multiplier.setFixedWidth(60)
+        baseline_row1.addWidget(self.threshold_multiplier)
+        baseline_row1.addStretch()
 
-        # Add detrending option
-        self.enable_detrending = QCheckBox("Enable Detrending")
-        self.enable_detrending.setChecked(False)
-        self.enable_detrending.setToolTip(
-            "Remove linear drift from baseline period for more accurate thresholds"
-        )
-        baseline_layout.addRow("", self.enable_detrending)
+        baseline_row2 = QHBoxLayout()
+        self.enable_detrending = QCheckBox("Detrending")
+        self.enable_jump_correction = QCheckBox("Jump Correction")
+        baseline_row2.addWidget(self.enable_detrending)
+        baseline_row2.addWidget(self.enable_jump_correction)
+        baseline_row2.addStretch()
 
-        # Add jump correction option
-        self.enable_jump_correction = QCheckBox("Enable Jump Correction")
-        self.enable_jump_correction.setChecked(False)
-        self.enable_jump_correction.setToolTip(
-            "Detect and correct sudden jumps/plateaus in baseline data"
-        )
-        baseline_layout.addRow("", self.enable_jump_correction)
+        baseline_layout.addLayout(baseline_row1)
+        baseline_layout.addLayout(baseline_row2)
+        baseline_tab.setLayout(baseline_layout)
 
-        baseline_info = QLabel(
-            "HYSTERESIS METHOD:\n"
-            "Uses hysteresis band to prevent flicker.\n"
-            "Signal > Upper → Movement = TRUE\n"
-            "Signal < Lower → Movement = FALSE\n"
-            "Signal between → State unchanged"
-        )
-        baseline_info.setStyleSheet("color: #666; font-size: 10px;")
-        baseline_info.setWordWrap(True)
-        baseline_layout.addRow("", baseline_info)
-
-        self.threshold_params_stack.addTab(baseline_tab, "Baseline Method")
-
-        # === METHOD 2: CALIBRATION ===
+        # Calibration tab (kompakt) - vereinfacht
         calibration_tab = QWidget()
-        calibration_layout = QFormLayout()
-        calibration_tab.setLayout(calibration_layout)
+        cal_layout = QVBoxLayout()
 
-        # Calibration file selection (existing code)
-        cal_file_layout = QHBoxLayout()
+        cal_file_row = QHBoxLayout()
         self.calibration_file_path = QLabel("No calibration file selected")
         self.calibration_file_path.setStyleSheet(
-            """
-            QLabel {
-                border: 1px solid #ccc;
-                padding: 4px;
-                background: #f9f9f9;
-                color: #000000;  /* Force black text */
-            }
-        """
+            "QLabel { border: 1px solid #ccc; padding: 2px; }"
         )
         self.btn_load_calibration = QPushButton("Browse...")
-        cal_file_layout.addWidget(self.calibration_file_path, 3)
-        cal_file_layout.addWidget(self.btn_load_calibration, 1)
-        calibration_layout.addRow("Calibration File:", cal_file_layout)
+        self.btn_load_calibration.setFixedWidth(80)
+        cal_file_row.addWidget(self.calibration_file_path, 3)
+        cal_file_row.addWidget(self.btn_load_calibration, 1)
 
-        # Calibration multiplier (existing code)
+        cal_multiplier_row = QHBoxLayout()
+        cal_multiplier_row.addWidget(QLabel("Multiplier:"))
         self.calibration_multiplier = QDoubleSpinBox()
         self.calibration_multiplier.setRange(0.01, 5.00)
         self.calibration_multiplier.setValue(1.00)
-        self.calibration_multiplier.setSingleStep(0.01)
-        self.calibration_multiplier.setDecimals(2)
-        self.calibration_multiplier.setToolTip(
-            "Multiplier applied to calibration std (same as baseline multiplier)"
-        )
-        calibration_layout.addRow(
-            "Calibration Multiplier:", self.calibration_multiplier
-        )
+        self.calibration_multiplier.setFixedWidth(60)
+        cal_multiplier_row.addWidget(self.calibration_multiplier)
+        cal_multiplier_row.addStretch()
 
-        # NEW: Calibration dataset processing controls
-        cal_processing_layout = QVBoxLayout()
-        # Load calibration dataset button
-        self.btn_load_calibration_dataset = QPushButton("Load Calibration Dataset")
-        self.btn_load_calibration_dataset.setToolTip(
-            "Load selected calibration file into viewer for ROI detection"
-        )
-        self.btn_load_calibration_dataset.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; }"
-        )
-        self.btn_load_calibration_dataset.setEnabled(
-            False
-        )  # Enabled when file is selected
-        # Process calibration baseline button
-        self.btn_process_calibration_baseline = QPushButton(
-            "Process Calibration Baseline"
-        )
-        self.btn_process_calibration_baseline.setToolTip(
-            "Process full calibration dataset to create baseline statistics"
-        )
-        self.btn_process_calibration_baseline.setStyleSheet(
-            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; }"
-        )
-        self.btn_process_calibration_baseline.setEnabled(
-            False
-        )  # Enabled when calibration ROIs detected
+        cal_buttons_row = QHBoxLayout()
+        self.btn_load_calibration_dataset = QPushButton("Load Dataset")
+        self.btn_process_calibration_baseline = QPushButton("Process Baseline")
+        self.btn_load_calibration_dataset.setEnabled(False)
+        self.btn_process_calibration_baseline.setEnabled(False)
+        cal_buttons_row.addWidget(self.btn_load_calibration_dataset)
+        cal_buttons_row.addWidget(self.btn_process_calibration_baseline)
 
-        cal_processing_layout.addWidget(self.btn_load_calibration_dataset)
-        cal_processing_layout.addWidget(self.btn_process_calibration_baseline)
-
-        calibration_layout.addRow("Calibration Processing:", cal_processing_layout)
-        # NEW: Calibration status display
         self.calibration_status_label = QLabel(
-            "1. Select calibration file\n2. Load calibration dataset\n3. Detect ROIs (Input tab)\n4. Process baseline"
+            "1. Select file → 2. Load → 3. ROIs → 4. Process"
         )
         self.calibration_status_label.setStyleSheet(
-            """
-            QLabel {
-                padding: 8px;
-                background-color: #f5f5f5;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                font-size: 10px;
-                color: #000000;  /* Force black text */
-            }
-        """
+            "QLabel { font-size: 9px; padding: 2px; }"
         )
-        self.calibration_status_label.setWordWrap(True)
-        calibration_layout.addRow("Status:", self.calibration_status_label)
-        # Updated info text
-        calibration_info = QLabel(
-            "CALIBRATION METHOD:\n"
-            "Uses sedated animals to determine noise baseline.\n"
-            "Calculates: mean ± multiplier × std from complete calibration dataset.\n"
-            "Same hysteresis formula as baseline method."
-        )
-        calibration_info.setStyleSheet("color: #666; font-size: 10px;")
-        calibration_info.setWordWrap(True)
-        calibration_layout.addRow("", calibration_info)
 
-        self.threshold_params_stack.addTab(calibration_tab, "Calibration Method")
+        cal_layout.addLayout(cal_file_row)
+        cal_layout.addLayout(cal_multiplier_row)
+        cal_layout.addLayout(cal_buttons_row)
+        cal_layout.addWidget(self.calibration_status_label)
+        calibration_tab.setLayout(cal_layout)
 
-        # === METHOD 3: ADAPTIVE ===
+        # Adaptive tab (kompakt)
         adaptive_tab = QWidget()
-        adaptive_layout = QFormLayout()
-        adaptive_tab.setLayout(adaptive_layout)
-
+        adaptive_layout = QHBoxLayout()
+        adaptive_layout.addWidget(QLabel("Duration (min):"))
         self.adaptive_duration_minutes = QDoubleSpinBox()
         self.adaptive_duration_minutes.setRange(5.0, 120.0)
         self.adaptive_duration_minutes.setValue(15.0)
-        self.adaptive_duration_minutes.setSingleStep(1.0)
-        self.adaptive_duration_minutes.setDecimals(1)
-        self.adaptive_duration_minutes.setToolTip(
-            "Duration of initial period for adaptive analysis"
-        )
-        adaptive_layout.addRow(
-            "Analysis Duration (min):", self.adaptive_duration_minutes
-        )
+        self.adaptive_duration_minutes.setFixedWidth(60)
+        adaptive_layout.addWidget(self.adaptive_duration_minutes)
 
+        adaptive_layout.addWidget(QLabel("Multiplier:"))
         self.adaptive_base_multiplier = QDoubleSpinBox()
         self.adaptive_base_multiplier.setRange(1.0, 5.0)
         self.adaptive_base_multiplier.setValue(2.5)
-        self.adaptive_base_multiplier.setSingleStep(0.1)
-        self.adaptive_base_multiplier.setToolTip(
-            "Base multiplier for adaptive calculation"
-        )
-        adaptive_layout.addRow("Base Multiplier:", self.adaptive_base_multiplier)
+        self.adaptive_base_multiplier.setFixedWidth(60)
+        adaptive_layout.addWidget(self.adaptive_base_multiplier)
+        adaptive_layout.addStretch()
+        adaptive_tab.setLayout(adaptive_layout)
 
-        adaptive_info = QLabel(
-            "Automatically adapts threshold based on signal-to-noise ratio."
-        )
-        adaptive_info.setStyleSheet("color: #666; font-size: 10px;")
-        adaptive_info.setWordWrap(True)
-        adaptive_layout.addRow("", adaptive_info)
+        self.threshold_params_stack.addTab(baseline_tab, "Baseline")
+        self.threshold_params_stack.addTab(calibration_tab, "Calibration")
+        self.threshold_params_stack.addTab(adaptive_tab, "Adaptive")
 
-        self.threshold_params_stack.addTab(adaptive_tab, "Adaptive Method")
+        layout.addWidget(self.threshold_params_stack)
+        group.setLayout(layout)
+        return group
 
-        layout.addWidget(threshold_group)
+    def _create_inline_behavior_params(self):
+        """Create inline behavior parameters for Full HD."""
+        group = QGroupBox("Behavior Analysis Parameters")
+        layout = QHBoxLayout()
+        layout.setSpacing(10)
 
-        # Behavior Analysis Parameters
-        behavior_group = QGroupBox("Behavior Analysis Parameters")
-        behavior_layout = QFormLayout()
-        behavior_group.setLayout(behavior_layout)
-
+        layout.addWidget(QLabel("Bin Size (s):"))
         self.bin_size_seconds = QSpinBox()
         self.bin_size_seconds.setRange(1, 300)
         self.bin_size_seconds.setValue(60)
-        self.bin_size_seconds.setToolTip(
-            "Bin size for fraction movement (60s recommended)"
-        )
-        behavior_layout.addRow("Bin Size (seconds):", self.bin_size_seconds)
+        self.bin_size_seconds.setFixedWidth(60)
+        layout.addWidget(self.bin_size_seconds)
 
+        layout.addWidget(QLabel("Quiescence:"))
         self.quiescence_threshold = QDoubleSpinBox()
         self.quiescence_threshold.setRange(0.0, 1.0)
         self.quiescence_threshold.setValue(0.5)
-        self.quiescence_threshold.setSingleStep(0.1)
-        self.quiescence_threshold.setToolTip("Quiescence threshold (0.5 recommended)")
-        behavior_layout.addRow("Quiescence Threshold:", self.quiescence_threshold)
+        self.quiescence_threshold.setFixedWidth(60)
+        layout.addWidget(self.quiescence_threshold)
 
+        layout.addWidget(QLabel("Sleep (min):"))
         self.sleep_threshold_minutes = QSpinBox()
         self.sleep_threshold_minutes.setRange(1, 60)
         self.sleep_threshold_minutes.setValue(8)
-        self.sleep_threshold_minutes.setToolTip(
-            "Minimum sleep duration in minutes (8 recommended)"
-        )
-        behavior_layout.addRow("Sleep Threshold (min):", self.sleep_threshold_minutes)
+        self.sleep_threshold_minutes.setFixedWidth(60)
+        layout.addWidget(self.sleep_threshold_minutes)
 
-        layout.addWidget(behavior_group)
+        layout.addStretch()
+        group.setLayout(layout)
+        return group
 
-        # Analysis Control Section
-        control_group = QGroupBox("Analysis Control")
-        control_layout = QVBoxLayout()
-        control_group.setLayout(control_layout)
-        reset_layout = QHBoxLayout()
-        self.btn_reset_analysis = QPushButton("Reset for New Analysis")
-        self.btn_reset_analysis.setToolTip(
-            "Clear all data and reset for a new analysis"
-        )
-        self.btn_reset_analysis.setStyleSheet(
-            "QPushButton { background-color: #FF5722; color: white; font-weight: bold; }"
-        )
-        reset_layout.addWidget(self.btn_reset_analysis)
-        control_layout.addLayout(reset_layout)
-        # Analysis buttons
-        btn_layout = QHBoxLayout()
+    def _create_fullhd_control_section(self):
+        """Create control section optimized for Full HD."""
+        group = QGroupBox("Analysis Control")
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+
+        # Main buttons horizontal
+        main_controls = QHBoxLayout()
         self.btn_analyze = QPushButton("Start Analysis")
-        self.btn_analyze.setToolTip("Start the analysis with current parameters")
         self.btn_analyze.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }"
         )
+        self.btn_analyze.setMinimumHeight(32)
 
-        self.btn_stop = QPushButton("Stop Analysis")
-        self.btn_stop.setToolTip("Stop the current analysis")
+        self.btn_stop = QPushButton("Stop")
         self.btn_stop.setEnabled(False)
         self.btn_stop.setStyleSheet(
             "QPushButton { background-color: #f44336; color: white; font-weight: bold; }"
         )
+        self.btn_stop.setMinimumHeight(32)
 
-        btn_layout.addWidget(self.btn_analyze)
-        btn_layout.addWidget(self.btn_stop)
-        control_layout.addLayout(btn_layout)
+        self.btn_reset_analysis = QPushButton("Reset")
+        self.btn_reset_analysis.setStyleSheet(
+            "QPushButton { background-color: #FF5722; color: white; }"
+        )
+        self.btn_reset_analysis.setMinimumHeight(32)
 
-        # Testing and diagnostics buttons
-        test_layout = QHBoxLayout()
+        main_controls.addWidget(self.btn_analyze, 2)
+        main_controls.addWidget(self.btn_stop, 1)
+        main_controls.addWidget(self.btn_reset_analysis, 1)
+
+        # Test buttons
+        test_controls = QHBoxLayout()
         self.btn_quick_test = QPushButton("Quick Test")
-        self.btn_quick_test.setToolTip("Run quick analysis test using _calc.py")
-        self.btn_validate_timing = QPushButton("Validate HDF5 Timing")
-        self.btn_validate_timing.setToolTip("Check HDF5 timing using _calc.py")
+        self.btn_validate_timing = QPushButton("Validate Timing")
+        test_controls.addWidget(self.btn_quick_test)
+        test_controls.addWidget(self.btn_validate_timing)
+        test_controls.addStretch()
 
-        test_layout.addWidget(self.btn_quick_test)
-        test_layout.addWidget(self.btn_validate_timing)
-        control_layout.addLayout(test_layout)
-
-        # Progress bar
+        # Progress and status
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        control_layout.addWidget(self.progress_bar)
-        # Remove extra spacing
-        control_layout.setSpacing(0)
-        control_layout.setContentsMargins(0, 0, 0, 0)
-        # Status label
+        self.progress_bar.setMaximumHeight(20)
+
         self.status_label = QLabel("Ready to start analysis")
         self.status_label.setStyleSheet(
-            "QLabel { padding: 5px; background-color: #2b2b2b; border: 1px solid #555; color: #ffffff; }"
+            "QLabel { padding: 3px; background-color: #f0f0f0; border: 1px solid #ccc; }"
         )
-        control_layout.addWidget(self.status_label)
+        self.status_label.setMaximumHeight(25)
 
-        # Performance metrics label
-        self.performance_label = QLabel(
-            "Performance metrics will appear here during analysis"
-        )
+        self.performance_label = QLabel("Performance metrics will appear here")
         self.performance_label.setStyleSheet(
-            "QLabel { padding: 3px; font-size: 10px; color: #FFFFFF; }"
+            "QLabel { padding: 2px; font-size: 9px; color: #000000; }"
         )
-        control_layout.addWidget(self.performance_label)
+        self.performance_label.setMaximumHeight(20)
 
-        layout.addWidget(control_group)
+        layout.addLayout(main_controls)
+        layout.addLayout(test_controls)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.performance_label)
 
-        # Analysis Log Section
-        log_group = QGroupBox("Analysis Log")
-        log_layout = QVBoxLayout()
-        log_group.setLayout(log_layout)
+        group.setLayout(layout)
+        return group
+
+    def _create_optimized_log_section(self):
+        """Create optimized log section for Full HD."""
+        group = QGroupBox("Analysis Log")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(4, 4, 4, 4)
 
         self.log_text = QTextEdit()
         self.log_text.setMaximumHeight(150)
@@ -947,24 +935,72 @@ class HDF5AnalysisWidget(QWidget):
                 background-color: #000000;
                 color: #ffffff;
                 font-family: 'Courier New', monospace;
-                font-size: 9px;
+                font-size: 8px;
             }
         """
         )
-        log_layout.addWidget(self.log_text)
 
-        layout.addWidget(log_group)
+        layout.addWidget(self.log_text)
+        group.setLayout(layout)
+        return group
 
-    def setup_results_tab(self):
-        """Setup the results tab with plotting and export options."""
+    def setup_analysis_tab_fullhd(self):
+        """Analysis tab optimized for Full HD."""
+        # Create main scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarNever)
+
+        # Content widget
+        content_widget = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(8)
+
+        # === KOMPAKTE SEKTIONEN ===
+        content_layout.addWidget(self._create_compact_basic_params())
+        content_layout.addWidget(self._create_optimized_threshold_section())
+        content_layout.addWidget(self._create_inline_behavior_params())
+        content_layout.addWidget(self._create_fullhd_control_section())
+        content_layout.addWidget(self._create_optimized_log_section())
+
+        # Set content
+        content_widget.setLayout(content_layout)
+        scroll_area.setWidget(content_widget)
+
+        # Create tab
+        self.tab_analysis = QWidget()
+        tab_layout = QVBoxLayout()
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll_area)
+        self.tab_analysis.setLayout(tab_layout)
+
+        self.tab_widget.addTab(self.tab_analysis, "Analysis")
+
+    def setup_results_tab_fullhd(self):
+        """Setup the results tab optimized for Full HD displays."""
+
+        # Create the tab widget FIRST
+        self.tab_results = QWidget()
+
+        # Create scrollable area for Full HD optimization
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarNever)
+
+        # Content widget
+        content_widget = QWidget()
         layout = QVBoxLayout()
-        self.tab_results.setLayout(layout)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
         self.results_label = QLabel("Results will be displayed here.")
         layout.addWidget(self.results_label)
 
-        # Matplotlib figure
-        self.figure = Figure(figsize=(10, 6))
+        # Matplotlib figure (smaller for Full HD)
+        self.figure = Figure(figsize=(8, 4))  # Reduced from (10, 6)
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
 
@@ -977,64 +1013,43 @@ class HDF5AnalysisWidget(QWidget):
             self.plot_generator = None
             self._log_message(f"⚠️ Plot generator initialization failed: {e}")
 
-        # Threshold Visualization Options
-        viz_group = QGroupBox("Threshold Visualization (for Raw Intensity Plots)")
-        viz_layout = QFormLayout()
+        # === COMPACT THRESHOLD VISUALIZATION ===
+        viz_group = QGroupBox("Threshold Visualization")
+        viz_layout = QVBoxLayout()
+        viz_layout.setSpacing(2)
         viz_group.setLayout(viz_layout)
 
-        self.show_baseline_mean = QCheckBox("Show Baseline Mean Line")
+        # Checkboxes in horizontal layout
+        viz_row1 = QHBoxLayout()
+        self.show_baseline_mean = QCheckBox("Baseline Mean")
         self.show_baseline_mean.setChecked(True)
-        self.show_baseline_mean.setToolTip(
-            "Show the baseline mean from analysis (red line)"
-        )
-        viz_layout.addRow("", self.show_baseline_mean)
-
-        self.show_deviation_band = QCheckBox("Show Deviation Band (Hysteresis Zone)")
+        self.show_deviation_band = QCheckBox("Hysteresis Zone")
         self.show_deviation_band.setChecked(True)
-        self.show_deviation_band.setToolTip(
-            "Show ±σ band around baseline mean (orange area)"
-        )
-        viz_layout.addRow("", self.show_deviation_band)
+        viz_row1.addWidget(self.show_baseline_mean)
+        viz_row1.addWidget(self.show_deviation_band)
+        viz_row1.addStretch()
 
-        self.show_detection_threshold = QCheckBox("Show Detection Thresholds")
+        viz_row2 = QHBoxLayout()
+        self.show_detection_threshold = QCheckBox("Thresholds")
         self.show_detection_threshold.setChecked(True)
-        self.show_detection_threshold.setToolTip(
-            "Show upper/lower detection boundaries (dashed lines)"
-        )
-        viz_layout.addRow("", self.show_detection_threshold)
-
-        self.show_threshold_stats = QCheckBox("Show Threshold Statistics")
+        self.show_threshold_stats = QCheckBox("Statistics")
         self.show_threshold_stats.setChecked(True)
-        self.show_threshold_stats.setToolTip(
-            "Show threshold calculation details on plot"
-        )
-        viz_layout.addRow("", self.show_threshold_stats)
+        viz_row2.addWidget(self.show_detection_threshold)
+        viz_row2.addWidget(self.show_threshold_stats)
+        viz_row2.addStretch()
 
-        # INFO BOX - SCIENTIFIC EXPLANATION
-        baseline_info = QLabel(
-            "BASELINE REFERENCE:\n"
-            "• Baseline Mean = Fixed reference from analysis baseline period\n"
-            "• Detection Thresholds = Used in actual movement detection\n"
-            "• These values NEVER change with time range selection\n"
-            "• They represent the analysis parameters, not visible data statistics"
-        )
-        baseline_info.setStyleSheet(
-            "color: #0066cc; font-size: 9px; background: #f0f8ff; "
-            "padding: 8px; border: 1px solid #ccc; border-radius: 4px;"
-        )
-        baseline_info.setWordWrap(True)
-        viz_layout.addRow("", baseline_info)
-
+        viz_layout.addLayout(viz_row1)
+        viz_layout.addLayout(viz_row2)
         layout.addWidget(viz_group)
 
-        # Plot configuration
+        # === COMPACT PLOT CONFIGURATION ===
         plot_config_group = QGroupBox("Plot Configuration")
         plot_config_layout = QVBoxLayout()
+        plot_config_layout.setSpacing(4)
         plot_config_group.setLayout(plot_config_layout)
 
-        # Plot type and basic controls
+        # Plot type and DPI in one row
         basic_row = QHBoxLayout()
-
         self.plot_type_combo = QComboBox()
         self.plot_type_combo.addItems(
             [
@@ -1046,200 +1061,179 @@ class HDF5AnalysisWidget(QWidget):
                 "Lighting Conditions (dark IR)",
             ]
         )
+        self.plot_type_combo.setFixedWidth(160)
 
         self.plot_dpi_spin = QSpinBox()
         self.plot_dpi_spin.setRange(50, 600)
         self.plot_dpi_spin.setValue(100)
+        self.plot_dpi_spin.setFixedWidth(60)
 
-        basic_row.addWidget(QLabel("Plot Type:"))
+        basic_row.addWidget(QLabel("Type:"))
         basic_row.addWidget(self.plot_type_combo)
         basic_row.addWidget(QLabel("DPI:"))
         basic_row.addWidget(self.plot_dpi_spin)
         basic_row.addStretch()
         plot_config_layout.addLayout(basic_row)
 
-        # Figure size controls
+        # Figure size in one row
         size_row = QHBoxLayout()
-
         self.plot_width_spin = QDoubleSpinBox()
         self.plot_width_spin.setRange(1.0, 100.0)
         self.plot_width_spin.setValue(10.0)
-        self.plot_width_spin.setSingleStep(0.5)
+        self.plot_width_spin.setFixedWidth(60)
 
         self.plot_height_spin = QDoubleSpinBox()
         self.plot_height_spin.setRange(0.1, 10.0)
         self.plot_height_spin.setValue(0.6)
-        self.plot_height_spin.setSingleStep(0.1)
+        self.plot_height_spin.setFixedWidth(60)
 
-        size_row.addWidget(QLabel("Figure Width:"))
+        size_row.addWidget(QLabel("Width:"))
         size_row.addWidget(self.plot_width_spin)
-        size_row.addWidget(QLabel("Height Per ROI:"))
+        size_row.addWidget(QLabel("Height/ROI:"))
         size_row.addWidget(self.plot_height_spin)
         size_row.addStretch()
         plot_config_layout.addLayout(size_row)
 
-        # Y-Axis scaling controls
-        y_axis_group = QGroupBox("Y-Axis Scaling (Per ROI Optimization)")
-        y_axis_layout = QVBoxLayout()
-        y_axis_group.setLayout(y_axis_layout)
-
-        scaling_mode_layout = QHBoxLayout()
-        self.auto_scale_y = QCheckBox("Auto Scale Y-Axis (Recommended)")
+        # Y-Axis scaling (compact)
+        y_axis_row = QHBoxLayout()
+        self.auto_scale_y = QCheckBox("Auto Y-Scale")
         self.auto_scale_y.setChecked(True)
-        self.auto_scale_y.setToolTip(
-            "Automatically optimize Y-axis for each ROI individually"
-        )
-
-        self.robust_scaling = QCheckBox("Robust Scaling (Ignore Outliers)")
+        self.robust_scaling = QCheckBox("Robust")
         self.robust_scaling.setChecked(True)
-        self.robust_scaling.setToolTip(
-            "Use percentile-based scaling to ignore outliers and focus on main data"
-        )
-
-        scaling_mode_layout.addWidget(self.auto_scale_y)
-        scaling_mode_layout.addWidget(self.robust_scaling)
-        scaling_mode_layout.addStretch()
-        y_axis_layout.addLayout(scaling_mode_layout)
-
-        # Advanced scaling options
-        advanced_layout = QHBoxLayout()
-
-        self.adaptive_scaling = QCheckBox("Adaptive Scaling")
+        self.adaptive_scaling = QCheckBox("Adaptive")
         self.adaptive_scaling.setChecked(True)
-        self.adaptive_scaling.setToolTip(
-            "Automatically adjust scaling strategy based on data characteristics\n"
-            "• Low variance data: Tighter scaling to show small changes\n"
-            "• Outlier-heavy data: More aggressive filtering\n"
-            "• Sparse data: Optimize for non-zero values"
-        )
 
-        self.center_around_zero = QCheckBox("Smart Zero Centering")
-        self.center_around_zero.setChecked(True)
-        self.center_around_zero.setToolTip(
-            "Include zero in view when data is centered around zero"
-        )
+        y_axis_row.addWidget(self.auto_scale_y)
+        y_axis_row.addWidget(self.robust_scaling)
+        y_axis_row.addWidget(self.adaptive_scaling)
+        y_axis_row.addStretch()
+        plot_config_layout.addLayout(y_axis_row)
 
-        advanced_layout.addWidget(self.adaptive_scaling)
-        advanced_layout.addWidget(self.center_around_zero)
-        advanced_layout.addStretch()
-        y_axis_layout.addLayout(advanced_layout)
-
-        # Manual Y-axis range controls
-        manual_range_layout = QHBoxLayout()
-
+        # Manual Y-axis controls (compact)
+        manual_y_row = QHBoxLayout()
         self.y_min_spin = QDoubleSpinBox()
         self.y_min_spin.setRange(-1e9, 1e9)
         self.y_min_spin.setValue(0.0)
         self.y_min_spin.setEnabled(False)
+        self.y_min_spin.setFixedWidth(80)
 
         self.y_max_spin = QDoubleSpinBox()
         self.y_max_spin.setRange(-1e9, 1e9)
         self.y_max_spin.setValue(1000.0)
         self.y_max_spin.setEnabled(False)
+        self.y_max_spin.setFixedWidth(80)
 
-        self.btn_apply_y_range = QPushButton("Apply Manual Range")
+        self.btn_apply_y_range = QPushButton("Apply")
         self.btn_apply_y_range.setEnabled(False)
-        self.btn_apply_y_range.setToolTip(
-            "Use manual Y-axis range instead of automatic optimization"
-        )
+        self.btn_apply_y_range.setFixedWidth(60)
 
-        manual_range_layout.addWidget(QLabel("Manual Y Min:"))
-        manual_range_layout.addWidget(self.y_min_spin)
-        manual_range_layout.addWidget(QLabel("Y Max:"))
-        manual_range_layout.addWidget(self.y_max_spin)
-        manual_range_layout.addWidget(self.btn_apply_y_range)
-        manual_range_layout.addStretch()
-        y_axis_layout.addLayout(manual_range_layout)
+        manual_y_row.addWidget(QLabel("Y Min:"))
+        manual_y_row.addWidget(self.y_min_spin)
+        manual_y_row.addWidget(QLabel("Max:"))
+        manual_y_row.addWidget(self.y_max_spin)
+        manual_y_row.addWidget(self.btn_apply_y_range)
+        manual_y_row.addStretch()
+        plot_config_layout.addLayout(manual_y_row)
 
-        # Percentile controls for robust scaling
-        percentile_layout = QHBoxLayout()
-
+        # Percentile controls (compact)
+        percentile_row = QHBoxLayout()
         self.lower_percentile_spin = QDoubleSpinBox()
         self.lower_percentile_spin.setRange(0.0, 50.0)
         self.lower_percentile_spin.setValue(5.0)
-        self.lower_percentile_spin.setSingleStep(1.0)
+        self.lower_percentile_spin.setFixedWidth(50)
 
         self.upper_percentile_spin = QDoubleSpinBox()
         self.upper_percentile_spin.setRange(50.0, 100.0)
         self.upper_percentile_spin.setValue(95.0)
-        self.upper_percentile_spin.setSingleStep(1.0)
+        self.upper_percentile_spin.setFixedWidth(50)
 
-        percentile_layout.addWidget(QLabel("Lower %:"))
-        percentile_layout.addWidget(self.lower_percentile_spin)
-        percentile_layout.addWidget(QLabel("Upper %:"))
-        percentile_layout.addWidget(self.upper_percentile_spin)
-        percentile_layout.addStretch()
-        y_axis_layout.addLayout(percentile_layout)
+        percentile_row.addWidget(QLabel("Percentiles:"))
+        percentile_row.addWidget(self.lower_percentile_spin)
+        percentile_row.addWidget(QLabel("-"))
+        percentile_row.addWidget(self.upper_percentile_spin)
+        percentile_row.addStretch()
+        plot_config_layout.addLayout(percentile_row)
 
-        plot_config_layout.addWidget(y_axis_group)
+        layout.addWidget(plot_config_group)
 
-        # Time range selection
-        time_range_group = QGroupBox("Time Range Selection")
+        # === TIME RANGE (compact) ===
+        time_range_group = QGroupBox("Time Range")
         time_range_layout = QHBoxLayout()
         time_range_group.setLayout(time_range_layout)
 
         self.plot_start_time = QDoubleSpinBox()
         self.plot_start_time.setRange(0.0, 1e9)
         self.plot_start_time.setValue(0.0)
-        self.plot_start_time.setSuffix(" min")
+        self.plot_start_time.setFixedWidth(80)
+
         self.plot_end_time = QDoubleSpinBox()
         self.plot_end_time.setRange(0.0, 1e9)
         self.plot_end_time.setValue(100000.0)
-        self.plot_end_time.setSuffix(" min")
-        self.btn_apply_time_range = QPushButton("Apply Time Range")
+        self.plot_end_time.setFixedWidth(80)
 
-        time_range_layout.addWidget(QLabel("Start Time (min):"))
+        self.btn_apply_time_range = QPushButton("Apply")
+        self.btn_apply_time_range.setFixedWidth(60)
+
+        time_range_layout.addWidget(QLabel("Start:"))
         time_range_layout.addWidget(self.plot_start_time)
-        time_range_layout.addWidget(QLabel("End Time (min):"))
+        time_range_layout.addWidget(QLabel("End:"))
         time_range_layout.addWidget(self.plot_end_time)
         time_range_layout.addWidget(self.btn_apply_time_range)
+        time_range_layout.addStretch()
 
         layout.addWidget(time_range_group)
-        layout.addWidget(plot_config_group)
 
-        # ===== SIMPLIFIED PLOT CONTROLS =====
+        # === PLOT CONTROLS (compact) ===
         plot_buttons_group = QGroupBox("Plot Controls")
-        plot_buttons_layout = QHBoxLayout()
+        plot_buttons_layout = QVBoxLayout()
+        plot_buttons_layout.setSpacing(4)
         plot_buttons_group.setLayout(plot_buttons_layout)
 
-        # Core plotting buttons
+        # Main buttons row
+        buttons_row1 = QHBoxLayout()
         self.btn_plot = QPushButton("Generate Plot")
-        self.btn_plot.setToolTip("Generate the selected plot type")
         self.btn_plot.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }"
         )
+        self.btn_plot.setMinimumHeight(30)
 
-        self.btn_save_plot = QPushButton("Save Current Plot")
-        self.btn_save_plot.setToolTip("Save the currently displayed plot as image file")
+        self.btn_save_plot = QPushButton("Save Plot")
+        self.btn_save_all_plots = QPushButton("Save All")
 
-        self.btn_save_all_plots = QPushButton("Save All Plots")
-        self.btn_save_all_plots.setToolTip(
-            "Save all plot types to separate image files"
-        )
+        buttons_row1.addWidget(self.btn_plot, 2)
+        buttons_row1.addWidget(self.btn_save_plot, 1)
+        buttons_row1.addWidget(self.btn_save_all_plots, 1)
 
-        # CONSOLIDATED save results button
+        # Results buttons row
+        buttons_row2 = QHBoxLayout()
         self.btn_save_results = QPushButton("Save Results")
-        self.btn_save_results.setToolTip(
-            "Save analysis results (CSV + Excel + threshold stats)"
-        )
         self.btn_save_results.setStyleSheet(
             "QPushButton { background-color: #2196F3; color: white; font-weight: bold; }"
         )
-        self.btn_save_with_metadata = QPushButton("Save with HDF5 Metadata")
-        self.btn_save_with_metadata.setToolTip(
-            "Save analysis results including comprehensive HDF5 metadata"
-        )
+
+        self.btn_save_with_metadata = QPushButton("Save with Metadata")
         self.btn_save_with_metadata.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }"
         )
 
-        plot_buttons_layout.addWidget(self.btn_plot)
-        plot_buttons_layout.addWidget(self.btn_save_plot)
-        plot_buttons_layout.addWidget(self.btn_save_all_plots)
+        buttons_row2.addWidget(self.btn_save_results)
+        buttons_row2.addWidget(self.btn_save_with_metadata)
 
-        plot_buttons_layout.addWidget(self.btn_save_results)
-        plot_buttons_layout.addWidget(self.btn_save_with_metadata)
+        plot_buttons_layout.addLayout(buttons_row1)
+        plot_buttons_layout.addLayout(buttons_row2)
         layout.addWidget(plot_buttons_group)
+
+        # Set content and create tab
+        content_widget.setLayout(layout)
+        scroll_area.setWidget(content_widget)
+
+        # Set up the tab
+        tab_layout = QVBoxLayout()
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll_area)
+        self.tab_results.setLayout(tab_layout)
+
+        self.tab_widget.addTab(self.tab_results, "Results")
 
     def debug_current_file_structure(self):
         """Debug the structure of the currently loaded file."""
@@ -1256,7 +1250,7 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message(f"Structure type: {structure_info['type']}")
 
                 if structure_info["type"] == "stacked_frames":
-                    self._log_message("✅ Stacked frames detected")
+                    self._log_message(f"✅ Stacked frames detected")
                     self._log_message(f"   Dataset: '{structure_info['dataset_name']}'")
                     self._log_message(
                         f"   Frame count: {structure_info['frame_count']}"
@@ -1267,7 +1261,7 @@ class HDF5AnalysisWidget(QWidget):
                     self._log_message(f"   Data type: {structure_info['dtype']}")
 
                 elif structure_info["type"] == "individual_frames":
-                    self._log_message("✅ Individual frames detected")
+                    self._log_message(f"✅ Individual frames detected")
                     self._log_message(f"   Group: '{structure_info['group_name']}'")
                     self._log_message(
                         f"   Frame count: {structure_info['frame_count']}"
@@ -1383,8 +1377,8 @@ class HDF5AnalysisWidget(QWidget):
         # UI interactions
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
         self.frame_interval.valueChanged.connect(self.update_end_time)
-        self.threshold_params_stack.currentChanged.connect(
-            self._on_threshold_tab_changed
+        self.threshold_method.currentTextChanged.connect(
+            self._on_threshold_method_changed
         )
         self.chk_12well.toggled.connect(self._on_12well_toggled)
 
@@ -1392,59 +1386,18 @@ class HDF5AnalysisWidget(QWidget):
     # FILE LOADING AND ROI DETECTION METHODS
     # ===================================================================
     def load_file(self):
-        """Load HDF5 or AVI file(s) with automatic detection."""
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select File(s)",
-            "",
-            "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*)",
+        """Enhanced load_file method with dual structure support."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select HDF5 File", "", "HDF5 Files (*.h5 *.hdf5)"
         )
-        if not file_paths:
+        if not file_path:
             return
 
-        # Handle single or multiple files
-        if len(file_paths) == 1:
-            file_path = file_paths[0]
-
-            # Check if single AVI file - load as single video (not batch)
-            if file_path.lower().endswith(".avi"):
-                self._load_single_avi(file_path)
-                return
-        else:
-            # Multiple files - check if they are AVIs for batch processing
-            if all(f.lower().endswith(".avi") for f in file_paths):
-                self._load_avi_batch(file_paths)
-                return
-            else:
-                self._log_message(
-                    "Multiple file selection only supported for AVI files"
-                )
-                return
-
         self.file_path = file_path
+        self.directory = None
         basename = os.path.basename(file_path)
-
-        # === AUTOMATISCHE LEGACY-DETECTION BEIM LADEN ===
-        try:
-            # Quick legacy check
-            with h5py.File(file_path, "r") as f:
-                is_legacy = self._quick_legacy_check(f)
-
-            if is_legacy:
-                self._log_message(f"Legacy file detected: {basename}")
-                self._log_message(
-                    "   Will automatically enhance with unit documentation during analysis"
-                )
-                self.lbl_file_info.setText(
-                    f"Loaded LEGACY file: {basename} (auto-enhancement enabled)"
-                )
-            else:
-                self._log_message(f"Modern file detected: {basename}")
-                self.lbl_file_info.setText(f"Loaded file: {basename}")
-
-        except Exception as e:
-            self._log_message(f"Could not determine file type: {e}")
-            self.lbl_file_info.setText(f"Loaded file: {basename}")
+        self.lbl_file_info.setText(f"Loaded file: {basename}")
+        self._log_message(f"Loaded file: {basename}")
 
         # Clear any existing ROI detection
         self.masks = []
@@ -1514,312 +1467,10 @@ class HDF5AnalysisWidget(QWidget):
         self.update_end_time()
         self.check_hdf5_structure()
 
-    def _load_single_avi(self, file_path: str):
-        """Load a single AVI file (only first frame for ROI detection)."""
-        try:
-            from ._avi_reader import AVIVideoReader
-
-            self.file_path = file_path
-            basename = os.path.basename(file_path)
-
-            self._log_message(f"Loading AVI file: {basename}")
-
-            # Store for later processing
-            self.avi_batch_paths = [file_path]  # Single file as batch
-            self.avi_batch_interval = 5.0  # Default frame interval
-
-            # Get metadata without loading all frames
-            with AVIVideoReader(file_path) as reader:
-                # Load ONLY first frame for ROI detection
-                first_frame = reader.get_frame(0)
-                if first_frame is None:
-                    raise ValueError("Could not load first frame")
-
-                # Log frame info for debugging
-                self._log_message(f"First frame shape: {first_frame.shape}")
-                self._log_message(f"First frame dtype: {first_frame.dtype}")
-                self._log_message(
-                    f"First frame value range: {first_frame.min()}-{first_frame.max()}"
-                )
-
-                # Calculate estimated frames
-                video_fps = reader.fps
-                target_interval = reader.metadata.get("frame_interval", 5.0)
-                self.avi_batch_interval = target_interval
-                frames_per_sample = max(1, int(video_fps * target_interval))
-                frame_count_estimate = len(
-                    range(0, reader.frame_count, frames_per_sample)
-                )
-
-                metadata = {
-                    "source_type": "avi_single",
-                    "fps": reader.fps,
-                    "frame_interval": target_interval,
-                    "frame_count": reader.frame_count,
-                    "frame_count_estimate": frame_count_estimate,
-                    "duration": reader.duration,
-                    "resolution": {"width": reader.width, "height": reader.height},
-                    "source_path": file_path,
-                    "frames_per_sample": frames_per_sample,
-                }
-
-            # Clear existing layers
-            self.viewer.layers.clear()
-
-            # Add only first frame to napari
-            self._log_message("Adding first frame to napari viewer...")
-            layer = self.viewer.add_image(
-                first_frame, name=f"{basename}_first_frame", metadata=metadata
-            )
-            self._log_message(f"Layer added: {layer.name}, visible: {layer.visible}")
-
-            # Update UI
-            duration_min = metadata["duration"] / 60.0
-            self.lbl_file_info.setText(
-                f"Loaded AVI: {basename} "
-                f"({frame_count_estimate} frames estimated, {duration_min:.1f} min, {target_interval}s interval) - First frame only"
-            )
-
-            self._log_message("Loaded first frame for ROI detection")
-            self._log_message(f"Frames (estimated): {frame_count_estimate}")
-            self._log_message(f"Duration: {duration_min:.1f} minutes")
-            self._log_message(f"Frame interval: {target_interval}s")
-            self._log_message("Note: Full frames will be loaded during processing")
-
-            # Clear any existing ROI detection
-            self.masks = []
-
-            # Update end time for analysis
-            self.update_end_time()
-
-        except ImportError:
-            self._log_message(
-                "Error: AVI support not available. Install opencv-python: pip install opencv-python"
-            )
-        except Exception as e:
-            self._log_message(f"Error loading AVI file: {e}")
-            import traceback
-
-            self._log_message(traceback.format_exc())
-
-    def _process_avi_batch_for_analysis(
-        self,
-        video_paths: List[str],
-        masks: List[np.ndarray],
-        chunk_size: int,
-        progress_callback,
-        frame_interval: float,
-    ):
-        """Process AVI batch by loading all frames and analyzing them."""
-        import time
-        from ._avi_reader import load_avi_batch_timeseries
-        from ._reader import process_chunk
-
-        start_time = time.time()
-
-        # Load all frames from batch
-        self._log_message(f"Loading {len(video_paths)} AVI files for analysis...")
-        frames, metadata = load_avi_batch_timeseries(video_paths, frame_interval)
-
-        total_frames = len(frames)
-        self._log_message(f"Loaded {total_frames} frames, starting analysis...")
-
-        # Process frames in chunks (similar to HDF5 processing)
-        roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
-
-        # Remove channel dimension if present
-        if frames.shape[-1] == 1:
-            frames = frames[:, :, :, 0]
-
-        total_chunks = (total_frames + chunk_size - 1) // chunk_size
-
-        for chunk_idx in range(total_chunks):
-            if self._cancel_requested:
-                raise RuntimeError("Analysis canceled")
-
-            start_idx = chunk_idx * chunk_size
-            end_idx = min(start_idx + chunk_size, total_frames)
-            chunk = frames[start_idx:end_idx]
-
-            # Process chunk
-            chunk_results = process_chunk(
-                chunk, masks, start_idx * frame_interval, frame_interval
-            )
-
-            # Merge results
-            for roi_idx in chunk_results:
-                roi_changes[roi_idx].extend(chunk_results[roi_idx])
-
-            # Update progress
-            if progress_callback:
-                percent = ((chunk_idx + 1) / total_chunks) * 100
-                msg = f"Processing AVI chunk {chunk_idx + 1}/{total_chunks}"
-                progress_callback(percent, msg)
-
-        # Sort results by time
-        for roi_idx in roi_changes:
-            roi_changes[roi_idx].sort(key=lambda x: x[0])
-
-        total_duration = metadata["total_duration"]
-        proc_time = time.time() - start_time
-
-        self._log_message(f"AVI batch processing complete in {proc_time:.2f}s")
-
-        return video_paths[0], roi_changes, total_duration
-
-    def _load_avi_batch(self, file_paths: List[str]):
-        """Load multiple AVI files as batch timeseries (only first frame for ROI detection)."""
-        self._log_message(f"=== _load_avi_batch() START ===")
-        self._log_message(f"Received {len(file_paths)} file paths")
-        for idx, path in enumerate(file_paths):
-            self._log_message(f"  [{idx}] {path}")
-
-        try:
-            from ._avi_reader import AVIVideoReader
-
-            # Get frame interval from metadata or use default
-            target_interval = 5.0  # seconds (same as HDF5)
-
-            self._log_message(f"Loading {len(file_paths)} AVI files as batch...")
-            self._log_message(
-                f"Target frame interval: {target_interval}s (0.2 FPS effective)"
-            )
-
-            # Store batch info for later processing
-            self.avi_batch_paths = file_paths
-            self.avi_batch_interval = target_interval
-
-            # Calculate total metadata without loading all frames
-            total_duration = 0.0
-            total_frames_estimate = 0
-            batch_metadata = {
-                "videos": [],
-                "source_type": "avi_batch",
-                "target_frame_interval": target_interval,
-            }
-
-            for video_idx, video_path in enumerate(file_paths):
-                with AVIVideoReader(video_path) as reader:
-                    video_fps = reader.fps
-                    frames_per_sample = max(1, int(video_fps * target_interval))
-                    sampled_frames = len(
-                        range(0, reader.frame_count, frames_per_sample)
-                    )
-
-                    batch_metadata["videos"].append(
-                        {
-                            "path": video_path,
-                            "index": video_idx,
-                            "fps": video_fps,
-                            "frame_count": reader.frame_count,
-                            "duration": reader.duration,
-                            "sampled_frames": sampled_frames,
-                            "frames_per_sample": frames_per_sample,
-                        }
-                    )
-
-                    total_duration += reader.duration
-                    total_frames_estimate += sampled_frames
-
-            batch_metadata["total_duration"] = total_duration
-            batch_metadata["total_frames_estimate"] = total_frames_estimate
-            batch_metadata["effective_fps"] = 1.0 / target_interval
-
-            # Load ONLY first frame from first video for ROI detection
-            self._log_message(f"Opening first video: {file_paths[0]}")
-            with AVIVideoReader(file_paths[0]) as reader:
-                self._log_message(f"AVIVideoReader opened successfully")
-                first_frame = reader.get_frame(0)
-                if first_frame is None:
-                    raise ValueError("Could not load first frame from first video")
-
-                # Log frame info for debugging
-                self._log_message(f"First frame loaded successfully")
-                self._log_message(f"First frame shape: {first_frame.shape}")
-                self._log_message(f"First frame dtype: {first_frame.dtype}")
-                self._log_message(
-                    f"First frame value range: {first_frame.min()}-{first_frame.max()}"
-                )
-
-            # Clear existing layers
-            self._log_message(f"Clearing {len(self.viewer.layers)} existing layers...")
-            self.viewer.layers.clear()
-            self._log_message("Layers cleared")
-
-            # Add only first frame to napari
-            self._log_message("Adding first frame to napari viewer...")
-            self._log_message(f"Frame data type: {type(first_frame)}")
-            self._log_message(
-                f"Viewer has {len(self.viewer.layers)} layers before adding"
-            )
-
-            layer = self.viewer.add_image(
-                first_frame,
-                name=f"batch_{len(file_paths)}_videos_first_frame",
-                metadata=batch_metadata,
-            )
-
-            self._log_message(f"Layer added successfully!")
-            self._log_message(f"Layer name: {layer.name}")
-            self._log_message(f"Layer visible: {layer.visible}")
-            self._log_message(f"Layer data shape: {layer.data.shape}")
-            self._log_message(f"Viewer now has {len(self.viewer.layers)} layers")
-
-            # Store file path (use first file as reference)
-            self.file_path = file_paths[0]
-
-            # Update UI
-            total_duration_min = total_duration / 60.0
-            self.lbl_file_info.setText(
-                f"Loaded {len(file_paths)} AVI files as batch "
-                f"({total_frames_estimate} frames estimated, {total_duration_min:.1f} min) - First frame only"
-            )
-
-            self._log_message("Loaded first frame for ROI detection")
-            self._log_message(f"Total frames (estimated): {total_frames_estimate}")
-            self._log_message(f"Total duration: {total_duration_min:.1f} minutes")
-            self._log_message(f"Effective FPS: {batch_metadata['effective_fps']:.2f}")
-            self._log_message("Note: Full frames will be loaded during processing")
-
-            # Clear any existing ROI detection
-            self.masks = []
-
-            # Update end time for analysis
-            self.update_end_time()
-
-        except ImportError:
-            self._log_message(
-                "Error: AVI support not available. Install opencv-python: pip install opencv-python"
-            )
-            import traceback
-
-            self._log_message(traceback.format_exc())
-        except Exception as e:
-            self._log_message(f"ERROR in _load_avi_batch: {e}")
-            import traceback
-
-            self._log_message(traceback.format_exc())
-        finally:
-            self._log_message("=== _load_avi_batch() END ===")
-
-    def _quick_legacy_check(self, h5_file) -> bool:
-        """Quick check if file is legacy (same logic as in _metadata.py)."""
-
-        file_version = h5_file.attrs.get("file_version", "1.0")
-        if float(file_version) < 2.2:
-            return True
-
-        if "timeseries" in h5_file:
-            ts_group = h5_file["timeseries"]
-            if not ts_group.attrs.get("expected_intervals_fixed", False):
-                return True
-
-        return False
-
     def load_directory(self):
-        """Load a directory containing HDF5 or AVI files."""
+        """Load a directory containing HDF5 files."""
         directory = QFileDialog.getExistingDirectory(
-            self, "Select Directory Containing Video Files"
+            self, "Select Directory Containing HDF5 Files"
         )
         if not directory:
             return
@@ -1827,61 +1478,20 @@ class HDF5AnalysisWidget(QWidget):
         self.directory = directory
         self.file_path = None
         try:
-            # Scan for both HDF5 and AVI files
             h5_files = [
                 f for f in os.listdir(directory) if f.lower().endswith((".h5", ".hdf5"))
             ]
-            avi_files = [f for f in os.listdir(directory) if f.lower().endswith(".avi")]
-
-            total_files = len(h5_files) + len(avi_files)
-
-            if total_files == 0:
-                self.lbl_file_info.setText(
-                    f"No HDF5 or AVI files found in: {directory}"
-                )
-                self._log_message(f"No video files found in directory: {directory}")
-                return
-
-            # Build info message
-            file_info = []
-            if h5_files:
-                file_info.append(f"{len(h5_files)} HDF5")
-            if avi_files:
-                file_info.append(f"{len(avi_files)} AVI")
-
-            files_str = ", ".join(file_info)
             self.lbl_file_info.setText(
-                f"Loaded directory: {directory} ({files_str} files)"
+                f"Loaded directory: {directory} ({len(h5_files)} HDF5 files)"
             )
-            self._log_message(f"Loaded directory with {files_str} files: {directory}")
-
-            if h5_files:
-                self._log_message(
-                    f"  HDF5 files: {', '.join(h5_files[:5])}{'...' if len(h5_files) > 5 else ''}"
-                )
-            if avi_files:
-                self._log_message(
-                    f"  AVI files: {', '.join(avi_files[:5])}{'...' if len(avi_files) > 5 else ''}"
-                )
-
+            self._log_message(
+                f"Loaded directory with {len(h5_files)} HDF5 files: {directory}"
+            )
         except Exception as e:
             self.lbl_file_info.setText(f"Error reading directory: {e}")
             self._log_message(f"ERROR reading directory: {e}")
             return
 
-        # If AVI files are found, load them as batch
-        if avi_files:
-            self._log_message(
-                f"Loading {len(avi_files)} AVI files from directory as batch..."
-            )
-            avi_paths = [os.path.join(directory, f) for f in sorted(avi_files)]
-            self._log_message(f"AVI paths to load: {avi_paths}")
-            self._log_message("Calling _load_avi_batch()...")
-            self._load_avi_batch(avi_paths)
-            self._log_message("_load_avi_batch() completed")
-            return
-
-        # Otherwise, use HDF5 reader for directory
         # Clear all existing layers
         self.viewer.layers.clear()
 
@@ -1911,63 +1521,26 @@ class HDF5AnalysisWidget(QWidget):
         """Enhanced update_end_time method with dual structure support."""
         if self.file_path:
             try:
-                # Check if this is an AVI file or AVI batch
-                if hasattr(self, "avi_batch_paths") and self.avi_batch_paths:
-                    # AVI batch - use metadata from viewer layer
-                    if len(self.viewer.layers) > 0:
-                        layer = self.viewer.layers[0]
-                        if hasattr(layer, "metadata") and layer.metadata:
-                            metadata = layer.metadata
-                            if "total_duration" in metadata:
-                                total_duration_seconds = metadata["total_duration"]
-                                frame_count = metadata.get("total_frames_estimate", 0)
-                            elif "duration" in metadata:
-                                total_duration_seconds = metadata["duration"]
-                                frame_count = metadata.get("frame_count_estimate", 0)
-                            else:
-                                self._log_message("No duration metadata found for AVI")
-                                return
-                        else:
-                            self._log_message("No metadata found in layer")
-                            return
-                    else:
-                        self._log_message("No layers found")
-                        return
-                elif self.file_path.lower().endswith(".avi"):
-                    # Single AVI file
-                    from ._avi_reader import AVIVideoReader
-
-                    with AVIVideoReader(self.file_path) as reader:
-                        total_duration_seconds = reader.duration
-                        video_fps = reader.fps
-                        target_interval = reader.metadata.get("frame_interval", 5.0)
-                        frames_per_sample = max(1, int(video_fps * target_interval))
-                        frame_count = len(
-                            range(0, reader.frame_count, frames_per_sample)
+                if DUAL_STRUCTURE_AVAILABLE:
+                    # Use structure detection to get frame count
+                    structure_info = detect_hdf5_structure_type(self.file_path)
+                    if structure_info["type"] != "error":
+                        frame_count = structure_info["frame_count"]
+                        self._log_message(
+                            f"Frame count from structure detection: {frame_count}"
                         )
-                else:
-                    # HDF5 file
-                    if DUAL_STRUCTURE_AVAILABLE:
-                        # Use structure detection to get frame count
-                        structure_info = detect_hdf5_structure_type(self.file_path)
-                        if structure_info["type"] != "error":
-                            frame_count = structure_info["frame_count"]
-                            self._log_message(
-                                f"Frame count from structure detection: {frame_count}"
-                            )
-                        else:
-                            raise Exception("Structure detection failed")
                     else:
-                        # Fallback to original method
-                        with h5py.File(self.file_path, "r") as f:
-                            if "frames" in f:
-                                frame_count = len(f["frames"])
-                            else:
-                                raise Exception("No 'frames' dataset found")
+                        raise Exception("Structure detection failed")
+                else:
+                    # Fallback to original method
+                    with h5py.File(self.file_path, "r") as f:
+                        if "frames" in f:
+                            frame_count = len(f["frames"])
+                        else:
+                            raise Exception("No 'frames' dataset found")
 
-                    frame_interval = self.frame_interval.value()
-                    total_duration_seconds = frame_count * frame_interval
-
+                frame_interval = self.frame_interval.value()
+                total_duration_seconds = frame_count * frame_interval
                 total_duration_minutes = total_duration_seconds / 60.0
 
                 self.time_end.setValue(int(total_duration_seconds))
@@ -2068,8 +1641,7 @@ class HDF5AnalysisWidget(QWidget):
             masks = []
             if circles is not None:
                 circles = np.uint16(np.around(circles))
-                # sorted_circles = sort_circles_left_to_right(circles)
-                sorted_circles = sort_circles_meandering_auto(circles)
+                sorted_circles = sort_circles_left_to_right(circles)
 
                 for idx, circle in enumerate(sorted_circles):
                     mask = np.zeros(gray_frame.shape, dtype=np.uint8)
@@ -2128,9 +1700,7 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message(
                     "Next: Go to Analysis tab and click 'Process Calibration Baseline'"
                 )
-                self._log_message(
-                    f"Applied automatic meandering sort to {len(sorted_circles)} ROIs"
-                )
+
             else:  # MAIN dataset
                 # Store main results permanently
                 self.main_masks = masks.copy()
@@ -2399,12 +1969,7 @@ class HDF5AnalysisWidget(QWidget):
 
             # Calculate baseline statistics for each ROI
             progress_callback(90, "Calculating baseline statistics...")
-            self._log_message(
-                "Calculating baseline statistics from COMPLETE calibration dataset..."
-            )
-            self._log_message(
-                f"Calibration duration: {calibration_duration/60:.1f} minutes"
-            )
+            self._log_message("Calculating baseline statistics...")
             calibration_baseline_statistics = {}
 
             for roi, data in processed_calibration.items():
@@ -2438,7 +2003,7 @@ class HDF5AnalysisWidget(QWidget):
                 }
 
                 self._log_message(
-                    f"ROI {roi}: mean={cal_mean:.1f}, std={cal_std:.1f}, thresholds=[{lower_threshold:.1f}, {upper_threshold:.1f}], frames={len(values)}"
+                    f"ROI {roi}: mean={cal_mean:.1f}, std={cal_std:.1f}, range={lower_threshold:.1f}-{upper_threshold:.1f}"
                 )
 
             progress_callback(100, "Calibration baseline complete")
@@ -2473,7 +2038,7 @@ class HDF5AnalysisWidget(QWidget):
 
             # Log results
             successful_rois = result["roi_count"]
-            self._log_message("Calibration baseline processing complete:")
+            self._log_message(f"Calibration baseline processing complete:")
             self._log_message(f"  ROIs processed: {successful_rois}")
             self._log_message(f"  Duration: {result['duration']/60:.1f} minutes")
             self._log_message(
@@ -2852,30 +2417,18 @@ class HDF5AnalysisWidget(QWidget):
     def clear_roi_detection(self):
         """Enhanced ROI detection clearing with proper event disconnection."""
         try:
-            self._log_message("Clear ROI Detection button clicked")
-
             layers_to_remove = []
             for layer in self.viewer.layers:
-                # Check if this is an ROI layer
-                is_roi_layer = (
-                    "ROI" in layer.name
-                    or "Detected" in layer.name
+                if (
+                    "ROIs Detected" in layer.name
+                    or "ROI" in layer.name
+                    and "Mask" in layer.name
                     or (
                         hasattr(layer, "metadata")
                         and layer.metadata.get("roi_type") == "circular_detection"
                     )
-                )
-
-                if is_roi_layer:
-                    self._log_message(f"  Marking layer for removal: {layer.name}")
+                ):
                     layers_to_remove.append(layer)
-
-            if len(layers_to_remove) == 0:
-                self._log_message("No ROI layers found to remove")
-                # Still clear variables in case they exist
-                self.masks = []
-                self.labeled_frame = None
-                return
 
             # Disconnect any connected events before removing layers
             for layer in layers_to_remove:
@@ -2887,33 +2440,189 @@ class HDF5AnalysisWidget(QWidget):
                     pass  # Event might not be connected
 
                 self.viewer.layers.remove(layer)
-                self._log_message(f"  Removed layer: {layer.name}")
 
-            # Clear all ROI-related variables
             self.masks = []
-            self.labeled_frame = None
-            self.main_masks = []
-            self.main_labeled_frame = None
-            self.calibration_masks = []
-            self.calibration_labeled_frame = None
-
             self._log_message(
-                f"✓ Successfully removed {len(layers_to_remove)} ROI layers and cleaned up all ROI data"
+                f"Removed {len(layers_to_remove)} ROI layers and cleaned up events"
             )
 
         except Exception as e:
-            self._log_message(f"ERROR clearing ROI detection: {e}")
-            import traceback
+            self._log_message(f"Error clearing ROI detection: {e}")
 
-            self._log_message(traceback.format_exc())
+    # def _add_roi_layers_to_viewer(self, labeled_frame, masks):
+    #     """Enhanced ROI layer creation with proper contrast linking and interaction."""
+    #     try:
+    #         # Get the original layer's contrast settings if it exists
+    #         original_contrast = None
+    #         for layer in self.viewer.layers:
+    #             if hasattr(layer, 'contrast_limits') and 'recorded_frames' in layer.name:
+    #                 original_contrast = layer.contrast_limits
+    #                 break
 
+    #         # 1. Add the labeled frame showing ROI detection with linked contrast
+    #         roi_detection_layer = self.viewer.add_image(
+    #             labeled_frame,
+    #             name=f"{os.path.basename(self.file_path)} - ROIs Detected",
+    #             colormap='gray',
+    #             visible=True,
+    #             opacity=0.8
+    #         )
+
+    #         # Apply original contrast if available
+    #         if original_contrast is not None:
+    #             roi_detection_layer.contrast_limits = original_contrast
+
+    #         # 2. Add individual ROI mask layers with enhanced properties
+    #         for i, mask in enumerate(masks):
+    #             # Get ROI color from your existing color scheme
+    #             roi_color = get_roi_colors([i+1]).get(i+1, f'C{i}')
+
+    #             # Convert matplotlib color to RGB if needed
+    #             if isinstance(roi_color, str) and roi_color.startswith('C'):
+    #                 roi_color = mcolors.to_rgb(f'C{i}')
+    #             elif isinstance(roi_color, str):
+    #                 roi_color = mcolors.to_rgb(roi_color)
+
+    #             # Ensure roi_color is a tuple of 4 values (RGBA)
+    #             if len(roi_color) == 3:
+    #                 roi_color = (*roi_color, 1.0)  # Add alpha channel
+
+    #             # Create a direct label colormap (modern Napari way)
+    #             label_colormap = DirectLabelColormap(
+    #                 color_dict={
+    #                     0: (0, 0, 0, 0),  # Transparent background
+    #                     1: roi_color      # ROI color with alpha
+    #                 }
+    #             )
+
+    #             roi_layer = self.viewer.add_labels(
+    #                 mask,
+    #                 name=f"ROI {i+1} Mask",
+    #                 visible=False,  # Start invisible, user can toggle
+    #                 opacity=0.6,
+    #                 blending='additive',
+    #                 colormap=label_colormap
+    #             )
+
+    #             # Add metadata for interaction
+    #             roi_layer.metadata.update({
+    #                 'roi_id': i+1,
+    #                 'roi_type': 'circular_detection',
+    #                 'analysis_ready': True,
+    #                 'center': self._get_roi_center(mask),
+    #                 'radius': self._get_roi_radius(mask)
+    #             })
+
+    #         self._log_message(f"Added {len(masks) + 1} new layers to viewer with contrast linking")
+
+    #     except Exception as e:
+    #         self._log_message(f"Error adding layers to viewer: {e}")
+    #         import traceback
+    #         self._log_message(f"Full error traceback: {traceback.format_exc()}")
+    # def _add_roi_layers_to_viewer(self, labeled_frame, masks):
+    #     """Enhanced ROI layer creation with dataset-specific handling."""
+    #     try:
+    #         # Determine dataset type and set appropriate properties
+    #         current_type = getattr(self, 'current_dataset_type', 'main')
+    #         is_calibration = (current_type == "calibration")
+
+    #         if is_calibration:
+    #             dataset_prefix = "CALIBRATION"
+    #             colormap = 'gray'  # Different colormap for calibration
+    #             file_name = os.path.basename(self.calibration_file_path_stored) if hasattr(self, 'calibration_file_path_stored') else "calibration"
+    #         else:
+    #             dataset_prefix = "MAIN"
+    #             colormap = 'gray'
+    #             file_name = os.path.basename(self.file_path) if self.file_path else "main_dataset"
+
+    #         # Get the original layer's contrast settings if it exists
+    #         original_contrast = None
+    #         for layer in self.viewer.layers:
+    #             if hasattr(layer, 'contrast_limits'):
+    #                 original_contrast = layer.contrast_limits
+    #                 break
+
+    #         # Add the labeled frame showing ROI detection
+    #         roi_detection_layer = self.viewer.add_image(
+    #             labeled_frame,
+    #             name=f"{dataset_prefix} - {file_name} - ROIs ({len(masks)})",
+    #             colormap=colormap,
+    #             visible=True,
+    #             opacity=0.8
+    #         )
+
+    #         # Apply original contrast if available
+    #         if original_contrast is not None:
+    #             roi_detection_layer.contrast_limits = original_contrast
+
+    #         # Store comprehensive metadata
+    #         roi_detection_layer.metadata.update({
+    #             'masks': masks,
+    #             'roi_count': len(masks),
+    #             'dataset_type': dataset_prefix.lower(),
+    #             'file_path': self.calibration_file_path_stored if is_calibration else self.file_path,
+    #             'workflow_step': 'roi_detection',
+    #             'analysis_ready': True
+    #         })
+
+    #         # Store dataset-specific results
+    #         if is_calibration:
+    #             # Store calibration results
+    #             self.calibration_masks = masks.copy()
+    #             self.calibration_labeled_frame = labeled_frame.copy()
+    #             self.masks = masks  # Also set for immediate use
+    #             self.labeled_frame = labeled_frame
+
+    #             # Enable calibration baseline processing
+    #             if hasattr(self, 'btn_process_calibration_baseline'):
+    #                 self.btn_process_calibration_baseline.setEnabled(True)
+
+    #             # Update calibration status
+    #             if hasattr(self, 'calibration_status_label'):
+    #                 self.calibration_status_label.setText(
+    #                     "✅ 1. Calibration file selected\n"
+    #                     "✅ 2. Calibration first frame loaded\n"
+    #                     "✅ 3. Calibration ROIs detected\n"
+    #                     "4. Process baseline (Analysis tab)"
+    #                 )
+    #         else:
+    #             # Store main dataset results
+    #             self.main_masks = masks.copy()
+    #             self.main_labeled_frame = labeled_frame.copy()
+    #             self.masks = masks
+    #             self.labeled_frame = labeled_frame
+
+    #         self._log_message(f"Added {dataset_prefix} ROI detection layer: {len(masks)} ROIs")
+
+    #         # Log ROI positions for verification
+    #         for i, mask in enumerate(masks):
+    #             center = self._get_roi_center(mask)
+    #             self._log_message(f"  {dataset_prefix} ROI {i+1}: center=({center[0]}, {center[1]})")
+
+    #     except Exception as e:
+    #         self._log_message(f"Error adding ROI layer to viewer: {e}")
+    #         import traceback
+    #         self._log_message(f"Full error traceback: {traceback.format_exc()}")
+
+    #         # Fallback: Add simple image layer
+    #         try:
+    #             dataset_prefix = "CALIBRATION" if getattr(self, 'current_dataset_type', 'main') == "calibration" else "MAIN"
+    #             self.viewer.add_image(
+    #                 labeled_frame,
+    #                 name=f"{dataset_prefix} - ROI Detection (Fallback)",
+    #                 colormap='gray',
+    #                 visible=True
+    #             )
+    #             self._log_message(f"Added fallback layer for {dataset_prefix} dataset")
+    #         except Exception as fallback_error:
+    #             self._log_message(f"Even fallback layer creation failed: {fallback_error}")
     def _add_roi_layers_to_viewer(self, labeled_frame, masks, dataset_type):
         """Add ROI layers with clear dataset identification."""
         try:
             if dataset_type == "CALIBRATION":
                 file_name = os.path.basename(self.calibration_file_path_stored)
                 layer_name = f"CALIBRATION - {file_name} - ROIs ({len(masks)})"
-                colormap = "gray"
+                colormap = "plasma"
             else:
                 file_name = os.path.basename(self.file_path)
                 layer_name = f"MAIN - {file_name} - ROIs ({len(masks)})"
@@ -3293,7 +3002,7 @@ class HDF5AnalysisWidget(QWidget):
                 sample_data = self.merged_results[sample_roi]
                 if sample_data:
                     restored_duration = (sample_data[-1][0] - sample_data[0][0]) / 60
-                    self._log_message("✅ Main dataset restored:")
+                    self._log_message(f"✅ Main dataset restored:")
                     self._log_message(f"   Path: {os.path.basename(self.file_path)}")
                     self._log_message(f"   ROIs: {len(self.merged_results)}")
                     self._log_message(f"   Duration: {restored_duration:.1f} minutes")
@@ -3335,7 +3044,7 @@ class HDF5AnalysisWidget(QWidget):
         expected_interval = self.frame_interval.value()
         interval_std = np.std(intervals)
 
-        self._log_message("🔍 AUTOMATIC TIMING ANALYSIS:")
+        self._log_message(f"🔍 AUTOMATIC TIMING ANALYSIS:")
         self._log_message(f"  Expected interval: {expected_interval:.1f}s")
         self._log_message(f"  Detected interval: {actual_interval:.1f}s")
         self._log_message(f"  Interval std: {interval_std:.2f}s")
@@ -3350,7 +3059,7 @@ class HDF5AnalysisWidget(QWidget):
 
         # AUTOMATIC CORRECTION
         correction_factor = actual_interval / expected_interval
-        self._log_message("⚠️  TIMING MISMATCH DETECTED - Applying automatic fix")
+        self._log_message(f"⚠️  TIMING MISMATCH DETECTED - Applying automatic fix")
         self._log_message(f"  Correction factor: {correction_factor:.2f}x")
 
         # 1. Update frame interval
@@ -3387,8 +3096,16 @@ class HDF5AnalysisWidget(QWidget):
 
     def _extract_analysis_parameters(self) -> Dict[str, Any]:
         """Enhanced parameter extraction that handles calibration method specifics."""
-        # Determine threshold method from active tab
-        threshold_method = self._get_current_threshold_method()
+        # Determine threshold method
+        method_text = self.threshold_method.currentText()
+        if "Baseline" in method_text:
+            threshold_method = "baseline"
+        elif "Calibration" in method_text:
+            threshold_method = "calibration"
+        elif "Adaptive" in method_text:
+            threshold_method = "adaptive"
+        else:
+            threshold_method = "baseline"
 
         # Basic parameters
         params = {
@@ -3496,76 +3213,169 @@ class HDF5AnalysisWidget(QWidget):
         self.calibration_status_label.setText("\n".join(current_status))
 
     def _run_analysis_with_calc_module(self):
-        """Simplified analysis using integration system."""
+        """Enhanced analysis with robust dataset management."""
         try:
-            # Determine method
-            method_text = self._get_current_threshold_method_display()
-            method = (
-                "calibration"
-                if "Calibration" in method_text
-                else "baseline" if "Baseline" in method_text else "adaptive"
-            )
+            # Check current dataset state
+            current_type = getattr(self, "current_dataset_type", "main")
+            self._log_message(f"Analysis starting in mode: {current_type}")
 
-            # Determine file and masks to use
-            if (
-                method == "calibration"
-                and hasattr(self, "main_dataset_path")
-                and self.main_dataset_path
-            ):
-                file_to_process = self.main_dataset_path
-                masks_to_use = getattr(self, "main_masks", [])
-            else:
-                file_to_process = self.file_path
-                masks_to_use = self.masks
+            # If we're in calibration mode, restore main dataset
+            if current_type == "calibration":
+                self._log_message(
+                    "Currently in calibration mode - need to restore main dataset"
+                )
 
-            if not file_to_process or not masks_to_use:
-                raise RuntimeError("No file or masks available for processing")
+                # Check if main dataset was stored
+                if not getattr(self, "main_dataset_stored", False):
+                    self._log_message("ERROR: No main dataset was stored")
+                    self._log_message(
+                        "SOLUTION: Load main dataset first, then calibration dataset"
+                    )
+                    raise RuntimeError(
+                        "No main dataset available. Please load main dataset before calibration."
+                    )
+
+                if not self.restore_main_dataset_for_analysis():
+                    self._log_message("ERROR: Failed to restore main dataset")
+                    self._log_message("SOLUTION: Reload main dataset and try again")
+                    raise RuntimeError("Failed to restore main dataset for analysis")
+
+            # Verify we have main dataset
+            if not hasattr(self, "merged_results") or not self.merged_results:
+                self._log_message("ERROR: No merged_results available")
+                raise RuntimeError(
+                    "No main dataset loaded. Please load HDF5 file first."
+                )
+
+            # Verify this is actually the main dataset
+            sample_roi = list(self.merged_results.keys())[0]
+            sample_data = self.merged_results[sample_roi]
+            if sample_data:
+                dataset_duration = (sample_data[-1][0] - sample_data[0][0]) / 60
+                self._log_message(
+                    f"VERIFICATION: Analyzing dataset with {dataset_duration:.1f} minutes duration"
+                )
+
+                if dataset_duration < 30:
+                    self._log_message(
+                        f"WARNING: Dataset duration ({dataset_duration:.1f}min) seems short for main experiment"
+                    )
 
             # Progress callback
-            def progress_callback(percent, msg):
+            def my_progress_callback(percent, msg):
                 if self._cancel_requested:
-                    raise RuntimeError("Analysis canceled")
+                    raise RuntimeError("Analysis canceled by user.")
                 self.progress_updated.emit(int(percent))
                 self.status_updated.emit(msg)
 
-            # Check if this is an AVI batch
-            if hasattr(self, "avi_batch_paths") and self.avi_batch_paths:
-                self._log_message("Processing AVI batch - loading all frames...")
-                _, merged_results, _ = self._process_avi_batch_for_analysis(
-                    self.avi_batch_paths,
-                    masks_to_use,
-                    self.chunk_size.value(),
-                    progress_callback,
-                    self.avi_batch_interval,
-                )
+            # Determine analysis method
+            method_text = self.threshold_method.currentText()
+
+            if "Baseline" in method_text:
+                method = "baseline"
+            elif "Adaptive" in method_text:
+                method = "adaptive"
+            elif "Calibration" in method_text:
+                method = "calibration"
             else:
-                # Process complete dataset using reader (HDF5)
-                _, merged_results, _ = process_single_file_in_parallel_dual_structure(
-                    file_to_process,
-                    masks_to_use,
-                    self.chunk_size.value(),
-                    progress_callback,
-                    self.frame_interval.value(),
-                    self.num_processes.value(),
-                )
+                method = "baseline"
 
-            self.merged_results = merged_results
+            self._log_message(f"STARTING {method.upper()} ANALYSIS ON MAIN DATASET")
+            self._log_message(f"Dataset: {os.path.basename(self.file_path)}")
+            self._log_message(f"ROIs: {len(self.merged_results)}")
 
-            # Apply timing correction
-            merged_results, _ = self._apply_automatic_timing_fix(merged_results)
+            merged_results = self.merged_results
 
-            # Get analysis parameters
-            analysis_params = self._extract_analysis_parameters()
+            # Apply automatic timing correction
+            self.status_updated.emit("Checking HDF5 timing consistency...")
+            merged_results, timing_corrected = self._apply_automatic_timing_fix(
+                merged_results
+            )
+
+            if timing_corrected:
+                self.status_updated.emit("Applied automatic timing correction...")
+                self._log_message("Applied automatic timing correction")
+
+            # Route to appropriate analysis method
+            self.status_updated.emit("Running comprehensive analysis...")
+            self._log_message(f"Starting analysis pipeline with method: {method}")
+
             if method == "calibration":
-                analysis_params["calibration_baseline_statistics"] = (
-                    self.calibration_baseline_statistics
+                # CALIBRATION METHOD: Use pre-computed baseline on MAIN dataset
+                if (
+                    hasattr(self, "calibration_baseline_processed")
+                    and self.calibration_baseline_processed
+                    and hasattr(self, "calibration_baseline_statistics")
+                    and self.calibration_baseline_statistics
+                ):
+
+                    self._log_message(
+                        "APPLYING PRE-COMPUTED CALIBRATION BASELINE TO MAIN DATASET"
+                    )
+
+                    from ._calc_calibration import (
+                        run_calibration_analysis_with_precomputed_baseline,
+                    )
+
+                    analysis_params = self._extract_analysis_parameters()
+
+                    # CRITICAL: Verify we're passing the MAIN dataset
+                    if merged_results:
+                        sample_roi = list(merged_results.keys())[0]
+                        sample_data = merged_results[sample_roi]
+                        if sample_data:
+                            main_duration = (
+                                sample_data[-1][0] - sample_data[0][0]
+                            ) / 60
+                            self._log_message(
+                                f"CONFIRMING: Passing {main_duration:.1f} minute main dataset to calibration analysis"
+                            )
+
+                    # Run analysis with pre-computed baseline ON MAIN DATASET
+                    analysis_results = run_calibration_analysis_with_precomputed_baseline(
+                        merged_results=merged_results,  # This is the MAIN dataset
+                        calibration_baseline_statistics=self.calibration_baseline_statistics,
+                        **analysis_params,
+                    )
+
+                else:
+                    raise RuntimeError(
+                        "Calibration method selected but no pre-computed baseline found. "
+                        "Please process calibration baseline first."
+                    )
+
+            elif method == "baseline":
+                from ._calc import run_baseline_analysis
+
+                analysis_params = self._extract_analysis_parameters()
+                analysis_results = run_baseline_analysis(
+                    merged_results, **analysis_params
                 )
 
-            # Use integration system
-            return run_analysis_with_method(merged_results, method, **analysis_params)
+            elif method == "adaptive":
+                from ._calc_adaptive import run_adaptive_analysis
+
+                analysis_params = self._extract_analysis_parameters()
+                analysis_results = run_adaptive_analysis(
+                    merged_results, **analysis_params
+                )
+
+            if not analysis_results:
+                raise Exception("Analysis pipeline returned empty results!")
+
+            # Log final verification
+            self._log_message(f"ANALYSIS COMPLETE ON MAIN DATASET")
+            self._log_message(f"Method: {method}")
+            self._log_message(f"Results: {list(analysis_results.keys())}")
+
+            self.progress_updated.emit(100)
+            return analysis_results
 
         except Exception as e:
-            self._log_message(f"Analysis error: {e}")
+            self._log_message(f"Analysis error: {str(e)}")
+            import traceback
+
+            self._log_message(f"Full traceback: {traceback.format_exc()}")
             raise
 
     def _log_analysis_parameters(self):
@@ -3575,38 +3385,15 @@ class HDF5AnalysisWidget(QWidget):
         self._log_message(f"ROIs: {len(self.masks)}")
         self._log_message(f"Processes: {self.num_processes.value()}")
         self._log_message(f"Chunk size: {self.chunk_size.value()}")
-        self._log_message(f"Method: {self._get_current_threshold_method_display()}")
+        self._log_message(f"Method: {self.threshold_method.currentText()}")
         self._log_message(f"Frame interval: {self.frame_interval.value()}s")
         self._log_message(
             f"Baseline duration: {self.baseline_duration_minutes.value()} min"
         )
         self._log_message(f"Threshold multiplier: {self.threshold_multiplier.value()}")
-        self._log_message("MATLAB normalization: Enabled")
-        self._log_message("HDF5 timing correction: Enabled")
+        self._log_message(f"MATLAB normalization: Enabled")
+        self._log_message(f"HDF5 timing correction: Enabled")
         self._log_message("=" * 50)
-
-    def _log_timing_analysis_with_units(self, timing_info):
-        """Log timing analysis with clear unit display."""
-        self._log_message("TIMING ANALYSIS (units clarified):")
-
-        if "mean_frame_drift" in timing_info:
-            drift_s = timing_info["mean_frame_drift"]
-            drift_ms = drift_s * 1000
-            self._log_message(f"  Mean Frame Drift: {drift_s:.3f}s ({drift_ms:.1f}ms)")
-
-        if "max_frame_drift" in timing_info:
-            max_drift_s = timing_info["max_frame_drift"]
-            max_drift_ms = max_drift_s * 1000
-            self._log_message(
-                f"  Max Frame Drift: {max_drift_s:.3f}s ({max_drift_ms:.1f}ms)"
-            )
-
-        if "std_frame_drift" in timing_info:
-            std_drift_s = timing_info["std_frame_drift"]
-            std_drift_ms = std_drift_s * 1000
-            self._log_message(
-                f"  Drift Std Dev: {std_drift_s:.3f}s ({std_drift_ms:.1f}ms)"
-            )
 
     def stop_analysis(self):
         """Stop analysis with proper cleanup."""
@@ -3840,42 +3627,21 @@ class HDF5AnalysisWidget(QWidget):
                 from ._plot import create_hysteresis_kwargs
 
                 kwargs = create_hysteresis_kwargs(widget_instance=self)
-                # Remove merged_results from kwargs to avoid duplicate argument
-                kwargs.pop("merged_results", None)
-
             elif plot_type == "Movement":
                 data_dict = getattr(self, "movement_data", {})
                 kwargs = {}
-
             elif plot_type == "Fraction Movement":
                 data_dict = getattr(self, "fraction_data", {})
                 kwargs = {}
-
             elif plot_type == "Quiescence":
                 data_dict = getattr(self, "quiescence_data", {})
                 kwargs = {}
-
             elif plot_type == "Sleep":
                 data_dict = getattr(self, "sleep_data", {})
                 kwargs = {}
-
             elif plot_type == "Lighting Conditions (dark IR)":
                 data_dict = getattr(self, "fraction_data", {})
-                from ._plot import create_hysteresis_kwargs
-
-                kwargs = create_hysteresis_kwargs(
-                    widget_instance=self
-                )  # Keep merged_results for lighting
-                kwargs.update({"bin_minutes": 10})  # Smaller bins for smoother curves
-
-                # Extract LED data from HDF5 if available
-                led_data = self._extract_led_data_from_hdf5()
-                if led_data:
-                    kwargs["led_data"] = led_data
-                    self._log_message(
-                        f"Using LED data from HDF5: {len(led_data.get('times', []))} data points"
-                    )
-
+                kwargs = {"bin_minutes": 30}
             else:
                 self.results_label.setText(f"Unknown plot type: {plot_type}")
                 return
@@ -3890,6 +3656,7 @@ class HDF5AnalysisWidget(QWidget):
             plot_config = create_plot_config(self)
 
             # Generate plot
+
             success = self.plot_generator.generate_plot(
                 plot_type, data_dict, self.roi_colors, plot_config, **kwargs
             )
@@ -3902,7 +3669,7 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message(f"Generated {plot_type} plot")
             else:
                 self.results_label.setText(f"Failed to generate {plot_type} plot.")
-                self._log_message("Plot generation returned False")
+                self._log_message(f"Plot generation returned False")
                 # Add debugging info
                 self._log_message(f"Debug - Plot type: {plot_type}")
                 self._log_message(
@@ -3918,98 +3685,6 @@ class HDF5AnalysisWidget(QWidget):
             import traceback
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
-
-    def _extract_led_data_from_hdf5(self):
-        """Extract LED power timeseries from HDF5 or AVI file.
-
-        Light phase = white LED ON (alone or with IR LED)
-        Dark phase = only IR LED ON (white LED OFF)
-
-        Returns:
-            dict or None: Dictionary with 'times', 'white_powers', and 'ir_powers' keys if LED data exists,
-                         None if no LED data is available
-        """
-        try:
-            if not hasattr(self, "file_path") or not self.file_path:
-                return None
-
-            # Check if this is an AVI file
-            if self.file_path.lower().endswith(".avi"):
-                return self._extract_led_data_from_avi()
-
-            # HDF5 file processing
-            with h5py.File(self.file_path, "r") as f:
-                if "timeseries" not in f:
-                    return None
-
-                timeseries = f["timeseries"]
-
-                # Try to find white LED data (various possible names)
-                white_led = None
-                white_led_names = [
-                    "led_white_power_percent",
-                    "white_led_power",
-                    "led_white_power",
-                    "white_led_power_percent",
-                    "led_power_percent",
-                ]
-                for name in white_led_names:
-                    if name in timeseries:
-                        white_led = timeseries[name][:]
-                        self._log_message(f"Found white LED data: {name}")
-                        break
-
-                # Try to find IR LED data (various possible names)
-                ir_led = None
-                ir_led_names = [
-                    "led_ir_power_percent",
-                    "ir_led_power",
-                    "led_ir_power",
-                    "ir_led_power_percent",
-                ]
-                for name in ir_led_names:
-                    if name in timeseries:
-                        ir_led = timeseries[name][:]
-                        self._log_message(f"Found IR LED data: {name}")
-                        break
-
-                # If no separate LED channels found, return None
-                if white_led is None:
-                    self._log_message("No white LED data found in HDF5 timeseries")
-                    return None
-
-                # Get timestamps (try capture_timestamps first, fallback to calculated times)
-                if "capture_timestamps" in timeseries:
-                    times = timeseries["capture_timestamps"][:]
-                else:
-                    # Fallback: use frame interval to calculate times
-                    frame_interval = self.frame_interval.value()
-                    times = np.arange(len(white_led)) * frame_interval
-
-                result = {"times": times.tolist(), "white_powers": white_led.tolist()}
-
-                if ir_led is not None:
-                    result["ir_powers"] = ir_led.tolist()
-
-                return result
-
-        except Exception as e:
-            self._log_message(f"Could not extract LED data from HDF5: {e}")
-            return None
-
-    def _extract_led_data_from_avi(self):
-        """AVI files don't contain LED data.
-
-        LED data is only available in HDF5 files.
-        For AVIs, plots will not show lighting conditions.
-
-        Returns:
-            None (AVIs don't have LED data)
-        """
-        self._log_message(
-            "AVI files don't contain LED data - lighting conditions will not be shown in plots"
-        )
-        return None
 
     def apply_time_range(self):
         """Apply time range and regenerate plot."""
@@ -4098,14 +3773,8 @@ class HDF5AnalysisWidget(QWidget):
             self._log_message("No file loaded")
             return
 
-        # Skip structure check for AVI files
-        if self.file_path.lower().endswith(".avi") or (
-            hasattr(self, "avi_batch_paths") and self.avi_batch_paths
-        ):
-            self._log_message("AVI file(s) loaded - skipping HDF5 structure check")
-            return
-
         import h5py
+        import json
 
         try:
             if DUAL_STRUCTURE_AVAILABLE:
@@ -4116,7 +3785,7 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message(f"Structure type: {structure_info['type']}")
 
                 if structure_info["type"] == "stacked_frames":
-                    self._log_message("✅ Stacked frames structure")
+                    self._log_message(f"✅ Stacked frames structure")
                     self._log_message(f"   Dataset: {structure_info['dataset_name']}")
                     self._log_message(
                         f"   Frame count: {structure_info['frame_count']}"
@@ -4126,7 +3795,7 @@ class HDF5AnalysisWidget(QWidget):
                     )
 
                 elif structure_info["type"] == "individual_frames":
-                    self._log_message("✅ Individual frames structure")
+                    self._log_message(f"✅ Individual frames structure")
                     self._log_message(f"   Group: {structure_info['group_name']}")
                     self._log_message(
                         f"   Frame count: {structure_info['frame_count']}"
@@ -4139,7 +3808,7 @@ class HDF5AnalysisWidget(QWidget):
                     )
 
                 elif structure_info["type"] == "alternative_dataset":
-                    self._log_message("✅ Alternative dataset structure")
+                    self._log_message(f"✅ Alternative dataset structure")
                     self._log_message(f"   Dataset: {structure_info['dataset_name']}")
                     self._log_message(
                         f"   Frame count: {structure_info['frame_count']}"
@@ -4253,7 +3922,7 @@ class HDF5AnalysisWidget(QWidget):
                 "fraction_data": getattr(self, "fraction_data", {}),
                 "sleep_data": getattr(self, "sleep_data", {}),
                 "parameters": {
-                    "threshold_method": self._get_current_threshold_method_display(),
+                    "threshold_method": self.threshold_method.currentText(),
                     "frame_interval": self.frame_interval.value(),
                     "enable_matlab_norm": True,
                     "enable_detrending": self.enable_detrending.isChecked(),
@@ -4364,7 +4033,7 @@ class HDF5AnalysisWidget(QWidget):
             try:
                 self._save_results_csv(csv_path)
                 saved_files.append(("CSV", csv_path))
-                self._log_message("✅ CSV saved successfully")
+                self._log_message(f"✅ CSV saved successfully")
             except Exception as e:
                 self._log_message(f"❌ CSV save failed: {e}")
 
@@ -4797,7 +4466,7 @@ class HDF5AnalysisWidget(QWidget):
             return
 
         # Generate threshold statistics for log
-        method = self._get_current_threshold_method_display()
+        method = self.threshold_method.currentText()
         self._log_message(f"Method: {method}")
 
         if hasattr(self, "baseline_duration_minutes"):
@@ -5024,7 +4693,7 @@ class HDF5AnalysisWidget(QWidget):
                         "Software Version",
                     ],
                     "Value": [
-                        self._get_current_threshold_method_display(),
+                        self.threshold_method.currentText(),
                         self.frame_interval.value(),
                         (
                             getattr(self, "baseline_duration_minutes", {}).value()
@@ -5095,7 +4764,7 @@ class HDF5AnalysisWidget(QWidget):
                     [f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
                 )
                 writer.writerow(
-                    [f"Analysis Method: {self._get_current_threshold_method_display()}"]
+                    [f"Analysis Method: {self.threshold_method.currentText()}"]
                 )
                 writer.writerow(
                     [f"Frame Interval: {self.frame_interval.value()} seconds"]
@@ -5289,7 +4958,7 @@ class HDF5AnalysisWidget(QWidget):
         stats_text += "=" * 50 + "\n\n"
 
         # Add method parameters
-        stats_text += f"Method: {self._get_current_threshold_method_display()}\n"
+        stats_text += f"Method: {self.threshold_method.currentText()}\n"
         if hasattr(self, "baseline_duration_minutes"):
             stats_text += f"Baseline Duration: {self.baseline_duration_minutes.value():.1f} minutes\n"
         if hasattr(self, "threshold_multiplier"):
@@ -5323,7 +4992,7 @@ class HDF5AnalysisWidget(QWidget):
             stats_text += f"  Hysteresis Zone: {lower_threshold:.3f} to {upper_threshold:.3f} (State unchanged)\n"
 
             if stats.get("was_detrended", False):
-                stats_text += "  Detrending: Applied\n"
+                stats_text += f"  Detrending: Applied\n"
 
             # Add method-specific information
             method = stats.get("method", "unknown")
@@ -5341,209 +5010,10 @@ class HDF5AnalysisWidget(QWidget):
             if line.strip():
                 self._log_message(line)
 
-    # def save_results_with_metadata(self):
-    #     """
-    #     Save HDF5 metadata with optional Nematostella timeseries analysis.
-    #     Enhanced to automatically detect and analyze Nematostella experiments.
-    #     """
-
-    #     # Check if we have a file loaded
-    #     if not hasattr(self, 'file_path') or not self.file_path:
-    #         self.results_label.setText("No HDF5 file loaded. Load a file first.")
-    #         self._log_message("Save failed: No HDF5 file loaded")
-    #         return
-
-    #     # Analysis results are optional for metadata extraction
-    #     has_analysis_results = (hasattr(self, "merged_results") and self.merged_results)
-
-    #     if has_analysis_results:
-    #         self._log_message("Saving analysis results with HDF5 metadata...")
-    #     else:
-    #         self._log_message("Saving HDF5 metadata only (no analysis results available)...")
-
-    #     # NEW: Check for Nematostella timeseries data
-    #     nematostella_results = None
-    #     # Direkte Prüfung statt globaler Variable
-    #     try:
-    #         from ._metadata import analyze_nematostella_hdf5_file
-    #         nematostella_available = True
-    #     except ImportError:
-    #         nematostella_available = False
-
-    #     if nematostella_available:
-    #         try:
-    #             self._log_message("Checking for Nematostella timeseries data...")
-
-    #             # Quick check if this is a Nematostella experiment
-    #             with h5py.File(self.file_path, 'r') as h5_file:
-    #                 if 'timeseries' in h5_file:
-    #                     ts_group = h5_file['timeseries']
-    #                     # Check for typical Nematostella parameters
-    #                     nematostella_indicators = [
-    #                         'actual_intervals', 'expected_intervals', 'frame_drift',
-    #                         'temperature', 'humidity', 'led_power_percent'
-    #                     ]
-
-    #                     found_indicators = [key for key in ts_group.keys() if key in nematostella_indicators]
-
-    #                     if len(found_indicators) >= 2:  # At least 2 indicators found
-    #                         self._log_message(f"Nematostella experiment detected! Found: {', '.join(found_indicators)}")
-    #                         self._log_message("Running specialized Nematostella timeseries analysis...")
-
-    #                         # Run Nematostella analysis
-    #                         nematostella_results = analyze_nematostella_hdf5_file(self.file_path)
-
-    #                         if nematostella_results['success']:
-    #                             self._log_message(f"Nematostella analysis completed: {len(nematostella_results['sheets_created'])} sheets")
-    #                         else:
-    #                             self._log_message(f"Nematostella analysis failed: {nematostella_results['error']}")
-    #                     else:
-    #                         self._log_message("No Nematostella-specific timeseries detected")
-    #         except Exception as e:
-    #             self._log_message(f"Nematostella detection failed: {e}")
-
-    #     # Get base filename from user
-    #     from qtpy.QtWidgets import QFileDialog
-
-    #     if nematostella_results and nematostella_results['success']:
-    #         dialog_title = "Save HDF5 Metadata with Nematostella Analysis"
-    #         default_name = f"nematostella_metadata_{int(time.time())}"
-    #     else:
-    #         dialog_title = "Save HDF5 Metadata" + (" with Analysis Results" if has_analysis_results else "")
-    #         default_name = f"hdf5_metadata_{int(time.time())}"
-
-    #     base_path, _ = QFileDialog.getSaveFileName(
-    #         self, dialog_title, default_name, "All Files (*)"
-    #     )
-
-    #     if not base_path:
-    #         self._log_message("Save cancelled by user")
-    #         return
-
-    #     base_path = os.path.splitext(base_path)[0]
-    #     saved_files = []
-
-    #     try:
-    #         # Extract regular metadata
-    #         self._log_message("Extracting HDF5 metadata with time-series support...")
-    #         metadata_dict = {}
-
-    #         # Extract from main file with time-series capability
-    #         if hasattr(self, 'file_path') and self.file_path:
-    #             self._log_message(f"   Extracting from main file: {os.path.basename(self.file_path)}")
-    #             try:
-    #                 main_metadata = extract_hdf5_metadata_timeseries(self.file_path)
-    #                 metadata_dict['main_file'] = main_metadata
-
-    #                 if 'timeseries_data' in main_metadata and main_metadata['timeseries_data']:
-    #                     ts_data = main_metadata['timeseries_data']
-    #                     self._log_message(f"     Found {len(ts_data)} time-series parameters")
-
-    #             except Exception as e:
-    #                 self._log_message(f"     Main file metadata extraction failed: {e}")
-    #                 metadata_dict['main_file'] = {'error': str(e), 'timeseries_data': {}}
-
-    #         # Add analysis metadata (only if we have analysis results)
-    #         if has_analysis_results:
-    #             metadata_dict['analysis_info'] = {
-    #                 'analysis_method': self._get_current_threshold_method_display(),
-    #                 'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-    #                 'frame_interval': self.frame_interval.value(),
-    #                 'rois_analyzed': len(self.merged_results),
-    #                 'software_version': 'HDF5 Activity Analysis Widget v1.0',
-    #                 'parameters': self._get_analysis_parameters_for_metadata(),
-    #                 'timeseries_data': {}
-    #             }
-    #         else:
-    #             metadata_dict['file_info_only'] = {
-    #                 'extraction_type': 'HDF5 metadata only',
-    #                 'extraction_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-    #                 'source_file': os.path.basename(self.file_path),
-    #                 'software_version': 'HDF5 Activity Analysis Widget v1.0',
-    #                 'timeseries_data': {}
-    #             }
-
-    #         # NEW: Add Nematostella analysis results if available
-    #         if nematostella_results and nematostella_results['success']:
-    #             metadata_dict['nematostella_analysis'] = {
-    #                 'analysis_type': 'Nematostella Timeseries Analysis',
-    #                 'excel_file': nematostella_results['excel_file'],
-    #                 'report_file': nematostella_results['report_file'],
-    #                 'sheets_created': nematostella_results['sheets_created'],
-    #                 'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-    #                 'timeseries_data': {}
-    #             }
-
-    #         self._log_message("Metadata extraction completed")
-
-    #         # Save CSV with metadata
-    #         csv_path = f"{base_path}_metadata.csv"
-    #         self._log_message(f"Saving CSV with metadata: {os.path.basename(csv_path)}")
-
-    #         try:
-    #             self._save_results_csv_with_metadata(csv_path, metadata_dict, has_analysis_results)
-    #             saved_files.append(("CSV with Metadata", csv_path))
-    #             self._log_message("CSV with metadata saved successfully")
-    #         except Exception as e:
-    #             self._log_message(f"CSV save failed: {e}")
-
-    #         # Save Excel with metadata (if pandas available)
-    #         try:
-    #             import pandas as pd
-    #             excel_path = f"{base_path}_metadata.xlsx"
-    #             self._log_message(f"Saving Excel with metadata: {os.path.basename(excel_path)}")
-
-    #             self._save_results_excel_with_metadata(excel_path, metadata_dict, has_analysis_results)
-    #             saved_files.append(("Excel with Metadata", excel_path))
-    #             self._log_message("Excel with metadata saved successfully")
-
-    #         except ImportError:
-    #             self._log_message("Excel export not available (missing pandas/openpyxl)")
-    #         except Exception as e:
-    #             self._log_message(f"Excel save failed: {e}")
-
-    #         # Update UI
-    #         if saved_files:
-    #             file_list = ", ".join([f"{fmt} ({os.path.basename(path)})" for fmt, path in saved_files])
-
-    #             if nematostella_results and nematostella_results['success']:
-    #                 result_msg = f"Saved metadata + Nematostella analysis: {file_list}"
-    #                 result_msg += f" + {nematostella_results['excel_file']}"
-    #             else:
-    #                 result_msg = f"Saved metadata: {file_list}"
-
-    #             self.results_label.setText(result_msg)
-    #             self._log_message(f"Save with metadata complete: {len(saved_files)} files created")
-
-    #             # Log Nematostella results if available
-    #             if nematostella_results and nematostella_results['success']:
-    #                 self._log_message("Nematostella Analysis Summary:")
-    #                 report_lines = nematostella_results['report'].split('\n')
-    #                 for line in report_lines:
-    #                     if any(section in line for section in ['## Timing Analysis', '## Environmental Conditions', '## LED System']):
-    #                         self._log_message(line)
-    #                     elif line.strip().startswith('-') and any(keyword in line for keyword in ['Mean', 'Accuracy', 'Success Rate']):
-    #                         self._log_message(f"  {line.strip()}")
-
-    #             # Check if method supports nematostella_results parameter
-    #             try:
-    #                 self._show_save_success_dialog_with_metadata(saved_files, metadata_dict, nematostella_results)
-    #             except TypeError:
-    #                 # Fallback to old method signature
-    #                 self._show_save_success_dialog_with_metadata(saved_files, metadata_dict)
-    #         else:
-    #             self.results_label.setText("All save attempts failed - check log")
-
-    #     except Exception as e:
-    #         error_msg = f"Save with metadata failed: {e}"
-    #         self.results_label.setText(error_msg)
-    #         self._log_message(error_msg)
-    #         import traceback
-    #         self._log_message(f"Traceback: {traceback.format_exc()}")
     def save_results_with_metadata(self):
         """
-        Save HDF5 metadata with automatic legacy enhancement and optional Nematostella analysis.
-        Enhanced to automatically detect legacy files and add unit documentation.
+        Save HDF5 metadata with optional Nematostella timeseries analysis.
+        Enhanced to automatically detect and analyze Nematostella experiments.
         """
 
         # Check if we have a file loaded
@@ -5564,6 +5034,7 @@ class HDF5AnalysisWidget(QWidget):
 
         # NEW: Check for Nematostella timeseries data
         nematostella_results = None
+
         # Direkte Prüfung statt globaler Variable
         try:
             from ._metadata import analyze_nematostella_hdf5_file
@@ -5648,80 +5119,29 @@ class HDF5AnalysisWidget(QWidget):
         saved_files = []
 
         try:
-            # === AUTOMATIC LEGACY ENHANCEMENT INTEGRATION ===
-            self._log_message(
-                "Extracting HDF5 metadata with automatic legacy enhancement..."
-            )
+            # Extract regular metadata
+            self._log_message("Extracting HDF5 metadata with time-series support...")
             metadata_dict = {}
 
-            # Extract from main file with automatic legacy enhancement
+            # Extract from main file with time-series capability
             if hasattr(self, "file_path") and self.file_path:
                 self._log_message(
                     f"   Extracting from main file: {os.path.basename(self.file_path)}"
                 )
                 try:
-                    # This function now automatically enhances legacy files
                     main_metadata = extract_hdf5_metadata_timeseries(self.file_path)
                     metadata_dict["main_file"] = main_metadata
 
-                    # Log automatic legacy enhancement results
-                    if main_metadata.get("legacy_enhanced", False):
-                        enhancement_info = main_metadata.get("_enhancement_summary", {})
-                        enhanced_params = enhancement_info.get("parameters_enhanced", 0)
-                        self._log_message("     ✅ Legacy file automatically enhanced!")
-                        self._log_message(
-                            f"     📏 Unit documentation added for {enhanced_params} parameters"
-                        )
-                        self._log_message(
-                            f"     🕒 Enhancement timestamp: {main_metadata.get('enhancement_timestamp', 'unknown')}"
-                        )
-                        self._log_message(
-                            "     📊 Unit standard: seconds for timing, celsius for temp, percent for humidity"
-                        )
-                    elif main_metadata.get("modern_file", False):
-                        self._log_message(
-                            "     ✅ Modern file with existing unit documentation detected"
-                        )
-                    else:
-                        self._log_message("     ⚠️ File type could not be determined")
-
-                    # Log timeseries data found
                     if (
                         "timeseries_data" in main_metadata
                         and main_metadata["timeseries_data"]
                     ):
                         ts_data = main_metadata["timeseries_data"]
-                        # Count non-metadata parameters
-                        param_count = len(
-                            [k for k in ts_data.keys() if not k.startswith("_")]
-                        )
                         self._log_message(
-                            f"     📈 Found {param_count} time-series parameters"
+                            f"     Found {len(ts_data)} time-series parameters"
                         )
 
-                        # Log unit enhancement details if available
-                        unit_info = ts_data.get("_unit_info", {})
-                        if unit_info:
-                            timing_params = [
-                                k
-                                for k, v in unit_info.items()
-                                if v.get("units") == "seconds"
-                            ]
-                            environmental_params = [
-                                k
-                                for k, v in unit_info.items()
-                                if v.get("units") in ["celsius", "percent"]
-                            ]
-                            if timing_params:
-                                self._log_message(
-                                    f"       ⏱️ Timing parameters: {', '.join(timing_params[:3])}{'...' if len(timing_params) > 3 else ''}"
-                                )
-                            if environmental_params:
-                                self._log_message(
-                                    f"       🌡️ Environmental parameters: {', '.join(environmental_params)}"
-                                )
-
-                except Exception as e:  # <-- JETZT KORREKT EINGERÜCKT
+                except Exception as e:
                     self._log_message(f"     Main file metadata extraction failed: {e}")
                     metadata_dict["main_file"] = {
                         "error": str(e),
@@ -5731,70 +5151,63 @@ class HDF5AnalysisWidget(QWidget):
             # Add analysis metadata (only if we have analysis results)
             if has_analysis_results:
                 metadata_dict["analysis_info"] = {
-                    "analysis_method": self._get_current_threshold_method_display(),
+                    "analysis_method": self.threshold_method.currentText(),
                     "analysis_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "frame_interval": self.frame_interval.value(),
                     "rois_analyzed": len(self.merged_results),
-                    "software_version": "HDF5 Activity Analysis Widget v1.0 (Legacy Enhanced)",
+                    "software_version": "HDF5 Activity Analysis Widget v1.0",
                     "parameters": self._get_analysis_parameters_for_metadata(),
                     "timeseries_data": {},
-                    "legacy_compatibility": True,  # Mark as legacy-compatible
                 }
             else:
                 metadata_dict["file_info_only"] = {
-                    "extraction_type": "HDF5 metadata only (Legacy Enhanced)",
+                    "extraction_type": "HDF5 metadata only",
                     "extraction_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "source_file": os.path.basename(self.file_path),
-                    "software_version": "HDF5 Activity Analysis Widget v1.0 (Legacy Enhanced)",
+                    "software_version": "HDF5 Activity Analysis Widget v1.0",
                     "timeseries_data": {},
-                    "legacy_compatibility": True,
                 }
 
             # NEW: Add Nematostella analysis results if available
             if nematostella_results and nematostella_results["success"]:
                 metadata_dict["nematostella_analysis"] = {
-                    "analysis_type": "Nematostella Timeseries Analysis (Legacy Enhanced)",
+                    "analysis_type": "Nematostella Timeseries Analysis",
                     "excel_file": nematostella_results["excel_file"],
                     "report_file": nematostella_results["report_file"],
                     "sheets_created": nematostella_results["sheets_created"],
                     "analysis_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "timeseries_data": {},
-                    "legacy_enhanced": metadata_dict["main_file"].get(
-                        "legacy_enhanced", False
-                    ),
                 }
 
-            self._log_message("Metadata extraction with legacy enhancement completed")
+            self._log_message("Metadata extraction completed")
 
-            # Save CSV with enhanced metadata
+            # Save CSV with metadata
             csv_path = f"{base_path}_metadata.csv"
-            self._log_message(
-                f"Saving enhanced CSV with metadata: {os.path.basename(csv_path)}"
-            )
+            self._log_message(f"Saving CSV with metadata: {os.path.basename(csv_path)}")
 
             try:
                 self._save_results_csv_with_metadata(
                     csv_path, metadata_dict, has_analysis_results
                 )
-                saved_files.append(("Enhanced CSV with Metadata", csv_path))
-                self._log_message("Enhanced CSV with metadata saved successfully")
+                saved_files.append(("CSV with Metadata", csv_path))
+                self._log_message("CSV with metadata saved successfully")
             except Exception as e:
                 self._log_message(f"CSV save failed: {e}")
 
-            # Save Excel with enhanced metadata (if pandas available)
+            # Save Excel with metadata (if pandas available)
             try:
                 import pandas as pd
 
                 excel_path = f"{base_path}_metadata.xlsx"
                 self._log_message(
-                    f"Saving enhanced Excel with metadata: {os.path.basename(excel_path)}"
+                    f"Saving Excel with metadata: {os.path.basename(excel_path)}"
                 )
 
                 self._save_results_excel_with_metadata(
                     excel_path, metadata_dict, has_analysis_results
                 )
-                saved_files.append(("Enhanced Excel with Metadata", excel_path))
-                self._log_message("Enhanced Excel with metadata saved successfully")
+                saved_files.append(("Excel with Metadata", excel_path))
+                self._log_message("Excel with metadata saved successfully")
 
             except ImportError:
                 self._log_message(
@@ -5803,45 +5216,22 @@ class HDF5AnalysisWidget(QWidget):
             except Exception as e:
                 self._log_message(f"Excel save failed: {e}")
 
-            # Update UI with legacy enhancement information
+            # Update UI
             if saved_files:
                 file_list = ", ".join(
                     [f"{fmt} ({os.path.basename(path)})" for fmt, path in saved_files]
                 )
 
-                # Enhanced result message
-                is_legacy = metadata_dict.get("main_file", {}).get(
-                    "legacy_enhanced", False
-                )
-                legacy_suffix = " (Legacy Enhanced)" if is_legacy else ""
-
                 if nematostella_results and nematostella_results["success"]:
-                    result_msg = f"Saved metadata + Nematostella analysis{legacy_suffix}: {file_list}"
-                    result_msg += (
-                        f" + {os.path.basename(nematostella_results['excel_file'])}"
-                    )
+                    result_msg = f"Saved metadata + Nematostella analysis: {file_list}"
+                    result_msg += f" + {nematostella_results['excel_file']}"
                 else:
-                    result_msg = f"Saved metadata{legacy_suffix}: {file_list}"
+                    result_msg = f"Saved metadata: {file_list}"
 
                 self.results_label.setText(result_msg)
                 self._log_message(
                     f"Save with metadata complete: {len(saved_files)} files created"
                 )
-
-                # Log enhancement summary
-                if is_legacy:
-                    enhancement_summary = metadata_dict["main_file"].get(
-                        "_enhancement_summary", {}
-                    )
-                    enhanced_count = enhancement_summary.get("parameters_enhanced", 0)
-                    self._log_message("📋 Legacy Enhancement Summary:")
-                    self._log_message(f"   Parameters enhanced: {enhanced_count}")
-                    self._log_message(
-                        f"   Unit standard applied: {enhancement_summary.get('unit_standard', 'Unknown')}"
-                    )
-                    self._log_message(
-                        "   Files include comprehensive unit documentation"
-                    )
 
                 # Log Nematostella results if available
                 if nematostella_results and nematostella_results["success"]:
@@ -5863,7 +5253,7 @@ class HDF5AnalysisWidget(QWidget):
                         ):
                             self._log_message(f"  {line.strip()}")
 
-                # Show enhanced success dialog
+                # Check if method supports nematostella_results parameter
                 try:
                     self._show_save_success_dialog_with_metadata(
                         saved_files, metadata_dict, nematostella_results
@@ -5884,72 +5274,6 @@ class HDF5AnalysisWidget(QWidget):
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
 
-    def _create_legacy_enhanced_sheets(
-        self, writer, ts_data: dict, unit_info: dict, source_name: str
-    ):
-        """Create enhanced sheets for legacy data with automatic unit documentation."""
-
-        # Erstelle DataFrame mit Unit-erweiterten Spalten-Namen
-        enhanced_columns = {}
-
-        for param_name, param_data in ts_data.items():
-            if param_name.startswith("_"):
-                continue  # Skip metadata
-
-            unit = unit_info.get(param_name, {}).get("units", "unknown")
-
-            if unit == "seconds" and "drift" in param_name.lower():
-                # Für Timing-Daten: beide Einheiten
-                enhanced_columns[f"{param_name}_sec"] = param_data
-                enhanced_columns[f"{param_name}_ms"] = [
-                    d * 1000 if d else 0 for d in param_data
-                ]
-            else:
-                # Standard Parameter mit Unit-Suffix
-                enhanced_columns[f"{param_name}_{unit}"] = param_data
-
-        if enhanced_columns:
-            # Frame index hinzufügen
-            max_length = max(
-                len(data)
-                for data in enhanced_columns.values()
-                if isinstance(data, (list, tuple))
-            )
-            enhanced_columns["frame_index"] = list(range(max_length))
-
-            df = pd.DataFrame(enhanced_columns)
-            sheet_name = f"Enhanced_{source_name}"[:31]
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    def _create_automatic_units_reference_sheet(self, writer, metadata_dict: dict):
-        """Automatically create units reference sheet for legacy files."""
-
-        units_found = set()
-
-        # Sammle alle gefundenen Parameter und ihre Units
-        for metadata in metadata_dict.values():
-            if "timeseries_data" in metadata:
-                unit_info = metadata["timeseries_data"].get("_unit_info", {})
-                for param, info in unit_info.items():
-                    units_found.add(
-                        (param, info["units"], info.get("display_hint", ""))
-                    )
-
-        if units_found:
-            units_data = []
-            for param, unit, hint in sorted(units_found):
-                units_data.append(
-                    {
-                        "Parameter": param,
-                        "Units": unit,
-                        "Display_Hint": hint,
-                        "Enhancement": "Automatically added for legacy compatibility",
-                    }
-                )
-
-            units_df = pd.DataFrame(units_data)
-            units_df.to_excel(writer, sheet_name="Auto_Units_Reference", index=False)
-
     def _save_results_csv_with_metadata(
         self, file_path: str, metadata_dict: dict, has_analysis_results: bool = True
     ):
@@ -5957,6 +5281,7 @@ class HDF5AnalysisWidget(QWidget):
         Save CSV with HDF5 metadata time-series (with optional analysis results).
         """
         import csv
+        import numpy as np
         from datetime import datetime
 
         with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
@@ -6254,79 +5579,48 @@ class HDF5AnalysisWidget(QWidget):
         self, excel_path: str, metadata_dict: dict, has_analysis_results: bool = True
     ):
         """
-        Save Excel with unit-enhanced headers for legacy files and individual HDF5 sheets.
+        Save Excel with individual sheets for EACH HDF5 time-series parameter (with optional analysis results).
         """
         import pandas as pd
 
-        # Check if this is a legacy enhanced file
-        is_legacy_enhanced = metadata_dict.get("main_file", {}).get(
-            "legacy_enhanced", False
-        )
-
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
 
-            # === SUMMARY SHEET (with unit-aware columns if legacy enhanced) ===
+            # === SUMMARY SHEET (only if analysis results available) ===
             if has_analysis_results:
                 sorted_rois = sorted(self.merged_results.keys())
 
                 summary_data = []
                 for roi in sorted_rois:
-                    if is_legacy_enhanced:
-                        # Enhanced column names with units
-                        row_data = {
-                            "ROI": roi,
-                            "Baseline_Mean_intensity": getattr(
-                                self, "roi_baseline_means", {}
-                            ).get(roi, 0),
-                            "Upper_Threshold_intensity": getattr(
-                                self, "roi_upper_thresholds", {}
-                            ).get(roi, 0),
-                            "Lower_Threshold_intensity": getattr(
-                                self, "roi_lower_thresholds", {}
-                            ).get(roi, 0),
-                        }
-                    else:
-                        # Traditional column names
-                        row_data = {
-                            "ROI": roi,
-                            "Baseline Mean": getattr(
-                                self, "roi_baseline_means", {}
-                            ).get(roi, 0),
-                            "Upper Threshold": getattr(
-                                self, "roi_upper_thresholds", {}
-                            ).get(roi, 0),
-                            "Lower Threshold": getattr(
-                                self, "roi_lower_thresholds", {}
-                            ).get(roi, 0),
-                        }
+                    row_data = {
+                        "ROI": roi,
+                        "Baseline Mean": getattr(self, "roi_baseline_means", {}).get(
+                            roi, 0
+                        ),
+                        "Upper Threshold": getattr(
+                            self, "roi_upper_thresholds", {}
+                        ).get(roi, 0),
+                        "Lower Threshold": getattr(
+                            self, "roi_lower_thresholds", {}
+                        ).get(roi, 0),
+                    }
 
-                    # Add movement and sleep statistics with unit-aware names
+                    # Add movement and sleep statistics
                     movement_data = getattr(self, "movement_data", {})
                     if roi in movement_data and movement_data[roi]:
                         movement_values = [m for _, m in movement_data[roi]]
-                        movement_pct = (
+                        row_data["Movement Percentage"] = (
                             (sum(movement_values) / len(movement_values) * 100)
                             if movement_values
                             else 0
                         )
 
-                        if is_legacy_enhanced:
-                            row_data["Movement_Percentage_0to100"] = movement_pct
-                        else:
-                            row_data["Movement Percentage"] = movement_pct
-
                     sleep_data = getattr(self, "sleep_data", {})
                     if roi in sleep_data and sleep_data[roi]:
                         sleep_values = [s for _, s in sleep_data[roi]]
                         total_sleep_bins = sum(sleep_values)
-                        sleep_minutes = (
+                        row_data["Sleep Time (min)"] = (
                             total_sleep_bins * self.bin_size_seconds.value()
                         ) / 60
-
-                        if is_legacy_enhanced:
-                            row_data["Sleep_Time_minutes"] = sleep_minutes
-                        else:
-                            row_data["Sleep Time (min)"] = sleep_minutes
 
                     summary_data.append(row_data)
 
@@ -6334,15 +5628,11 @@ class HDF5AnalysisWidget(QWidget):
                 summary_df.to_excel(writer, sheet_name="Summary", index=False)
                 all_sheets_created = ["Summary"]
             else:
-                # Create info sheet with legacy enhancement info
+                # Create info sheet instead of summary
                 info_data = [
                     {
                         "Property": "Extraction Type",
-                        "Value": (
-                            "HDF5 Metadata Only (Legacy Enhanced)"
-                            if is_legacy_enhanced
-                            else "HDF5 Metadata Only"
-                        ),
+                        "Value": "HDF5 Metadata Only",
                         "Description": "No analysis results available",
                     },
                     {
@@ -6357,41 +5647,25 @@ class HDF5AnalysisWidget(QWidget):
                     },
                 ]
 
-                if is_legacy_enhanced:
-                    info_data.append(
-                        {
-                            "Property": "Legacy Enhancement",
-                            "Value": "Applied",
-                            "Description": "Unit documentation added automatically",
-                        }
-                    )
-
                 info_df = pd.DataFrame(info_data)
                 info_df.to_excel(writer, sheet_name="File_Info", index=False)
                 all_sheets_created = ["File_Info"]
 
-            # === PROCESS HDF5 TIME-SERIES METADATA WITH UNIT ENHANCEMENT ===
+            # === PROCESS HDF5 TIME-SERIES METADATA ===
             for source_name, metadata in metadata_dict.items():
-                if source_name in [
-                    "analysis_info",
-                    "file_info_only",
-                    "nematostella_analysis",
-                ]:
+                if source_name in ["analysis_info", "file_info_only"]:
                     continue
 
                 # Process HDF5 time-series metadata
                 if "timeseries_data" in metadata and metadata["timeseries_data"]:
                     ts_data = metadata["timeseries_data"]
 
-                    # Get unit information if available
-                    unit_info = ts_data.get("_unit_info", {})
-
                     # Filter to get only HDF5 metadata
                     hdf5_metadata_only = self._filter_hdf5_metadata_only(ts_data)
 
                     if hdf5_metadata_only:
                         self._log_message(
-                            f"Creating unit-enhanced Excel sheets for {len(hdf5_metadata_only)} HDF5 parameters from {source_name}"
+                            f"Creating individual Excel sheets for {len(hdf5_metadata_only)} HDF5 parameters from {source_name}"
                         )
 
                         # Use frame interval from analysis if available, otherwise default
@@ -6399,61 +5673,56 @@ class HDF5AnalysisWidget(QWidget):
                             self.frame_interval.value() if has_analysis_results else 5.0
                         )
 
-                        # CREATE UNIT-ENHANCED SHEETS
-                        if is_legacy_enhanced and unit_info:
-                            # Use enhanced unit-aware sheet creation
-                            created_sheets = (
-                                self._create_unit_enhanced_timeseries_sheets(
-                                    writer,
-                                    hdf5_metadata_only,
-                                    unit_info,
-                                    frame_interval,
-                                    source_name,
-                                )
+                        try:
+                            # Try to use the imported function
+                            from ._metadata import (
+                                create_individual_timeseries_sheets,
+                                create_combined_timeseries_sheet,
+                            )
+
+                            # CREATE INDIVIDUAL SHEET FOR EACH PARAMETER
+                            individual_sheets = create_individual_timeseries_sheets(
+                                writer, hdf5_metadata_only, frame_interval
+                            )
+
+                            all_sheets_created.extend(individual_sheets)
+
+                            for sheet_name in individual_sheets:
+                                self._log_message(f"   ✓ Created sheet '{sheet_name}'")
+
+                            # CREATE COMBINED SHEET WITH ALL PARAMETERS (if multiple parameters)
+                            if len(hdf5_metadata_only) > 1:
+                                try:
+                                    combined_sheet_name = f"All_HDF5_{source_name}"[:31]
+                                    create_combined_timeseries_sheet(
+                                        writer,
+                                        hdf5_metadata_only,
+                                        frame_interval,
+                                        combined_sheet_name,
+                                    )
+                                    all_sheets_created.append(combined_sheet_name)
+                                    self._log_message(
+                                        f"   ✓ Created combined sheet '{combined_sheet_name}' with {len(hdf5_metadata_only)} parameters"
+                                    )
+                                except Exception as e:
+                                    self._log_message(
+                                        f"   Warning: Could not create combined sheet: {e}"
+                                    )
+
+                        except ImportError:
+                            # Fallback: create sheets manually
+                            self._log_message("   Using manual sheet creation")
+                            created_sheets = self._create_timeseries_sheets_manually(
+                                writer, hdf5_metadata_only, source_name
                             )
                             all_sheets_created.extend(created_sheets)
 
-                            self._log_message(
-                                f"   ✅ Created {len(created_sheets)} unit-enhanced sheets"
+                        except Exception as e:
+                            self._log_message(f"   Error with metadata functions: {e}")
+                            created_sheets = self._create_timeseries_sheets_manually(
+                                writer, hdf5_metadata_only, source_name
                             )
-                            for sheet_name in created_sheets:
-                                self._log_message(f"   - {sheet_name}")
-
-                        else:
-                            # Fallback to regular sheet creation
-                            try:
-                                from ._metadata import (
-                                    create_individual_timeseries_sheets,
-                                    create_combined_timeseries_sheet,
-                                )
-
-                                individual_sheets = create_individual_timeseries_sheets(
-                                    writer, hdf5_metadata_only, frame_interval
-                                )
-                                all_sheets_created.extend(individual_sheets)
-
-                                for sheet_name in individual_sheets:
-                                    self._log_message(
-                                        f"   ✓ Created sheet '{sheet_name}'"
-                                    )
-
-                            except ImportError:
-                                created_sheets = (
-                                    self._create_timeseries_sheets_manually(
-                                        writer, hdf5_metadata_only, source_name
-                                    )
-                                )
-                                all_sheets_created.extend(created_sheets)
-                            except Exception as e:
-                                self._log_message(
-                                    f"   Error with metadata functions: {e}"
-                                )
-                                created_sheets = (
-                                    self._create_timeseries_sheets_manually(
-                                        writer, hdf5_metadata_only, source_name
-                                    )
-                                )
-                                all_sheets_created.extend(created_sheets)
+                            all_sheets_created.extend(created_sheets)
 
                 # Static HDF5 metadata sheet
                 static_metadata = {
@@ -6520,131 +5789,12 @@ class HDF5AnalysisWidget(QWidget):
                         f"   Warning: Could not create parameters sheet: {e}"
                     )
 
-            # Log final summary with enhancement info
-            enhancement_info = " (with unit enhancement)" if is_legacy_enhanced else ""
+            # Log final summary
             self._log_message(
-                f"Excel file created{enhancement_info} with {len(all_sheets_created)} sheets:"
+                f"Excel file created with {len(all_sheets_created)} sheets:"
             )
             for sheet in all_sheets_created:
                 self._log_message(f"   - {sheet}")
-
-    def _create_unit_enhanced_timeseries_sheets(
-        self,
-        writer,
-        hdf5_metadata: dict,
-        unit_info: dict,
-        frame_interval: float,
-        source_name: str,
-    ):
-        """Create individual timeseries sheets with unit-enhanced column headers."""
-        sheets_created = []
-
-        # Create individual sheet for each parameter with unit-enhanced names
-        for param_name, param_data in hdf5_metadata.items():
-            if (
-                not isinstance(param_data, (list, tuple, np.ndarray))
-                or len(param_data) == 0
-            ):
-                continue
-
-            try:
-                max_length = len(param_data)
-                time_minutes = [(i * frame_interval) / 60.0 for i in range(max_length)]
-
-                # Get unit information
-                unit = unit_info.get(param_name, {}).get("units", "unknown")
-
-                # Create unit-enhanced column names
-                if unit == "seconds" and "drift" in param_name.lower():
-                    # For timing parameters: create both seconds and milliseconds columns
-                    df_data = {
-                        "Time_minutes": time_minutes,
-                        f"{param_name}_seconds": param_data,
-                        f"{param_name}_milliseconds": [
-                            d * 1000 if d else 0 for d in param_data
-                        ],
-                    }
-                elif unit == "celsius":
-                    df_data = {
-                        "Time_minutes": time_minutes,
-                        f"{param_name}_celsius": param_data,
-                    }
-                elif unit == "percent":
-                    df_data = {
-                        "Time_minutes": time_minutes,
-                        f"{param_name}_percent": param_data,
-                    }
-                elif unit == "milliseconds":
-                    df_data = {
-                        "Time_minutes": time_minutes,
-                        f"{param_name}_milliseconds": param_data,
-                    }
-                else:
-                    df_data = {
-                        "Time_minutes": time_minutes,
-                        f"{param_name}_{unit}": param_data,
-                    }
-
-                # Create DataFrame and sheet
-                param_df = pd.DataFrame(df_data)
-                clean_name = self._clean_sheet_name(f"{param_name}_Enhanced")
-
-                # Ensure unique sheet name
-                original_clean_name = clean_name
-                counter = 1
-                while clean_name in sheets_created:
-                    clean_name = f"{original_clean_name[:28]}_{counter}"
-                    counter += 1
-
-                param_df.to_excel(writer, sheet_name=clean_name, index=False)
-                sheets_created.append(clean_name)
-
-            except Exception as e:
-                self._log_message(
-                    f"   Warning: Could not create enhanced sheet for {param_name}: {e}"
-                )
-                continue
-
-        # Create combined sheet with all enhanced parameters
-        if len(hdf5_metadata) > 1:
-            try:
-                max_length = max(len(data) for data in hdf5_metadata.values())
-                time_minutes = [(i * frame_interval) / 60.0 for i in range(max_length)]
-
-                combined_data = {"Time_minutes": time_minutes}
-
-                for param_name, param_data in hdf5_metadata.items():
-                    unit = unit_info.get(param_name, {}).get("units", "unknown")
-
-                    # Pad data if necessary
-                    if len(param_data) < max_length:
-                        padded_data = list(param_data) + [np.nan] * (
-                            max_length - len(param_data)
-                        )
-                    else:
-                        padded_data = param_data
-
-                    # Add with unit-enhanced name
-                    if unit == "seconds" and "drift" in param_name.lower():
-                        combined_data[f"{param_name}_seconds"] = padded_data
-                        combined_data[f"{param_name}_ms"] = [
-                            d * 1000 if d and not np.isnan(d) else np.nan
-                            for d in padded_data
-                        ]
-                    else:
-                        combined_data[f"{param_name}_{unit}"] = padded_data
-
-                combined_df = pd.DataFrame(combined_data)
-                combined_name = f"Enhanced_All_{source_name}"[:31]
-                combined_df.to_excel(writer, sheet_name=combined_name, index=False)
-                sheets_created.append(combined_name)
-
-            except Exception as e:
-                self._log_message(
-                    f"   Warning: Could not create enhanced combined sheet: {e}"
-                )
-
-        return sheets_created
 
     def _filter_hdf5_metadata_only(self, ts_data: dict) -> dict:
         """Filter to keep only actual HDF5 metadata, excluding analysis results."""
@@ -6962,7 +6112,7 @@ class HDF5AnalysisWidget(QWidget):
     def _get_analysis_parameters_for_metadata(self) -> dict:
         """Extract analysis parameters for metadata."""
         params = {
-            "method": self._get_current_threshold_method_display(),
+            "method": self.threshold_method.currentText(),
             "frame_interval_seconds": self.frame_interval.value(),
             "bin_size_seconds": self.bin_size_seconds.value(),
             "quiescence_threshold": self.quiescence_threshold.value(),
@@ -7036,29 +6186,14 @@ class HDF5AnalysisWidget(QWidget):
         if hasattr(self, "merged_results") and self.merged_results:
             self.generate_plot()
 
-    def _on_threshold_tab_changed(self, tab_index: int):
-        """Handle threshold method tab changes."""
-        # Tab index directly determines the method
-        # 0 = Baseline, 1 = Calibration, 2 = Adaptive
-        method_names = ["Baseline", "Calibration", "Adaptive"]
-        if 0 <= tab_index < len(method_names):
-            self._log_message(f"Threshold method changed to: {method_names[tab_index]}")
-
-    def _get_current_threshold_method(self) -> str:
-        """Get current threshold method based on active tab."""
-        tab_index = self.threshold_params_stack.currentIndex()
-        method_map = {0: "baseline", 1: "calibration", 2: "adaptive"}
-        return method_map.get(tab_index, "baseline")
-
-    def _get_current_threshold_method_display(self) -> str:
-        """Get current threshold method display name based on active tab."""
-        tab_index = self.threshold_params_stack.currentIndex()
-        method_map = {
-            0: "Baseline (First Frames)",
-            1: "Calibration (Sedated Animals)",
-            2: "Adaptive (Smart Detection)",
-        }
-        return method_map.get(tab_index, "Baseline (First Frames)")
+    def _on_threshold_method_changed(self, method_text: str):
+        """Switch to appropriate parameter tab when method changes."""
+        if "Baseline" in method_text:
+            self.threshold_params_stack.setCurrentIndex(0)
+        elif "Calibration" in method_text:
+            self.threshold_params_stack.setCurrentIndex(1)
+        elif "Adaptive" in method_text:
+            self.threshold_params_stack.setCurrentIndex(2)
 
     def load_calibration_file(self):
         """Enhanced calibration file loading with robust UI updates."""
@@ -7145,10 +6280,10 @@ class HDF5AnalysisWidget(QWidget):
         """Enable/disable and populate ROI controls when preset is toggled."""
         # 12-well plate preset values
         preset = {
-            "min_radius": 40,
-            "max_radius": 75,
+            "min_radius": 100,
+            "max_radius": 150,
             "dp": 1.0,
-            "min_dist": 75,
+            "min_dist": 200,
             "param1": 50,
             "param2": 30,
         }
