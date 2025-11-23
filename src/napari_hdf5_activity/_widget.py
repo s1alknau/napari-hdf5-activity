@@ -2824,18 +2824,30 @@ class HDF5AnalysisWidget(QWidget):
     def clear_roi_detection(self):
         """Enhanced ROI detection clearing with proper event disconnection."""
         try:
+            self._log_message("Clear ROI Detection button clicked")
+
             layers_to_remove = []
             for layer in self.viewer.layers:
-                if (
-                    "ROIs Detected" in layer.name
-                    or "ROI" in layer.name
-                    and "Mask" in layer.name
+                # Check if this is an ROI layer
+                is_roi_layer = (
+                    "ROI" in layer.name
+                    or "Detected" in layer.name
                     or (
                         hasattr(layer, "metadata")
                         and layer.metadata.get("roi_type") == "circular_detection"
                     )
-                ):
+                )
+
+                if is_roi_layer:
+                    self._log_message(f"  Marking layer for removal: {layer.name}")
                     layers_to_remove.append(layer)
+
+            if len(layers_to_remove) == 0:
+                self._log_message("No ROI layers found to remove")
+                # Still clear variables in case they exist
+                self.masks = []
+                self.labeled_frame = None
+                return
 
             # Disconnect any connected events before removing layers
             for layer in layers_to_remove:
@@ -2847,6 +2859,7 @@ class HDF5AnalysisWidget(QWidget):
                     pass  # Event might not be connected
 
                 self.viewer.layers.remove(layer)
+                self._log_message(f"  Removed layer: {layer.name}")
 
             # Clear all ROI-related variables
             self.masks = []
@@ -2857,11 +2870,14 @@ class HDF5AnalysisWidget(QWidget):
             self.calibration_labeled_frame = None
 
             self._log_message(
-                f"Removed {len(layers_to_remove)} ROI layers and cleaned up all ROI data"
+                f"✓ Successfully removed {len(layers_to_remove)} ROI layers and cleaned up all ROI data"
             )
 
         except Exception as e:
-            self._log_message(f"Error clearing ROI detection: {e}")
+            self._log_message(f"ERROR clearing ROI detection: {e}")
+            import traceback
+
+            self._log_message(traceback.format_exc())
 
     def _add_roi_layers_to_viewer(self, labeled_frame, masks, dataset_type):
         """Add ROI layers with clear dataset identification."""
@@ -5624,9 +5640,7 @@ class HDF5AnalysisWidget(QWidget):
                     if main_metadata.get("legacy_enhanced", False):
                         enhancement_info = main_metadata.get("_enhancement_summary", {})
                         enhanced_params = enhancement_info.get("parameters_enhanced", 0)
-                        self._log_message(
-                            "     ✅ Legacy file automatically enhanced!"
-                        )
+                        self._log_message("     ✅ Legacy file automatically enhanced!")
                         self._log_message(
                             f"     📏 Unit documentation added for {enhanced_params} parameters"
                         )
