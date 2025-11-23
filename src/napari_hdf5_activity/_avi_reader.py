@@ -177,7 +177,9 @@ def load_avi_with_metadata(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
 
 
 def load_avi_batch_timeseries(
-    video_paths: List[str], target_frame_interval: float = 5.0
+    video_paths: List[str],
+    target_frame_interval: float = 5.0,
+    progress_callback=None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Load multiple AVI files as continuous timeseries with proper time concatenation.
@@ -190,6 +192,7 @@ def load_avi_batch_timeseries(
         video_paths: List of AVI file paths in temporal order
         target_frame_interval: Target time interval between processed frames (seconds)
                               Default: 5.0s = 0.2 FPS effective sampling (1 frame per 5 seconds)
+        progress_callback: Optional callback function(percent, message) for progress updates
 
     Returns:
         Tuple of (concatenated frames array, combined metadata dict)
@@ -210,11 +213,16 @@ def load_avi_batch_timeseries(
     }
 
     current_time_offset = 0.0
+    total_videos = len(video_paths)
 
     for video_idx, video_path in enumerate(video_paths):
-        print(
-            f"Processing video {video_idx + 1}/{len(video_paths)}: {Path(video_path).name}"
-        )
+        video_name = Path(video_path).name
+        print(f"Processing video {video_idx + 1}/{total_videos}: {video_name}")
+
+        # Update progress
+        if progress_callback:
+            percent = (video_idx / total_videos) * 100
+            progress_callback(percent, f"Loading video {video_idx + 1}/{total_videos}: {video_name}")
 
         with AVIVideoReader(video_path) as reader:
             # Calculate how many frames to skip to achieve target interval
