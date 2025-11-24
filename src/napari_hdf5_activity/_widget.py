@@ -1633,6 +1633,10 @@ class HDF5AnalysisWidget(QWidget):
         total_duration = metadata["total_duration"]
         proc_time = time.time() - start_time
 
+        # Calculate start and end times from the data
+        start_time_data = 0.0  # Start time is always 0
+        end_time_data = total_duration
+
         self._log_message(
             f"✓ AVI batch streaming analysis complete in {proc_time:.2f}s"
         )
@@ -1640,6 +1644,8 @@ class HDF5AnalysisWidget(QWidget):
         self._log_message(
             f"  Total duration: {total_duration:.1f}s ({total_duration/60:.1f}min)"
         )
+        self._log_message(f"  Start time: {start_time_data:.1f}s")
+        self._log_message(f"  End time: {end_time_data:.1f}s ({end_time_data/60:.1f}min)")
         self._log_message(f"  ROIs tracked: {len(roi_changes)}")
 
         return video_paths[0], roi_changes, total_duration
