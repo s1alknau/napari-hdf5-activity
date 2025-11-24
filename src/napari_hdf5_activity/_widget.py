@@ -2009,21 +2009,31 @@ class HDF5AnalysisWidget(QWidget):
             # ROI detection - get first frame from viewer layer or file
             first_frame = None
 
-            # Try to get frame from existing napari layer (for AVI batch)
-            if len(self.viewer.layers) > 0:
-                layer = self.viewer.layers[0]
-                if hasattr(layer, "data"):
-                    first_frame = layer.data
-                    if len(first_frame.shape) == 3 and first_frame.shape[0] > 1:
-                        # Multi-frame layer, take first frame
-                        first_frame = first_frame[0]
-                    self._log_message(
-                        f"Using frame from viewer layer: {layer.name} (shape: {first_frame.shape})"
-                    )
+            # Check if current file is HDF5 or AVI to decide source
+            is_hdf5 = current_file.lower().endswith(('.h5', '.hdf5'))
+            is_avi = current_file.lower().endswith('.avi')
 
-            # Fallback: read from file (for HDF5)
+            # For HDF5 files, always read from file (not from viewer layer)
+            # For AVI batch, try to use existing layer first
+            if is_hdf5:
+                self._log_message("HDF5 file detected - reading first frame from file...")
+                first_frame = get_first_frame(current_file)
+            elif is_avi or (hasattr(self, 'avi_batch_loaded') and self.avi_batch_loaded):
+                # Try to get frame from existing napari layer (for AVI batch)
+                if len(self.viewer.layers) > 0:
+                    layer = self.viewer.layers[0]
+                    if hasattr(layer, "data"):
+                        first_frame = layer.data
+                        if len(first_frame.shape) == 3 and first_frame.shape[0] > 1:
+                            # Multi-frame layer, take first frame
+                            first_frame = first_frame[0]
+                        self._log_message(
+                            f"Using frame from viewer layer: {layer.name} (shape: {first_frame.shape})"
+                        )
+
+            # Final fallback: read from file
             if first_frame is None:
-                self._log_message("No frame in viewer, reading from file...")
+                self._log_message("Fallback: Reading first frame from file...")
                 first_frame = get_first_frame(current_file)
 
             if first_frame is None:
