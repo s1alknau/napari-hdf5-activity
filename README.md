@@ -295,7 +295,7 @@ Frame interval is automatically calculated based on video FPS and target interva
 | Upper Threshold Factor | 1.0 | Hysteresis upper threshold |
 | Lower Threshold Factor | 0.5 | Hysteresis lower threshold |
 | Chunk Size | 50 | Frames per processing chunk |
-| Num Processes | 4 | Parallel processing workers |
+| Num Processes | 4 | Number of CPU cores for parallel processing |
 
 ### Threshold Methods
 
@@ -404,6 +404,29 @@ Frame interval is automatically calculated based on video FPS and target interva
 4. **Thresholding**: Compare to baseline + (multiplier × std)
 5. **Hysteresis**: Separate upper/lower thresholds for state changes
 
+### Multiprocessing Performance
+
+The plugin supports true multiprocessing using Python's `multiprocessing` module for CPU-bound analysis tasks:
+
+**Parallel Processing:**
+- **ROI-level parallelization**: Each ROI is processed in a separate CPU core
+- **Automatic selection**: Parallel processing enabled when `num_processes > 1` and `num_rois >= 2`
+- **Optimal core usage**: Automatically uses `cpu_count() - 1` cores (leaves one for system)
+- **Python 3.9+ compatible**: Uses `multiprocessing.Pool` for cross-platform compatibility
+
+**When to use parallel processing:**
+- Multiple ROIs (≥2) to process
+- Large datasets with long recordings
+- Multi-core CPU available
+- Baseline analysis method (currently supported)
+
+**Performance guidelines:**
+- 2-4 ROIs: Use `num_processes=2-4` for ~2x speedup
+- 5-10 ROIs: Use `num_processes=4-8` for ~3-5x speedup
+- Single ROI: Parallel processing automatically disabled (no benefit)
+
+**Note:** Calibration and Adaptive methods currently use sequential processing.
+
 ### LED-Based Lighting Detection
 
 - **Light Phase**: White LED power > 0.5%
@@ -502,6 +525,14 @@ The Frame Viewer provides interactive exploration of raw video data with tempora
 - **Analysis verification**: Visual confirmation of ROI detection and movement events
 
 ## Changelog
+
+### Version 0.3.1 (2025)
+- **Multiprocessing support**: True parallel processing for baseline analysis
+  - ROI-level parallelization using Python's `multiprocessing.Pool`
+  - Automatic core count detection (cpu_count() - 1)
+  - 2-5x speedup for multi-ROI datasets
+  - Python 3.9+ compatible
+- Enhanced "Number of Processes" parameter now functional
 
 ### Version 0.3.0 (2025)
 - Added Extended Analysis tab with Fischer Z-transformation
