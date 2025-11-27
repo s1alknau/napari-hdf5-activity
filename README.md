@@ -25,6 +25,17 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
   - **Adaptive**: Dynamic threshold adjustment during analysis
 - **Hysteresis Algorithm**: Robust state detection with upper and lower thresholds
 - **Sleep/Wake Detection**: Automated classification of activity states
+- **Extended Analysis**: Fischer Z-transformation for circadian rhythm detection
+  - Periodogram analysis for detecting periodic patterns
+  - Statistical significance testing (Chi-square)
+  - Sleep/wake phase identification based on dominant periods
+  - Configurable period range (0-100 hours)
+  - Visual periodogram plots for all ROIs
+- **Frame Viewer**: Interactive dataset playback
+  - Frame-by-frame navigation with slider
+  - Playback controls with adjustable FPS
+  - Time overlay (calculated from frame interval)
+  - Support for both HDF5 and AVI datasets
 
 ### Visualization
 - **Real-time Plots**: Movement traces, activity fractions, sleep patterns
@@ -131,6 +142,36 @@ Then: `Plugins` → `napari-hdf5-activity`
 
 - Click "Export to Excel" for comprehensive data export
 - Click "Save All Plots" for figure export (PNG/PDF)
+
+### 7. Extended Analysis (Circadian Rhythms)
+
+- Navigate to "Extended Analysis" tab
+- **Prerequisites**: Run main analysis first (step 4-5)
+- Configure parameters:
+  - **Minimum Period**: Start of period range (hours, e.g., 12h)
+  - **Maximum Period**: End of period range (hours, e.g., 36h)
+  - **Significance Level**: Statistical threshold (default: 0.05)
+  - **Phase Threshold**: Sleep/wake classification threshold (0-1)
+- Click "Run Circadian Analysis"
+- View results:
+  - **Text Results**: Statistical summary for each ROI
+  - **Periodogram Plot**: Visual representation of periodic patterns
+  - Green ROI titles indicate significant circadian rhythms
+  - Red markers show dominant periods
+- Export results to CSV/Excel
+
+### 8. Frame Viewer
+
+- Navigate to "Frame Viewer" tab
+- Click "Load Data" to load current dataset into viewer
+- Use controls:
+  - **Slider**: Navigate to specific frames
+  - **|◀ / ◀**: Jump to first/previous frame
+  - **▶ Play**: Start/pause playback
+  - **▶ / ▶|**: Next frame / jump to last frame
+  - **FPS Control**: Adjust playback speed (1-60 FPS)
+- Time overlay displayed in frame (red text, lower left)
+- Frame info panel shows statistics (shape, min/max, mean)
 
 ## Usage Examples
 
@@ -393,7 +434,57 @@ If you encounter any problems, please [file an issue](https://github.com/s1alkna
 - Error message and full traceback
 - Minimal example to reproduce the issue
 
+## Scientific Background
+
+### Fischer Z-Transformation
+
+The plugin implements **Fischer Z-transformation** for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries.
+
+**What is a Periodogram?**
+
+A periodogram is a statistical tool that identifies periodic (repeating) patterns in timeseries data. It answers: "Does the organism show rhythmic activity, and if so, at what period (e.g., 24 hours)?"
+
+**How it works:**
+
+1. **Input**: Movement activity data over time (e.g., 3 days of recording)
+2. **Analysis**: Tests multiple period lengths (e.g., 12h, 18h, 24h, 30h, 36h)
+3. **Output**: Z-scores indicating strength of each period
+4. **Significance**: Chi-square test determines if patterns are statistically significant
+
+**Interpretation:**
+
+- **High Z-score peak at 24h**: Strong circadian (24-hour) rhythm
+- **Peak at 12h**: Ultradian (twice daily) activity pattern
+- **No significant peaks**: Irregular/random activity
+- **Green ROI title**: Statistically significant rhythm detected
+- **Red marker**: Dominant period (strongest rhythm)
+
+**Use cases:**
+- Detect light/dark cycle entrainment
+- Identify free-running circadian periods
+- Compare rhythmicity between experimental groups
+- Detect ultradian or infradian rhythms
+
+### Frame Viewer
+
+The Frame Viewer provides interactive exploration of raw video data with temporal context:
+
+- **Time overlay**: Each frame shows elapsed time based on recording interval
+- **Metadata integration**: Time calculated from HDF5 metadata or AVI frame rate
+- **Memory efficient**: Loads frames on-demand during playback
+- **Analysis verification**: Visual confirmation of ROI detection and movement events
+
 ## Changelog
+
+### Version 0.3.0 (2025)
+- Added Extended Analysis tab with Fischer Z-transformation
+- Periodogram visualization for circadian rhythm detection
+- Statistical significance testing for periodic patterns
+- Sleep/wake phase identification
+- Frame Viewer for interactive dataset playback
+- Time overlay in frames (calculated from metadata)
+- Playback controls with adjustable FPS
+- Flexible period range configuration (0-100 hours)
 
 ### Version 0.2.0 (2025)
 - Added AVI video file support
