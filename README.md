@@ -177,17 +177,44 @@ Then: `Plugins` → `napari-hdf5-activity`
 
 ### Example 1: Single HDF5 Recording
 
-```python
-import napari
+**Step-by-step workflow:**
 
-# Launch napari
-viewer = napari.Viewer()
+1. **Launch napari and open plugin**
+   ```bash
+   napari
+   ```
+   - Menu: `Plugins` → `napari-hdf5-activity: HDF5 Activity Analysis`
 
-# Open HDF5 file through plugin
-# Plugins → napari-hdf5-activity
-# Load File → Select timelapse.h5
-# Detect ROIs → Process Data → Generate Plots
-```
+2. **Load HDF5 file** (Input tab)
+   - Click "Load File"
+   - Select your `timelapse.h5` file
+   - First frame is displayed in napari viewer
+
+3. **Detect ROIs** (Input tab)
+   - Adjust Min/Max Radius based on organism size (e.g., 380-420 pixels)
+   - Click "Detect ROIs"
+   - Verify that all organisms are detected correctly
+
+4. **Configure analysis** (Analysis tab)
+   - Frame Interval: 5.0 seconds (check metadata)
+   - Select "Baseline Method" tab
+   - Baseline Duration: 200 minutes
+   - Threshold Multiplier: 0.10
+   - Enable Detrending: ✓
+
+5. **Run analysis**
+   - Click "Start Analysis"
+   - Wait for processing to complete (~2-5 minutes)
+
+6. **View results** (Results tab)
+   - Click "Generate Plots"
+   - View movement traces, activity fractions, sleep patterns
+   - Click "Export to Excel" to save data
+
+7. **Circadian analysis** (Extended Analysis tab - optional)
+   - Set Period Range: Min 12h, Max 36h
+   - Click "Run Circadian Analysis"
+   - View periodogram plot and statistical results
 
 ### Example 2: Batch AVI Processing
 
