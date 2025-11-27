@@ -697,10 +697,9 @@ Other methods are in separate modules:
 - _calc_integration.py: Method routing and integration
 """
 
-import os
 import time
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Any
 
 
 # =============================================================================
@@ -823,7 +822,6 @@ def compute_threshold_baseline_hysteresis(
         )
 
     # Calculate statistics
-    times = np.array([t for t, _ in baseline_data])
     values = np.array([val for _, val in baseline_data])
 
     mean_val = np.mean(values)
@@ -1210,7 +1208,7 @@ def run_baseline_analysis(
         from ._reader import get_roi_colors
 
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
-    except:
+    except Exception:
         roi_colors = {
             roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
         }
@@ -1315,7 +1313,7 @@ def run_baseline_analysis_pure(
         from ._reader import get_roi_colors
 
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
-    except:
+    except Exception:
         roi_colors = {
             roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
         }
@@ -1417,8 +1415,49 @@ def integrate_baseline_analysis_with_widget(widget) -> bool:
         return False
 
 
+# =============================================================================
+# PARALLEL PROCESSING WRAPPER
+# =============================================================================
+
+
+def run_baseline_analysis_auto(
+    merged_results: Dict[int, List[Tuple[float, float]]],
+    num_processes: int = 1,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Automatically choose between parallel and sequential baseline analysis.
+
+    Args:
+        merged_results: Dictionary mapping ROI IDs to time-series data
+        num_processes: Number of processes (1 = sequential, >1 = parallel)
+        **kwargs: Additional parameters for analysis
+
+    Returns:
+        Complete analysis results dictionary
+    """
+    from ._calc_parallel import should_use_parallel
+
+    # Determine if parallel processing should be used
+    num_rois = len(merged_results)
+    use_parallel = should_use_parallel(num_rois, num_processes)
+
+    if use_parallel:
+        # Use parallel implementation
+        from ._calc_parallel import run_baseline_analysis_parallel
+
+        return run_baseline_analysis_parallel(
+            merged_results, num_processes=num_processes, **kwargs
+        )
+    else:
+        # Use sequential implementation
+        return run_baseline_analysis(merged_results, **kwargs)
+
+
 # Legacy aliases for backward compatibility
 run_complete_hdf5_compatible_analysis = run_baseline_analysis
-test_baseline_analysis_direct = lambda merged_results: bool(
-    run_baseline_analysis(merged_results)
-)
+
+
+def test_baseline_analysis_direct(merged_results):
+    """Test function for baseline analysis."""
+    return bool(run_baseline_analysis(merged_results))
