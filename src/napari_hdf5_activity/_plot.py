@@ -1315,7 +1315,9 @@ def create_hysteresis_kwargs(widget_instance=None, **kwargs) -> Dict:
                 hysteresis_kwargs["merged_results"] = widget_instance.merged_results
 
             # Handle different multiplier names based on method
-            method_text = widget_instance.threshold_method.currentText()
+            method_text = widget_instance.threshold_params_stack.tabText(
+                widget_instance.threshold_params_stack.currentIndex()
+            )
             if "Calibration" in method_text:
                 # Use calibration multiplier
                 if hasattr(widget_instance, "calibration_multiplier"):
