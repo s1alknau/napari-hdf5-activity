@@ -1330,7 +1330,9 @@ class HDF5AnalysisWidget(QWidget):
 
         self.fisher_plot_canvas = QLabel()
         self.fisher_plot_canvas.setMinimumSize(400, 300)
-        self.fisher_plot_canvas.setStyleSheet("border: 1px solid #ccc; background-color: white;")
+        self.fisher_plot_canvas.setStyleSheet(
+            "border: 1px solid #ccc; background-color: white;"
+        )
         self.fisher_plot_canvas.setAlignment(Qt.AlignCenter)
         fisher_plot_layout.addWidget(self.fisher_plot_canvas)
 
@@ -3687,6 +3689,7 @@ class HDF5AnalysisWidget(QWidget):
             "bin_size_seconds": self.bin_size_seconds.value(),
             "quiescence_threshold": self.quiescence_threshold.value(),
             "sleep_threshold_minutes": self.sleep_threshold_minutes.value(),
+            "num_processes": self.num_processes.value(),
         }
 
         # Add method-specific parameters
