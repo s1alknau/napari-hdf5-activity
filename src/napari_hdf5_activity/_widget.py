@@ -16,7 +16,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from napari.qt.threading import thread_worker
-from qtpy.QtCore import QTimer, Signal
+from qtpy.QtCore import QTimer, Signal, Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -33,6 +33,8 @@ from qtpy.QtWidgets import (
     QWidget,
     QTextEdit,
     QCheckBox,
+    QSlider,
+    QSplitter,
 )
 
 try:
@@ -59,8 +61,7 @@ except ImportError as e:
     # Use original imports only
     from ._reader import (
         napari_get_reader,
-        get_first_frame,
-        sort_circles_meandering_auto,  # Should be available if left_to_right is
+        get_first_frame,  # Should be available if left_to_right is
     )
 try:
     from ._metadata import (
@@ -475,10 +476,14 @@ class HDF5AnalysisWidget(QWidget):
         self.tab_input = QWidget()
         self.tab_analysis = QWidget()
         self.tab_results = QWidget()
+        self.tab_extended = QWidget()
+        self.tab_viewer = QWidget()
 
         self.tab_widget.addTab(self.tab_input, "Input")
         self.tab_widget.addTab(self.tab_analysis, "Analysis")
         self.tab_widget.addTab(self.tab_results, "Results")
+        self.tab_widget.addTab(self.tab_extended, "Extended Analysis")
+        self.tab_widget.addTab(self.tab_viewer, "Frame Viewer")
 
         layout.addWidget(self.tab_widget)
 
@@ -486,6 +491,8 @@ class HDF5AnalysisWidget(QWidget):
         self.setup_input_tab()
         self.setup_analysis_tab()
         self.setup_results_tab()
+        self.setup_extended_tab()
+        self.setup_viewer_tab()
 
     def setup_input_tab(self):
         """Setup the input tab with file loading and ROI detection parameters."""
@@ -578,21 +585,6 @@ class HDF5AnalysisWidget(QWidget):
         roi_layout.addRow("", self.chk_12well)
 
         layout.addWidget(roi_group)
-
-        # ROI management section
-        roi_management_group = QGroupBox("ROI Layer Management")
-        roi_management_layout = QVBoxLayout()
-        roi_management_group.setLayout(roi_management_layout)
-
-        self.btn_toggle_all_rois = QPushButton("Toggle All ROI Visibility")
-        self.btn_show_selected_roi = QPushButton("Show Only Selected ROI")
-        self.btn_reset_roi_visibility = QPushButton("Reset ROI Visibility")
-
-        roi_management_layout.addWidget(self.btn_toggle_all_rois)
-        roi_management_layout.addWidget(self.btn_show_selected_roi)
-        roi_management_layout.addWidget(self.btn_reset_roi_visibility)
-
-        layout.addWidget(roi_management_group)
         layout.addStretch()
 
     def setup_analysis_tab(self):
@@ -1241,6 +1233,249 @@ class HDF5AnalysisWidget(QWidget):
         plot_buttons_layout.addWidget(self.btn_save_with_metadata)
         layout.addWidget(plot_buttons_group)
 
+    def setup_extended_tab(self):
+        """Setup the Extended Analysis tab for circadian rhythm detection."""
+        layout = QVBoxLayout()
+        self.tab_extended.setLayout(layout)
+
+        # Title and description
+        title_label = QLabel("Circadian Rhythm Analysis")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(title_label)
+
+        desc_label = QLabel(
+            "Use Fischer Z-transformation to detect recurring sleep/wake patterns "
+            "and circadian rhythms in activity data."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #666; font-size: 10px; margin-bottom: 10px;")
+        layout.addWidget(desc_label)
+
+        # Fischer Z-transformation parameters
+        fisher_params_group = QGroupBox("Fischer Z-Transformation Parameters")
+        fisher_params_layout = QFormLayout()
+        fisher_params_group.setLayout(fisher_params_layout)
+
+        self.fisher_min_period = QDoubleSpinBox()
+        self.fisher_min_period.setRange(0.0, 100.0)
+        self.fisher_min_period.setValue(12.0)
+        self.fisher_min_period.setSingleStep(1.0)
+        self.fisher_min_period.setSuffix(" hours")
+        self.fisher_min_period.setToolTip(
+            "Minimum period to test (e.g., 12 hours for semi-circadian)"
+        )
+        fisher_params_layout.addRow("Minimum Period:", self.fisher_min_period)
+
+        self.fisher_max_period = QDoubleSpinBox()
+        self.fisher_max_period.setRange(0.0, 100.0)
+        self.fisher_max_period.setValue(36.0)
+        self.fisher_max_period.setSingleStep(1.0)
+        self.fisher_max_period.setSuffix(" hours")
+        self.fisher_max_period.setToolTip(
+            "Maximum period to test (e.g., 36 hours for extended circadian)"
+        )
+        fisher_params_layout.addRow("Maximum Period:", self.fisher_max_period)
+
+        self.fisher_significance = QDoubleSpinBox()
+        self.fisher_significance.setRange(0.001, 0.1)
+        self.fisher_significance.setValue(0.05)
+        self.fisher_significance.setSingleStep(0.01)
+        self.fisher_significance.setDecimals(3)
+        self.fisher_significance.setToolTip(
+            "Statistical significance threshold (p-value)"
+        )
+        fisher_params_layout.addRow("Significance Level (α):", self.fisher_significance)
+
+        self.fisher_phase_threshold = QDoubleSpinBox()
+        self.fisher_phase_threshold.setRange(0.0, 1.0)
+        self.fisher_phase_threshold.setValue(0.5)
+        self.fisher_phase_threshold.setSingleStep(0.05)
+        self.fisher_phase_threshold.setDecimals(2)
+        self.fisher_phase_threshold.setToolTip(
+            "Threshold for classifying sleep vs wake phases (0-1)"
+        )
+        fisher_params_layout.addRow("Phase Threshold:", self.fisher_phase_threshold)
+
+        layout.addWidget(fisher_params_group)
+
+        # Run analysis button
+        self.btn_run_fisher = QPushButton("Run Circadian Analysis")
+        self.btn_run_fisher.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; "
+            "padding: 10px; } QPushButton:hover { background-color: #45a049; }"
+        )
+        self.btn_run_fisher.clicked.connect(self.run_fisher_analysis)
+        layout.addWidget(self.btn_run_fisher)
+
+        # Create a horizontal splitter for results and plot
+        splitter = QSplitter()
+        splitter.setOrientation(1)  # Horizontal
+
+        # Results display (left side)
+        self.fisher_results_text = QTextEdit()
+        self.fisher_results_text.setReadOnly(True)
+        self.fisher_results_text.setPlaceholderText(
+            "Circadian analysis results will appear here..."
+        )
+        splitter.addWidget(self.fisher_results_text)
+
+        # Plot display (right side)
+        self.fisher_plot_widget = QWidget()
+        fisher_plot_layout = QVBoxLayout()
+        self.fisher_plot_widget.setLayout(fisher_plot_layout)
+
+        fisher_plot_label = QLabel("Periodogram Plot")
+        fisher_plot_label.setStyleSheet("font-weight: bold;")
+        fisher_plot_layout.addWidget(fisher_plot_label)
+
+        self.fisher_plot_canvas = QLabel()
+        self.fisher_plot_canvas.setMinimumSize(400, 300)
+        self.fisher_plot_canvas.setStyleSheet("border: 1px solid #ccc; background-color: white;")
+        self.fisher_plot_canvas.setAlignment(Qt.AlignCenter)
+        fisher_plot_layout.addWidget(self.fisher_plot_canvas)
+
+        splitter.addWidget(self.fisher_plot_widget)
+
+        # Set initial sizes (60% results, 40% plot)
+        splitter.setSizes([600, 400])
+        layout.addWidget(splitter)
+
+        # Export button
+        self.btn_export_fisher = QPushButton("Export Circadian Results")
+        self.btn_export_fisher.clicked.connect(self.export_fisher_results)
+        self.btn_export_fisher.setEnabled(False)
+        layout.addWidget(self.btn_export_fisher)
+
+        layout.addStretch()
+
+    def setup_viewer_tab(self):
+        """Setup the Frame Viewer tab for browsing through dataset frames."""
+        layout = QVBoxLayout()
+        self.tab_viewer.setLayout(layout)
+
+        # Title and description
+        title_label = QLabel("Frame Viewer")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(title_label)
+
+        desc_label = QLabel(
+            "Browse through the loaded dataset frame-by-frame. "
+            "Use the slider or keyboard shortcuts to navigate."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #666; font-size: 10px; margin-bottom: 10px;")
+        layout.addWidget(desc_label)
+
+        # Status label
+        self.viewer_status_label = QLabel(
+            "No dataset loaded. Please load a file in the Input tab first."
+        )
+        self.viewer_status_label.setStyleSheet("color: #999; font-style: italic;")
+        layout.addWidget(self.viewer_status_label)
+
+        # Frame navigation controls
+        nav_group = QGroupBox("Frame Navigation")
+        nav_layout = QVBoxLayout()
+        nav_group.setLayout(nav_layout)
+
+        # Frame slider with current frame display
+        slider_layout = QHBoxLayout()
+        self.viewer_frame_slider = QSlider()
+        self.viewer_frame_slider.setOrientation(1)  # Horizontal
+        self.viewer_frame_slider.setMinimum(0)
+        self.viewer_frame_slider.setMaximum(0)
+        self.viewer_frame_slider.setValue(0)
+        self.viewer_frame_slider.setEnabled(False)
+        self.viewer_frame_slider.valueChanged.connect(self._on_viewer_frame_changed)
+
+        self.viewer_frame_label = QLabel("Frame: 0 / 0")
+        self.viewer_frame_label.setMinimumWidth(120)
+
+        slider_layout.addWidget(self.viewer_frame_label)
+        slider_layout.addWidget(self.viewer_frame_slider)
+        nav_layout.addLayout(slider_layout)
+
+        # Playback controls
+        playback_layout = QHBoxLayout()
+
+        self.btn_viewer_first = QPushButton("|◀")
+        self.btn_viewer_first.setToolTip("First frame (Home)")
+        self.btn_viewer_first.clicked.connect(lambda: self._viewer_goto_frame(0))
+        self.btn_viewer_first.setEnabled(False)
+
+        self.btn_viewer_prev = QPushButton("◀")
+        self.btn_viewer_prev.setToolTip("Previous frame (←)")
+        self.btn_viewer_prev.clicked.connect(lambda: self._viewer_step_frame(-1))
+        self.btn_viewer_prev.setEnabled(False)
+
+        self.btn_viewer_play = QPushButton("▶ Play")
+        self.btn_viewer_play.setToolTip("Play/Pause (Space)")
+        self.btn_viewer_play.setCheckable(True)
+        self.btn_viewer_play.clicked.connect(self._viewer_toggle_play)
+        self.btn_viewer_play.setEnabled(False)
+
+        self.btn_viewer_next = QPushButton("▶")
+        self.btn_viewer_next.setToolTip("Next frame (→)")
+        self.btn_viewer_next.clicked.connect(lambda: self._viewer_step_frame(1))
+        self.btn_viewer_next.setEnabled(False)
+
+        self.btn_viewer_last = QPushButton("▶|")
+        self.btn_viewer_last.setToolTip("Last frame (End)")
+        self.btn_viewer_last.clicked.connect(lambda: self._viewer_goto_frame(-1))
+        self.btn_viewer_last.setEnabled(False)
+
+        playback_layout.addWidget(self.btn_viewer_first)
+        playback_layout.addWidget(self.btn_viewer_prev)
+        playback_layout.addWidget(self.btn_viewer_play)
+        playback_layout.addWidget(self.btn_viewer_next)
+        playback_layout.addWidget(self.btn_viewer_last)
+        playback_layout.addStretch()
+
+        nav_layout.addLayout(playback_layout)
+
+        # Playback speed
+        speed_layout = QHBoxLayout()
+        speed_layout.addWidget(QLabel("Playback FPS:"))
+
+        self.viewer_fps_spin = QSpinBox()
+        self.viewer_fps_spin.setRange(1, 60)
+        self.viewer_fps_spin.setValue(10)
+        self.viewer_fps_spin.setToolTip("Frames per second during playback")
+        self.viewer_fps_spin.valueChanged.connect(self._viewer_update_timer_interval)
+
+        speed_layout.addWidget(self.viewer_fps_spin)
+        speed_layout.addStretch()
+        nav_layout.addLayout(speed_layout)
+
+        layout.addWidget(nav_group)
+
+        # Load data button
+        self.btn_viewer_load = QPushButton("Load Current Dataset into Viewer")
+        self.btn_viewer_load.clicked.connect(self._viewer_load_data)
+        self.btn_viewer_load.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
+            "padding: 10px; } QPushButton:hover { background-color: #1976D2; }"
+        )
+        layout.addWidget(self.btn_viewer_load)
+
+        # Info display
+        self.viewer_info_text = QTextEdit()
+        self.viewer_info_text.setReadOnly(True)
+        self.viewer_info_text.setMaximumHeight(150)
+        self.viewer_info_text.setPlaceholderText(
+            "Frame information will appear here..."
+        )
+        layout.addWidget(self.viewer_info_text)
+
+        layout.addStretch()
+
+        # Timer for playback
+        from qtpy.QtCore import QTimer
+
+        self.viewer_timer = QTimer()
+        self.viewer_timer.timeout.connect(self._viewer_play_next_frame)
+        self.viewer_is_playing = False
+
     def debug_current_file_structure(self):
         """Debug the structure of the currently loaded file."""
         if not hasattr(self, "file_path") or not self.file_path:
@@ -1645,14 +1880,16 @@ class HDF5AnalysisWidget(QWidget):
             f"  Total duration: {total_duration:.1f}s ({total_duration/60:.1f}min)"
         )
         self._log_message(f"  Start time: {start_time_data:.1f}s")
-        self._log_message(f"  End time: {end_time_data:.1f}s ({end_time_data/60:.1f}min)")
+        self._log_message(
+            f"  End time: {end_time_data:.1f}s ({end_time_data/60:.1f}min)"
+        )
         self._log_message(f"  ROIs tracked: {len(roi_changes)}")
 
         return video_paths[0], roi_changes, total_duration
 
     def _load_avi_batch(self, file_paths: List[str]):
         """Load multiple AVI files as batch timeseries (only first frame for ROI detection)."""
-        self._log_message(f"=== _load_avi_batch() START ===")
+        self._log_message("=== _load_avi_batch() START ===")
         self._log_message(f"Received {len(file_paths)} file paths")
         for idx, path in enumerate(file_paths):
             self._log_message(f"  [{idx}] {path}")
@@ -1688,7 +1925,7 @@ class HDF5AnalysisWidget(QWidget):
             # Load ONLY first frame from first video for ROI detection
             self._log_message(f"Opening first video: {file_paths[0]}")
             with AVIVideoReader(file_paths[0]) as reader:
-                self._log_message(f"AVIVideoReader opened successfully")
+                self._log_message("AVIVideoReader opened successfully")
                 first_frame = reader.get_frame(0)
                 if first_frame is None:
                     raise ValueError("Could not load first frame from first video")
@@ -1703,7 +1940,7 @@ class HDF5AnalysisWidget(QWidget):
                 batch_metadata["effective_fps"] = 1.0 / target_interval
 
                 # Log frame info for debugging
-                self._log_message(f"First frame loaded successfully")
+                self._log_message("First frame loaded successfully")
                 self._log_message(f"First frame shape: {first_frame.shape}")
                 self._log_message(f"First frame dtype: {first_frame.dtype}")
                 self._log_message(
@@ -1728,7 +1965,7 @@ class HDF5AnalysisWidget(QWidget):
                 metadata=batch_metadata,
             )
 
-            self._log_message(f"Layer added successfully!")
+            self._log_message("Layer added successfully!")
             self._log_message(f"Layer name: {layer.name}")
             self._log_message(f"Layer visible: {layer.visible}")
             self._log_message(f"Layer data shape: {layer.data.shape}")
@@ -2010,15 +2247,19 @@ class HDF5AnalysisWidget(QWidget):
             first_frame = None
 
             # Check if current file is HDF5 or AVI to decide source
-            is_hdf5 = current_file.lower().endswith(('.h5', '.hdf5'))
-            is_avi = current_file.lower().endswith('.avi')
+            is_hdf5 = current_file.lower().endswith((".h5", ".hdf5"))
+            is_avi = current_file.lower().endswith(".avi")
 
             # For HDF5 files, always read from file (not from viewer layer)
             # For AVI batch, try to use existing layer first
             if is_hdf5:
-                self._log_message("HDF5 file detected - reading first frame from file...")
+                self._log_message(
+                    "HDF5 file detected - reading first frame from file..."
+                )
                 first_frame = get_first_frame(current_file)
-            elif is_avi or (hasattr(self, 'avi_batch_loaded') and self.avi_batch_loaded):
+            elif is_avi or (
+                hasattr(self, "avi_batch_loaded") and self.avi_batch_loaded
+            ):
                 # Try to get frame from existing napari layer (for AVI batch)
                 if len(self.viewer.layers) > 0:
                     layer = self.viewer.layers[0]
@@ -3071,7 +3312,10 @@ class HDF5AnalysisWidget(QWidget):
     def load_calibration_file(self):
         """Enhanced calibration file loading with workflow state management."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Calibration HDF5 File", "", "HDF5 Files (*.h5 *.hdf5)"
+            self,
+            "Select Calibration File",
+            "",
+            "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*.*)",
         )
         if file_path:
             self.calibration_file_path.setText(os.path.basename(file_path))
@@ -5049,8 +5293,13 @@ class HDF5AnalysisWidget(QWidget):
                         )
 
                 # === SHEET 7: PARAMETERS ===
+                # Determine source type (HDF5 or AVI)
+                is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
+                source_label = "AVI Batch" if is_avi else "HDF5"
+
                 params_data = {
                     "Parameter": [
+                        "Data Source Type",
                         "Analysis Method",
                         "Frame Interval (s)",
                         "Baseline Duration (min)",
@@ -5066,6 +5315,7 @@ class HDF5AnalysisWidget(QWidget):
                         "Software Version",
                     ],
                     "Value": [
+                        source_label,
                         self._get_current_threshold_method_display(),
                         self.frame_interval.value(),
                         (
@@ -5101,6 +5351,7 @@ class HDF5AnalysisWidget(QWidget):
                         "HDF5 Analysis Widget v1.0",
                     ],
                     "Description": [
+                        "Type of data source (HDF5 file or AVI batch)",
                         "Threshold calculation method used",
                         "Time interval between frames",
                         "Duration of baseline period for threshold calculation",
@@ -5116,6 +5367,46 @@ class HDF5AnalysisWidget(QWidget):
                         "Software version and name",
                     ],
                 }
+
+                # Add AVI-specific parameters if applicable
+                if is_avi and hasattr(self, "avi_batch_paths"):
+                    params_data["Parameter"].extend(
+                        [
+                            "Number of AVI Files",
+                            "AVI Start Time (s)",
+                            "AVI End Time (s)",
+                            "Total Duration (min)",
+                        ]
+                    )
+
+                    # Calculate total duration from merged_results
+                    total_duration_s = 0
+                    start_time_s = 0
+                    if self.merged_results:
+                        first_roi = next(iter(self.merged_results.values()))
+                        if first_roi:
+                            start_time_s = first_roi[0][0]
+                            end_time_s = first_roi[-1][0]
+                            total_duration_s = end_time_s - start_time_s
+
+                    params_data["Value"].extend(
+                        [
+                            len(self.avi_batch_paths),
+                            f"{start_time_s:.1f}",
+                            f"{end_time_s:.1f}",
+                            f"{total_duration_s / 60:.1f}",
+                        ]
+                    )
+
+                    params_data["Description"].extend(
+                        [
+                            "Number of AVI video files processed",
+                            "Start time of the analysis (in seconds)",
+                            "End time of the analysis (in seconds)",
+                            "Total duration of the video sequence (in minutes)",
+                        ]
+                    )
+
                 params_df = pd.DataFrame(params_data)
                 params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
@@ -5132,7 +5423,10 @@ class HDF5AnalysisWidget(QWidget):
                 writer = csv.writer(csvfile)
 
                 # === HEADER SECTION ===
-                writer.writerow(["HDF5 Analysis Results"])
+                # Determine source type (HDF5 or AVI)
+                is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
+                source_label = "AVI" if is_avi else "HDF5"
+                writer.writerow([f"{source_label} Analysis Results"])
                 writer.writerow(
                     [f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
                 )
@@ -7109,7 +7403,10 @@ class HDF5AnalysisWidget(QWidget):
 
         try:
             file_path, _ = QFileDialog.getOpenFileName(
-                self, "Select Calibration HDF5 File", "", "HDF5 Files (*.h5 *.hdf5)"
+                self,
+                "Select Calibration File",
+                "",
+                "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*.*)",
             )
 
             self._log_message(f"File dialog returned: '{file_path}'")
@@ -7294,6 +7591,695 @@ class HDF5AnalysisWidget(QWidget):
             layer.blending = "additive"  # Reset blending
 
         self._log_message(f"Reset visibility for {len(roi_layers)} ROI layers")
+
+    # ===================================================================
+    # EXTENDED ANALYSIS METHODS (FISCHER Z-TRANSFORMATION)
+    # ===================================================================
+
+    def run_fisher_analysis(self):
+        """Run Fischer Z-transformation circadian analysis on movement data."""
+        # Check if we have analysis results
+        if not hasattr(self, "fraction_data") or not self.fraction_data:
+            self.fisher_results_text.setPlainText(
+                "ERROR: No analysis results available.\n\n"
+                "Please run the main analysis first (Analysis tab) before "
+                "attempting circadian pattern detection."
+            )
+            self._log_message(
+                "⚠️ Fisher analysis requires movement data from main analysis"
+            )
+            return
+
+        self._log_message("Starting Fischer Z-transformation circadian analysis...")
+        self.fisher_results_text.setPlainText("Running analysis...\n")
+
+        try:
+            from ._fisher_analysis import (
+                analyze_roi_circadian_patterns,
+                generate_circadian_summary,
+            )
+
+            # Get parameters
+            min_period = self.fisher_min_period.value()
+            max_period = self.fisher_max_period.value()
+            significance = self.fisher_significance.value()
+            phase_threshold = self.fisher_phase_threshold.value()
+            sampling_interval = self.frame_interval.value()
+
+            # Run analysis
+            self._log_message(
+                f"  Period range: {min_period:.1f} - {max_period:.1f} hours"
+            )
+            self._log_message(f"  Significance level: {significance:.3f}")
+            self._log_message(f"  Phase threshold: {phase_threshold:.2f}")
+
+            fisher_results = analyze_roi_circadian_patterns(
+                self.fraction_data,
+                sampling_interval=sampling_interval,
+                min_period_hours=min_period,
+                max_period_hours=max_period,
+                significance_level=significance,
+                phase_threshold=phase_threshold,
+            )
+
+            # Store results
+            self.fisher_analysis_results = fisher_results
+
+            # Generate summary
+            summary = generate_circadian_summary(fisher_results)
+
+            # Display results
+            self.fisher_results_text.setPlainText(summary)
+
+            # Create and display plot
+            self._create_fisher_plot(fisher_results)
+
+            # Enable export button
+            self.btn_export_fisher.setEnabled(True)
+
+            # Count significant results
+            n_significant = sum(
+                1
+                for r in fisher_results.values()
+                if r.get("periodogram", {}).get("is_significant", False)
+            )
+
+            self._log_message(
+                f"✓ Fisher analysis complete: {n_significant}/{len(fisher_results)} ROIs show significant rhythms"
+            )
+
+        except Exception as e:
+            error_msg = f"ERROR during Fischer analysis:\n\n{str(e)}\n\nPlease check the console for details."
+            self.fisher_results_text.setPlainText(error_msg)
+            self._log_message(f"❌ Fisher analysis failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def export_fisher_results(self):
+        """Export Fischer Z-transformation analysis results to Excel/CSV."""
+        if not hasattr(self, "fisher_analysis_results"):
+            self._log_message("⚠️ No Fisher analysis results to export")
+            return
+
+        from qtpy.QtWidgets import QFileDialog
+        import os
+
+        # Get save location
+        default_name = "circadian_analysis_results"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Circadian Analysis Results",
+            default_name,
+            "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*.*)",
+        )
+
+        if not file_path:
+            self._log_message("Export cancelled by user")
+            return
+
+        # Remove extension for consistent naming
+        base_path = os.path.splitext(file_path)[0]
+
+        try:
+            # Export to CSV
+            csv_path = f"{base_path}.csv"
+            self._export_fisher_to_csv(csv_path)
+            self._log_message(f"✓ Exported circadian results to CSV: {csv_path}")
+
+            # Try to export to Excel if pandas is available
+            try:
+                import pandas as pd
+
+                excel_path = f"{base_path}.xlsx"
+                self._export_fisher_to_excel(excel_path)
+                self._log_message(
+                    f"✓ Exported circadian results to Excel: {excel_path}"
+                )
+            except ImportError:
+                self._log_message("⚠️ Excel export not available (pandas not installed)")
+
+        except Exception as e:
+            self._log_message(f"❌ Export failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _export_fisher_to_csv(self, file_path: str):
+        """Export Fisher results to CSV format."""
+        import csv
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            # Header
+            writer.writerow(
+                ["Circadian Rhythm Analysis Results (Fischer Z-transformation)"]
+            )
+            writer.writerow(
+                [f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+            )
+            writer.writerow([])
+
+            # Summary table
+            writer.writerow(["ROI Summary"])
+            writer.writerow(
+                [
+                    "ROI",
+                    "Significant Rhythm",
+                    "Dominant Period (hours)",
+                    "Z-Score",
+                    "P-Value",
+                    "Wake Phases",
+                    "Sleep Phases",
+                    "Wake Fraction (%)",
+                ]
+            )
+
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    writer.writerow(
+                        [roi_id, "Error", result["error"], "", "", "", "", ""]
+                    )
+                    continue
+
+                periodogram = result.get("periodogram", {})
+                phase_analysis = result.get("phase_analysis", {})
+
+                is_sig = periodogram.get("is_significant", False)
+                period = periodogram.get("dominant_period", 0)
+                z_score = periodogram.get("dominant_z_score", 0)
+                p_value = periodogram.get("p_value", 1.0)
+
+                n_wake = len(phase_analysis.get("wake_phases", []))
+                n_sleep = len(phase_analysis.get("sleep_phases", []))
+                wake_frac = phase_analysis.get("wake_fraction", 0) * 100
+
+                writer.writerow(
+                    [
+                        roi_id,
+                        "Yes" if is_sig else "No",
+                        f"{period:.2f}",
+                        f"{z_score:.2f}",
+                        f"{p_value:.4f}",
+                        n_wake,
+                        n_sleep,
+                        f"{wake_frac:.1f}",
+                    ]
+                )
+
+    def _export_fisher_to_excel(self, file_path: str):
+        """Export Fisher results to Excel format with multiple sheets."""
+        import pandas as pd
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Summary
+            summary_data = []
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    continue
+
+                periodogram = result.get("periodogram", {})
+                phase_analysis = result.get("phase_analysis", {})
+
+                summary_data.append(
+                    {
+                        "ROI": roi_id,
+                        "Significant Rhythm": periodogram.get("is_significant", False),
+                        "Dominant Period (hours)": periodogram.get(
+                            "dominant_period", 0
+                        ),
+                        "Z-Score": periodogram.get("dominant_z_score", 0),
+                        "P-Value": periodogram.get("p_value", 1.0),
+                        "Wake Phases": len(phase_analysis.get("wake_phases", [])),
+                        "Sleep Phases": len(phase_analysis.get("sleep_phases", [])),
+                        "Wake Fraction (%)": phase_analysis.get("wake_fraction", 0)
+                        * 100,
+                    }
+                )
+
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+            # Sheet 2: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": [
+                        "Minimum Period",
+                        "Maximum Period",
+                        "Significance Level",
+                        "Phase Threshold",
+                        "Sampling Interval",
+                    ],
+                    "Value": [
+                        f"{self.fisher_min_period.value():.1f} hours",
+                        f"{self.fisher_max_period.value():.1f} hours",
+                        f"{self.fisher_significance.value():.3f}",
+                        f"{self.fisher_phase_threshold.value():.2f}",
+                        f"{self.frame_interval.value():.1f} seconds",
+                    ],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
+
+    def _create_fisher_plot(self, fisher_results: Dict[int, Dict]):
+        """Create and display periodogram plot for Fisher analysis results."""
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+            from qtpy.QtGui import QPixmap
+            import io
+
+            # Create figure with subplots
+            n_rois = len(fisher_results)
+            n_significant = sum(
+                1
+                for r in fisher_results.values()
+                if r.get("periodogram", {}).get("is_significant", False)
+            )
+
+            # Determine layout - max 3 columns
+            n_cols = min(3, n_rois)
+            n_rows = (n_rois + n_cols - 1) // n_cols
+
+            fig, axes = plt.subplots(
+                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+            )
+            fig.suptitle(
+                f"Fischer Z-Transformation Periodogram\n{n_significant}/{n_rois} ROIs with Significant Rhythms",
+                fontsize=14,
+                fontweight="bold",
+            )
+
+            # Plot each ROI
+            for idx, (roi_id, result) in enumerate(sorted(fisher_results.items())):
+                row = idx // n_cols
+                col = idx % n_cols
+                ax = axes[row, col]
+
+                periodogram = result.get("periodogram", {})
+
+                if "error" in result or "error" in periodogram:
+                    # Show error message
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"ROI {roi_id}\nInsufficient data",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                else:
+                    # Plot periodogram
+                    periods = periodogram.get("periods", [])
+                    z_scores = periodogram.get("z_scores", [])
+                    critical_z = periodogram.get("critical_z", 0)
+                    is_significant = periodogram.get("is_significant", False)
+
+                    # Plot Z-scores
+                    ax.plot(periods, z_scores, "b-", linewidth=1.5, label="Z-score")
+
+                    # Plot significance threshold
+                    if critical_z > 0:
+                        ax.axhline(
+                            y=critical_z,
+                            color="r",
+                            linestyle="--",
+                            linewidth=1,
+                            label="Significance",
+                        )
+
+                    # Mark dominant period
+                    if is_significant:
+                        dominant_period = periodogram.get("dominant_period", 0)
+                        dominant_z = periodogram.get("dominant_z_score", 0)
+                        ax.plot(
+                            dominant_period,
+                            dominant_z,
+                            "ro",
+                            markersize=8,
+                            label=f"Peak: {dominant_period:.1f}h",
+                        )
+
+                    # Styling
+                    ax.set_xlabel("Period (hours)", fontsize=9)
+                    ax.set_ylabel("Z-score", fontsize=9)
+                    title_color = "green" if is_significant else "black"
+                    ax.set_title(f"ROI {roi_id}", fontsize=10, color=title_color)
+                    ax.legend(fontsize=7, loc="best")
+                    ax.grid(True, alpha=0.3)
+
+            # Hide unused subplots
+            for idx in range(n_rois, n_rows * n_cols):
+                row = idx // n_cols
+                col = idx % n_cols
+                axes[row, col].axis("off")
+
+            plt.tight_layout()
+
+            # Convert to QPixmap and display
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(
+                pixmap.scaled(
+                    self.fisher_plot_canvas.size(),
+                    1,  # KeepAspectRatio
+                    1,  # SmoothTransformation
+                )
+            )
+
+            plt.close(fig)
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create Fisher plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    # ===================================================================
+    # FRAME VIEWER METHODS
+    # ===================================================================
+
+    def _viewer_load_data(self):
+        """Load the current dataset into the frame viewer."""
+        # Check if we have a loaded file
+        if not hasattr(self, "file_path") or not self.file_path:
+            self.viewer_status_label.setText(
+                "⚠️ No file loaded. Please load a file in the Input tab first."
+            )
+            self._log_message("⚠️ Frame viewer: No file loaded")
+            return
+
+        try:
+
+            # Check if HDF5 or AVI
+            is_hdf5 = self.file_path.lower().endswith((".h5", ".hdf5"))
+            is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
+
+            if is_avi:
+                # Load AVI batch
+                self._viewer_load_avi_batch()
+            elif is_hdf5:
+                # Load HDF5
+                self._viewer_load_hdf5()
+            else:
+                self.viewer_status_label.setText("⚠️ Unsupported file format")
+                self._log_message("⚠️ Frame viewer: Unsupported file format")
+
+        except Exception as e:
+            self.viewer_status_label.setText(f"❌ Error loading data: {e}")
+            self._log_message(f"❌ Frame viewer error: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _viewer_load_hdf5(self):
+        """Load HDF5 file frames into viewer."""
+        import h5py
+
+        self._log_message(f"Loading HDF5 file into frame viewer: {self.file_path}")
+
+        with h5py.File(self.file_path, "r") as f:
+            # Get frame interval from metadata
+            if "metadata" in f.attrs:
+                import json
+
+                metadata = json.loads(f.attrs["metadata"])
+                self.viewer_frame_interval = metadata.get("frame_interval", 5.0)
+            else:
+                # Default to 5 seconds
+                self.viewer_frame_interval = 5.0
+
+            # Find the images dataset
+            if "images" in f:
+                images = f["images"]
+
+                if isinstance(images, h5py.Dataset):
+                    # Single dataset with all frames
+                    self.viewer_frames = images
+                    self.viewer_n_frames = images.shape[0] if images.ndim >= 3 else 1
+                    self.viewer_file_handle = h5py.File(self.file_path, "r")
+                    self.viewer_dataset_name = "images"
+                    self.viewer_is_sequence = False
+                else:
+                    # Group with frame_XXXXXX datasets
+                    frame_names = sorted(
+                        [k for k in images.keys() if k.startswith("frame_")]
+                    )
+                    if frame_names:
+                        self.viewer_frames = None
+                        self.viewer_frame_names = frame_names
+                        self.viewer_n_frames = len(frame_names)
+                        self.viewer_file_handle = h5py.File(self.file_path, "r")
+                        self.viewer_dataset_name = "images"
+                        self.viewer_is_sequence = True
+                    else:
+                        raise ValueError("No frame datasets found in 'images' group")
+            else:
+                raise ValueError("No 'images' dataset or group found in HDF5 file")
+
+        # Update UI
+        self.viewer_current_frame = 0
+        self.viewer_frame_slider.setMaximum(self.viewer_n_frames - 1)
+        self.viewer_frame_slider.setValue(0)
+        self.viewer_frame_slider.setEnabled(True)
+
+        # Enable controls
+        self.btn_viewer_first.setEnabled(True)
+        self.btn_viewer_prev.setEnabled(True)
+        self.btn_viewer_play.setEnabled(True)
+        self.btn_viewer_next.setEnabled(True)
+        self.btn_viewer_last.setEnabled(True)
+
+        self.viewer_status_label.setText(
+            f"✓ Loaded HDF5: {self.viewer_n_frames} frames (Interval: {self.viewer_frame_interval}s)"
+        )
+        self._log_message(
+            f"✓ Frame viewer: Loaded {self.viewer_n_frames} frames from HDF5 (interval: {self.viewer_frame_interval}s)"
+        )
+
+        # Display first frame
+        self._viewer_show_frame(0)
+
+    def _viewer_load_avi_batch(self):
+        """Load AVI batch frames into viewer."""
+
+        self._log_message(
+            f"Loading AVI batch into frame viewer: {len(self.avi_batch_paths)} files"
+        )
+
+        # Get frame interval from AVI metadata if available
+        if hasattr(self, "avi_metadata") and self.avi_metadata:
+            self.viewer_frame_interval = self.avi_metadata.get("frame_interval", 5.0)
+        else:
+            self.viewer_frame_interval = 5.0
+
+        # For AVI, we'll use napari layers if available
+        if len(self.viewer.layers) > 0:
+            layer = self.viewer.layers[0]
+            if hasattr(layer, "data"):
+                self.viewer_frames = layer.data
+                self.viewer_n_frames = (
+                    layer.data.shape[0] if layer.data.ndim >= 3 else 1
+                )
+                self.viewer_file_handle = None
+                self.viewer_is_sequence = False
+
+                # Update UI
+                self.viewer_current_frame = 0
+                self.viewer_frame_slider.setMaximum(self.viewer_n_frames - 1)
+                self.viewer_frame_slider.setValue(0)
+                self.viewer_frame_slider.setEnabled(True)
+
+                # Enable controls
+                self.btn_viewer_first.setEnabled(True)
+                self.btn_viewer_prev.setEnabled(True)
+                self.btn_viewer_play.setEnabled(True)
+                self.btn_viewer_next.setEnabled(True)
+                self.btn_viewer_last.setEnabled(True)
+
+                self.viewer_status_label.setText(
+                    f"✓ Loaded AVI: {self.viewer_n_frames} frames (Interval: {self.viewer_frame_interval}s)"
+                )
+                self._log_message(
+                    f"✓ Frame viewer: Loaded {self.viewer_n_frames} frames from AVI batch (interval: {self.viewer_frame_interval}s)"
+                )
+
+                # Display first frame
+                self._viewer_show_frame(0)
+            else:
+                raise ValueError("No image data in viewer layer")
+        else:
+            raise ValueError("No layers in viewer. Please load AVI batch first.")
+
+    def _viewer_show_frame(self, frame_idx):
+        """Display a specific frame in the napari viewer."""
+        try:
+            if frame_idx < 0 or frame_idx >= self.viewer_n_frames:
+                return
+
+            # Get frame data
+            if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                # HDF5 file
+                if hasattr(self, "viewer_frame_names"):
+                    # Individual frame datasets
+                    frame_name = self.viewer_frame_names[frame_idx]
+                    frame_data = self.viewer_file_handle[
+                        f"{self.viewer_dataset_name}/{frame_name}"
+                    ][()]
+                else:
+                    # Single dataset
+                    frame_data = self.viewer_file_handle[self.viewer_dataset_name][
+                        frame_idx
+                    ]
+            else:
+                # From napari layer (AVI or pre-loaded)
+                frame_data = self.viewer_frames[frame_idx]
+
+            # Calculate time from frame index
+            frame_time_seconds = frame_idx * self.viewer_frame_interval
+            frame_time_minutes = frame_time_seconds / 60.0
+            frame_time_hours = frame_time_minutes / 60.0
+
+            # Copy frame data and draw time text on it
+            import numpy as np
+            import cv2
+
+            # Make a writable copy
+            frame_with_text = np.array(frame_data, copy=True)
+
+            # Ensure it's uint8 for cv2.putText
+            if frame_with_text.dtype != np.uint8:
+                # Normalize to 0-255 range
+                frame_min = frame_with_text.min()
+                frame_max = frame_with_text.max()
+                if frame_max > frame_min:
+                    frame_with_text = (
+                        (frame_with_text - frame_min) / (frame_max - frame_min) * 255
+                    ).astype(np.uint8)
+                else:
+                    frame_with_text = np.zeros_like(frame_with_text, dtype=np.uint8)
+
+            # Ensure 2D shape for text overlay
+            if frame_with_text.ndim == 3 and frame_with_text.shape[2] == 1:
+                frame_with_text = frame_with_text[:, :, 0]
+
+            # Convert to 3-channel BGR for colored text
+            if len(frame_with_text.shape) == 2:
+                frame_with_text = cv2.cvtColor(frame_with_text, cv2.COLOR_GRAY2BGR)
+
+            # Prepare time text
+            time_text = f"t = {frame_time_seconds:.1f}s ({frame_time_minutes:.2f}min)"
+
+            # Position: lower left (10 pixels from left, 30 pixels from bottom)
+            height, width = frame_with_text.shape[:2]
+            text_position = (10, height - 10)
+
+            # Draw text in red (BGR: 0, 0, 255)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            color = (0, 0, 255)  # Red in BGR
+            thickness = 2
+
+            cv2.putText(
+                frame_with_text,
+                time_text,
+                text_position,
+                font,
+                font_scale,
+                color,
+                thickness,
+                cv2.LINE_AA,
+            )
+
+            # Create or update napari layer
+            layer_name = "Frame Viewer"
+
+            # Check if layer exists
+            if layer_name in self.viewer.layers:
+                # Update existing layer
+                self.viewer.layers[layer_name].data = frame_with_text
+            else:
+                # Create new layer
+                self.viewer.add_image(
+                    frame_with_text,
+                    name=layer_name,
+                    colormap="gray",
+                )
+
+            # Update frame label with time
+            self.viewer_frame_label.setText(
+                f"Frame: {frame_idx + 1} / {self.viewer_n_frames} | "
+                f"Time: {frame_time_seconds:.1f}s ({frame_time_minutes:.2f}min / {frame_time_hours:.3f}h)"
+            )
+            self.viewer_current_frame = frame_idx
+
+            # Update info (use original frame_data, not the one with text)
+            info_lines = [
+                f"Frame: {frame_idx + 1} / {self.viewer_n_frames}",
+                f"Time: {frame_time_seconds:.1f}s ({frame_time_minutes:.2f} min)",
+                f"Hours: {frame_time_hours:.3f} h",
+                f"Shape: {frame_data.shape}",
+                f"Dtype: {frame_data.dtype}",
+                f"Min/Max: {np.min(frame_data):.2f} / {np.max(frame_data):.2f}",
+                f"Mean: {np.mean(frame_data):.2f}",
+            ]
+            self.viewer_info_text.setPlainText("\n".join(info_lines))
+
+        except Exception as e:
+            self._log_message(f"❌ Error showing frame {frame_idx}: {e}")
+
+    def _on_viewer_frame_changed(self, value):
+        """Handle slider value change."""
+        self._viewer_show_frame(value)
+
+    def _viewer_goto_frame(self, frame_idx):
+        """Go to specific frame."""
+        if frame_idx < 0:
+            frame_idx = self.viewer_n_frames - 1
+        frame_idx = max(0, min(self.viewer_n_frames - 1, frame_idx))
+        self.viewer_frame_slider.setValue(frame_idx)
+
+    def _viewer_step_frame(self, step):
+        """Step forward or backward by n frames."""
+        new_idx = self.viewer_current_frame + step
+        self._viewer_goto_frame(new_idx)
+
+    def _viewer_toggle_play(self):
+        """Toggle playback on/off."""
+        if self.btn_viewer_play.isChecked():
+            # Start playing
+            self.viewer_is_playing = True
+            self.btn_viewer_play.setText("⏸ Pause")
+            interval = int(1000 / self.viewer_fps_spin.value())
+            self.viewer_timer.start(interval)
+            self._log_message(f"▶ Playing at {self.viewer_fps_spin.value()} FPS")
+        else:
+            # Stop playing
+            self.viewer_is_playing = False
+            self.btn_viewer_play.setText("▶ Play")
+            self.viewer_timer.stop()
+            self._log_message("⏸ Paused")
+
+    def _viewer_play_next_frame(self):
+        """Advance to next frame during playback."""
+        if self.viewer_is_playing:
+            next_idx = self.viewer_current_frame + 1
+            if next_idx >= self.viewer_n_frames:
+                # Loop back to start
+                next_idx = 0
+            self._viewer_goto_frame(next_idx)
+
+    def _viewer_update_timer_interval(self):
+        """Update playback timer interval when FPS changes."""
+        if self.viewer_is_playing:
+            interval = int(1000 / self.viewer_fps_spin.value())
+            self.viewer_timer.setInterval(interval)
 
     # ===================================================================
     # UTILITY METHODS
