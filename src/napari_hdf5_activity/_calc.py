@@ -729,10 +729,78 @@ def apply_matlab_normalization_to_merged_results(
     return merged_results
 
 
+def detect_and_remove_jumps(
+    times: np.ndarray, values: np.ndarray, jump_threshold_factor: float = 1.5
+) -> Tuple[np.ndarray, List[int]]:
+    """
+    Detect and correct sudden jumps in time-series data.
+
+    Identifies abrupt changes (jumps) in the signal by comparing frame-to-frame
+    differences against a rolling standard deviation threshold. Corrects jumps
+    by subtracting the jump magnitude from all subsequent values.
+
+    Args:
+        times: Time array (not currently used, kept for API compatibility)
+        values: Value array
+        jump_threshold_factor: Factor for jump detection threshold (default: 1.5)
+                              Lower values = more sensitive detection
+
+    Returns:
+        Tuple of (corrected_values, jump_indices)
+    """
+    if len(values) < 10:
+        return values, []
+
+    # Use smaller window for more sensitive detection
+    window_size = min(20, len(values) // 5)
+    if window_size < 5:
+        return values, []
+
+    # Calculate frame-to-frame differences
+    diffs = np.diff(values)
+
+    # Calculate rolling standard deviation of differences
+    rolling_std = []
+    for i in range(len(diffs)):
+        start_idx = max(0, i - window_size // 2)
+        end_idx = min(len(diffs), i + window_size // 2 + 1)
+        window_diffs = diffs[start_idx:end_idx]
+        rolling_std.append(np.std(window_diffs))
+
+    rolling_std = np.array(rolling_std)
+
+    # Detect jumps using threshold based on median rolling std
+    jump_threshold = jump_threshold_factor * np.median(rolling_std)
+    jump_indices = np.where(np.abs(diffs) > jump_threshold)[0]
+
+    if len(jump_indices) == 0:
+        return values, []
+
+    # Correct jumps by adjusting subsequent values
+    corrected_values = values.copy()
+
+    for jump_idx in jump_indices:
+        jump_size = diffs[jump_idx]
+        # Subtract the jump from all subsequent values
+        corrected_values[jump_idx + 1 :] -= jump_size
+
+    return corrected_values, list(jump_indices)
+
+
 def improved_full_dataset_detrending(
     merged_results: Dict[int, List[Tuple[float, float]]],
+    enable_jump_correction: bool = False,
 ) -> Dict[int, List[Tuple[float, float]]]:
-    """Apply improved detrending to complete dataset."""
+    """
+    Apply improved detrending to complete dataset.
+
+    Args:
+        merged_results: Dictionary mapping ROI ID to list of (time, value) tuples
+        enable_jump_correction: Whether to apply jump correction before detrending
+
+    Returns:
+        Dictionary with detrended values
+    """
     detrended_results = {}
 
     for roi, data in merged_results.items():
@@ -745,7 +813,13 @@ def improved_full_dataset_detrending(
             times = np.array([t for t, _ in sorted_data])
             values = np.array([val for _, val in sorted_data])
 
-            # Remove polynomial trend (handles curved drift)
+            # Step 1: Jump correction (if enabled)
+            if enable_jump_correction:
+                values, jump_indices = detect_and_remove_jumps(times, values)
+                if len(jump_indices) > 0:
+                    print(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
+
+            # Step 2: Remove polynomial trend (handles curved drift)
             if len(values) >= 10:
                 poly_coeffs = np.polyfit(times, values, 2)
                 poly_trend = np.polyval(poly_coeffs, times)
@@ -753,7 +827,7 @@ def improved_full_dataset_detrending(
             else:
                 values_detrended = values
 
-            # Remove any remaining linear drift
+            # Step 3: Remove any remaining linear drift
             if len(values_detrended) >= 10:
                 slope, intercept = np.polyfit(times, values_detrended, 1)
                 total_drift = abs(slope * (times[-1] - times[0]))
@@ -1108,6 +1182,7 @@ def run_baseline_analysis(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
+    enable_jump_correction: bool = False,
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
@@ -1116,8 +1191,19 @@ def run_baseline_analysis(
     """
     Run complete baseline analysis pipeline with MATLAB-compatible processing.
 
-    Now uses true MATLAB-style processing (no minimum subtraction) while
-    maintaining our advanced hysteresis-based movement detection.
+    Args:
+        merged_results: Dictionary mapping ROI IDs to time-series data
+        enable_matlab_norm: Apply MATLAB-style normalization
+        enable_detrending: Apply detrending to remove drift
+        use_improved_detrending: Use improved detrending algorithm
+        enable_jump_correction: Detect and correct sudden jumps before detrending
+        baseline_duration_minutes: Duration for baseline calculation
+        multiplier: Threshold multiplier
+        frame_interval: Time between frames (seconds)
+        **kwargs: Additional parameters
+
+    Returns:
+        Complete analysis results dictionary
     """
 
     analysis_results = {
@@ -1125,6 +1211,7 @@ def run_baseline_analysis(
         "parameters": {
             "enable_matlab_norm": enable_matlab_norm,
             "enable_detrending": enable_detrending,
+            "enable_jump_correction": enable_jump_correction,
             "baseline_duration_minutes": baseline_duration_minutes,
             "multiplier": multiplier,
             "frame_interval": frame_interval,
@@ -1140,7 +1227,9 @@ def run_baseline_analysis(
         normalized_data = merged_results
 
     if enable_detrending and use_improved_detrending:
-        processed_data = improved_full_dataset_detrending(normalized_data)
+        processed_data = improved_full_dataset_detrending(
+            normalized_data, enable_jump_correction=enable_jump_correction
+        )
     else:
         processed_data = normalized_data
 

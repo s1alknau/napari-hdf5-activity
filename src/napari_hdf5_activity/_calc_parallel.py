@@ -110,6 +110,7 @@ def run_baseline_analysis_parallel(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
+    enable_jump_correction: bool = False,
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
@@ -126,6 +127,7 @@ def run_baseline_analysis_parallel(
         enable_matlab_norm: Apply MATLAB-style normalization
         enable_detrending: Apply detrending
         use_improved_detrending: Use improved detrending algorithm
+        enable_jump_correction: Detect and correct sudden jumps before detrending
         baseline_duration_minutes: Duration for baseline calculation
         multiplier: Threshold multiplier
         frame_interval: Time between frames (seconds)
@@ -152,6 +154,7 @@ def run_baseline_analysis_parallel(
         "parameters": {
             "enable_matlab_norm": enable_matlab_norm,
             "enable_detrending": enable_detrending,
+            "enable_jump_correction": enable_jump_correction,
             "baseline_duration_minutes": baseline_duration_minutes,
             "multiplier": multiplier,
             "frame_interval": frame_interval,
@@ -168,7 +171,9 @@ def run_baseline_analysis_parallel(
         normalized_data = merged_results
 
     if enable_detrending and use_improved_detrending:
-        processed_data = improved_full_dataset_detrending(normalized_data)
+        processed_data = improved_full_dataset_detrending(
+            normalized_data, enable_jump_correction=enable_jump_correction
+        )
     else:
         processed_data = normalized_data
 
