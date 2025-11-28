@@ -64,6 +64,7 @@ def test_parallel_vs_sequential():
         "enable_matlab_norm": True,
         "enable_detrending": True,
         "use_improved_detrending": True,
+        "enable_jump_correction": True,
         "baseline_duration_minutes": 200.0,
         "multiplier": 1.0,
         "frame_interval": 5.0,
