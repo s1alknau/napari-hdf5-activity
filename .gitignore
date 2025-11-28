@@ -71,6 +71,9 @@ target/
 venv/
 .vscode/
 
+# Claude Code
+.claude/
+
 # IPython Notebook
 .ipynb_checkpoints
 
