@@ -1398,9 +1398,9 @@ def run_analysis_with_method(
     # Route to appropriate analysis method (each handles own preprocessing)
     try:
         if method.lower() == "baseline":
-            from ._calc import run_baseline_analysis_auto
+            from ._calc import run_baseline_analysis
 
-            results = run_baseline_analysis_auto(merged_results, **kwargs)
+            results = run_baseline_analysis(merged_results, **kwargs)
 
         elif method.lower() == "adaptive":
             from ._calc_adaptive import run_adaptive_analysis
