@@ -8018,33 +8018,48 @@ class HDF5AnalysisWidget(QWidget):
                 # Default to 5 seconds
                 self.viewer_frame_interval = 5.0
 
-            # Find the images dataset
-            if "images" in f:
-                images = f["images"]
+            # Find the dataset - try multiple common names
+            dataset_found = False
 
-                if isinstance(images, h5py.Dataset):
-                    # Single dataset with all frames
-                    self.viewer_frames = images
-                    self.viewer_n_frames = images.shape[0] if images.ndim >= 3 else 1
-                    self.viewer_file_handle = h5py.File(self.file_path, "r")
-                    self.viewer_dataset_name = "images"
-                    self.viewer_is_sequence = False
-                else:
-                    # Group with frame_XXXXXX datasets
-                    frame_names = sorted(
-                        [k for k in images.keys() if k.startswith("frame_")]
-                    )
-                    if frame_names:
-                        self.viewer_frames = None
-                        self.viewer_frame_names = frame_names
-                        self.viewer_n_frames = len(frame_names)
+            # Try common dataset names in order
+            for dataset_name in ["frames", "images", "data"]:
+                if dataset_name in f:
+                    data_obj = f[dataset_name]
+
+                    if isinstance(data_obj, h5py.Dataset):
+                        # Stacked frames format: (N, H, W) or (N, H, W, C)
+                        self._log_message(f"Found stacked dataset: {dataset_name} with shape {data_obj.shape}")
+                        self.viewer_frames = data_obj
+                        self.viewer_n_frames = data_obj.shape[0] if data_obj.ndim >= 3 else 1
                         self.viewer_file_handle = h5py.File(self.file_path, "r")
-                        self.viewer_dataset_name = "images"
-                        self.viewer_is_sequence = True
-                    else:
-                        raise ValueError("No frame datasets found in 'images' group")
-            else:
-                raise ValueError("No 'images' dataset or group found in HDF5 file")
+                        self.viewer_dataset_name = dataset_name
+                        self.viewer_is_sequence = False
+                        dataset_found = True
+                        break
+                    elif isinstance(data_obj, h5py.Group):
+                        # Individual frames format: group with frame_XXXXXX datasets
+                        frame_names = sorted(
+                            [k for k in data_obj.keys() if k.startswith("frame_")]
+                        )
+                        if frame_names:
+                            self._log_message(f"Found individual frames in group: {dataset_name} ({len(frame_names)} frames)")
+                            self.viewer_frames = None
+                            self.viewer_frame_names = frame_names
+                            self.viewer_n_frames = len(frame_names)
+                            self.viewer_file_handle = h5py.File(self.file_path, "r")
+                            self.viewer_dataset_name = dataset_name
+                            self.viewer_is_sequence = True
+                            dataset_found = True
+                            break
+
+            if not dataset_found:
+                # List available keys for debugging
+                available_keys = list(f.keys())
+                self._log_message(f"Available HDF5 keys: {available_keys}")
+                raise ValueError(
+                    f"No 'frames', 'images', or 'data' dataset found in HDF5 file. "
+                    f"Available keys: {available_keys}"
+                )
 
         # Update UI
         self.viewer_current_frame = 0
