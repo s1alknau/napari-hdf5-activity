@@ -52,9 +52,9 @@ def test_parallel_vs_sequential():
     # Import analysis functions
     print("\n2. Importing analysis functions...")
     try:
-        from src.napari_hdf5_activity._calc import run_baseline_analysis_auto
+        from src.napari_hdf5_activity._calc import run_baseline_analysis
 
-        print("   Successfully imported run_baseline_analysis_auto")
+        print("   Successfully imported run_baseline_analysis")
     except ImportError as e:
         print(f"   ERROR: Could not import analysis function: {e}")
         return False
@@ -76,9 +76,7 @@ def test_parallel_vs_sequential():
     # Run sequential analysis
     print("\n3. Running sequential analysis (num_processes=1)...")
     try:
-        sequential_results = run_baseline_analysis_auto(
-            test_data, num_processes=1, **params
-        )
+        sequential_results = run_baseline_analysis(test_data, num_processes=1, **params)
         print("   Sequential analysis completed")
         print(f"   ROIs processed: {len(sequential_results.get('baseline_means', {}))}")
         print(
@@ -94,9 +92,7 @@ def test_parallel_vs_sequential():
     # Run parallel analysis
     print("\n4. Running parallel analysis (num_processes=4)...")
     try:
-        parallel_results = run_baseline_analysis_auto(
-            test_data, num_processes=4, **params
-        )
+        parallel_results = run_baseline_analysis(test_data, num_processes=4, **params)
         print("   Parallel analysis completed")
         print(f"   ROIs processed: {len(parallel_results.get('baseline_means', {}))}")
         print(

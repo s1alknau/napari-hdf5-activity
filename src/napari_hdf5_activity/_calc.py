@@ -1173,7 +1173,92 @@ def bin_activity_data_for_lighting(
 
 
 # =============================================================================
-# MAIN BASELINE ANALYSIS FUNCTION
+# MULTIPROCESSING WORKER FUNCTION
+# =============================================================================
+
+
+def _process_single_roi_baseline(
+    args: Tuple[int, List[Tuple[float, float]], float, float, float, float],
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Worker function for parallel ROI processing.
+
+    Args:
+        args: Tuple of (roi_id, data, baseline_duration_minutes, multiplier,
+                       frame_interval, bin_size_seconds)
+
+    Returns:
+        Tuple of (roi_id, results_dict)
+    """
+    (
+        roi_id,
+        data,
+        baseline_duration_minutes,
+        multiplier,
+        frame_interval,
+        bin_size_seconds,
+    ) = args
+
+    results = {}
+
+    if not data:
+        results["status"] = "no_data"
+        results["baseline_mean"] = 0.0
+        results["upper_threshold"] = 0.0
+        results["lower_threshold"] = 0.0
+        results["movement_data"] = []
+        results["fraction_data"] = []
+        return roi_id, results
+
+    try:
+        # Step 1: Compute baseline threshold
+        baseline_mean, upper_thresh, lower_thresh, stats = (
+            compute_threshold_baseline_hysteresis(
+                data, baseline_duration_minutes, multiplier, frame_interval
+            )
+        )
+
+        results["baseline_mean"] = baseline_mean
+        results["upper_threshold"] = upper_thresh
+        results["lower_threshold"] = lower_thresh
+        results["statistics"] = stats
+
+        # Step 2: Hysteresis movement detection
+        baseline_means_single = {roi_id: baseline_mean}
+        upper_thresholds_single = {roi_id: upper_thresh}
+        lower_thresholds_single = {roi_id: lower_thresh}
+        data_single = {roi_id: data}
+
+        movement_data_dict = define_movement_with_hysteresis(
+            data_single,
+            baseline_means_single,
+            upper_thresholds_single,
+            lower_thresholds_single,
+        )
+        results["movement_data"] = movement_data_dict.get(roi_id, [])
+
+        # Step 3: Bin fraction movement
+        fraction_data_dict = bin_fraction_movement(
+            movement_data_dict, bin_size_seconds, frame_interval
+        )
+        results["fraction_data"] = fraction_data_dict.get(roi_id, [])
+
+        results["status"] = "success"
+
+    except Exception as e:
+        results["status"] = "error"
+        results["error"] = str(e)
+        results["baseline_mean"] = 0.0
+        results["upper_threshold"] = 0.0
+        results["lower_threshold"] = 0.0
+        results["movement_data"] = []
+        results["fraction_data"] = []
+
+    return roi_id, results
+
+
+# =============================================================================
+# MAIN BASELINE ANALYSIS FUNCTION (with integrated multiprocessing)
 # =============================================================================
 
 
@@ -1186,10 +1271,14 @@ def run_baseline_analysis(
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
+    num_processes: int = 1,
     **kwargs,
 ) -> Dict[str, Any]:
     """
     Run complete baseline analysis pipeline with MATLAB-compatible processing.
+
+    Automatically chooses between sequential and parallel processing based on
+    num_processes parameter and number of ROIs.
 
     Args:
         merged_results: Dictionary mapping ROI IDs to time-series data
@@ -1200,11 +1289,20 @@ def run_baseline_analysis(
         baseline_duration_minutes: Duration for baseline calculation
         multiplier: Threshold multiplier
         frame_interval: Time between frames (seconds)
+        num_processes: Number of parallel processes (1 = sequential)
         **kwargs: Additional parameters
 
     Returns:
         Complete analysis results dictionary
     """
+    from multiprocessing import Pool, cpu_count
+
+    # Determine if we should use parallel processing
+    num_rois = len(merged_results)
+    if num_processes is None or num_processes < 1:
+        num_processes = max(1, cpu_count() - 1)
+    num_processes = min(num_processes, num_rois)  # Don't use more than ROIs
+    use_parallel = num_processes > 1 and num_rois >= 2
 
     analysis_results = {
         "method": "baseline",
@@ -1215,13 +1313,14 @@ def run_baseline_analysis(
             "baseline_duration_minutes": baseline_duration_minutes,
             "multiplier": multiplier,
             "frame_interval": frame_interval,
-            "matlab_compatible": True,  # Flag indicating MATLAB compatibility
+            "matlab_compatible": True,
+            "num_processes": num_processes,
+            "parallel": use_parallel,
         },
     }
 
-    # Step 1: Preprocessing (now MATLAB-compatible)
+    # Step 1: Preprocessing (sequential - shared across all ROIs)
     if enable_matlab_norm:
-        # True MATLAB processing: no minimum subtraction
         normalized_data = apply_matlab_normalization_to_merged_results(merged_results)
     else:
         normalized_data = merged_results
@@ -1235,30 +1334,79 @@ def run_baseline_analysis(
 
     analysis_results["processed_data"] = processed_data
 
-    # Step 2: Baseline threshold calculation (unchanged - works with MATLAB data)
-    baseline_means = {}
-    upper_thresholds = {}
-    lower_thresholds = {}
-    roi_statistics = {}
+    # Step 2: ROI-level processing (parallel or sequential)
+    bin_size_seconds = kwargs.get("bin_size_seconds", 60)
 
-    for roi, data in processed_data.items():
-        if not data:
-            baseline_means[roi] = 0.0
-            upper_thresholds[roi] = 0.0
-            lower_thresholds[roi] = 0.0
-            roi_statistics[roi] = {"method": "baseline", "status": "no_data"}
-            continue
-
-        baseline_mean, upper_thresh, lower_thresh, stats = (
-            compute_threshold_baseline_hysteresis(
-                data, baseline_duration_minutes, multiplier, frame_interval
+    if use_parallel:
+        # Parallel processing using multiprocessing.Pool
+        roi_args = [
+            (
+                roi_id,
+                data,
+                baseline_duration_minutes,
+                multiplier,
+                frame_interval,
+                bin_size_seconds,
             )
+            for roi_id, data in processed_data.items()
+        ]
+
+        with Pool(processes=num_processes) as pool:
+            roi_results = pool.map(_process_single_roi_baseline, roi_args)
+
+        # Aggregate results from parallel workers
+        baseline_means = {}
+        upper_thresholds = {}
+        lower_thresholds = {}
+        roi_statistics = {}
+        movement_data = {}
+        fraction_data = {}
+
+        for roi_id, results in roi_results:
+            baseline_means[roi_id] = results["baseline_mean"]
+            upper_thresholds[roi_id] = results["upper_threshold"]
+            lower_thresholds[roi_id] = results["lower_threshold"]
+            roi_statistics[roi_id] = results.get(
+                "statistics", {"status": results["status"]}
+            )
+            movement_data[roi_id] = results["movement_data"]
+            fraction_data[roi_id] = results["fraction_data"]
+
+    else:
+        # Sequential processing (original logic)
+        baseline_means = {}
+        upper_thresholds = {}
+        lower_thresholds = {}
+        roi_statistics = {}
+
+        for roi, data in processed_data.items():
+            if not data:
+                baseline_means[roi] = 0.0
+                upper_thresholds[roi] = 0.0
+                lower_thresholds[roi] = 0.0
+                roi_statistics[roi] = {"method": "baseline", "status": "no_data"}
+                continue
+
+            baseline_mean, upper_thresh, lower_thresh, stats = (
+                compute_threshold_baseline_hysteresis(
+                    data, baseline_duration_minutes, multiplier, frame_interval
+                )
+            )
+
+            baseline_means[roi] = baseline_mean
+            upper_thresholds[roi] = upper_thresh
+            lower_thresholds[roi] = lower_thresh
+            roi_statistics[roi] = stats
+
+        # Movement detection
+        movement_data = define_movement_with_hysteresis(
+            processed_data, baseline_means, upper_thresholds, lower_thresholds
         )
 
-        baseline_means[roi] = baseline_mean
-        upper_thresholds[roi] = upper_thresh
-        lower_thresholds[roi] = lower_thresh
-        roi_statistics[roi] = stats
+        # Fraction movement
+        fraction_data = bin_fraction_movement(
+            movement_data, bin_size_seconds, frame_interval
+        )
 
     analysis_results.update(
         {
@@ -1266,22 +1414,12 @@ def run_baseline_analysis(
             "upper_thresholds": upper_thresholds,
             "lower_thresholds": lower_thresholds,
             "roi_statistics": roi_statistics,
+            "movement_data": movement_data,
+            "fraction_data": fraction_data,
         }
     )
 
-    # Step 3: Hysteresis movement detection (unchanged - our advanced algorithm)
-    movement_data = define_movement_with_hysteresis(
-        processed_data, baseline_means, upper_thresholds, lower_thresholds
-    )
-    analysis_results["movement_data"] = movement_data
-
-    # Step 4: Behavioral analysis (unchanged - our advanced features)
-    bin_size_seconds = kwargs.get("bin_size_seconds", 60)
-    fraction_data = bin_fraction_movement(
-        movement_data, bin_size_seconds, frame_interval
-    )
-    analysis_results["fraction_data"] = fraction_data
-
+    # Step 3: Post-processing (sequential - needs all ROI data)
     quiescence_threshold = kwargs.get("quiescence_threshold", 0.5)
     quiescence_data = bin_quiescence(fraction_data, quiescence_threshold)
     analysis_results["quiescence_data"] = quiescence_data
@@ -1507,40 +1645,6 @@ def integrate_baseline_analysis_with_widget(widget) -> bool:
 # =============================================================================
 # PARALLEL PROCESSING WRAPPER
 # =============================================================================
-
-
-def run_baseline_analysis_auto(
-    merged_results: Dict[int, List[Tuple[float, float]]],
-    num_processes: int = 1,
-    **kwargs,
-) -> Dict[str, Any]:
-    """
-    Automatically choose between parallel and sequential baseline analysis.
-
-    Args:
-        merged_results: Dictionary mapping ROI IDs to time-series data
-        num_processes: Number of processes (1 = sequential, >1 = parallel)
-        **kwargs: Additional parameters for analysis
-
-    Returns:
-        Complete analysis results dictionary
-    """
-    from ._calc_parallel import should_use_parallel
-
-    # Determine if parallel processing should be used
-    num_rois = len(merged_results)
-    use_parallel = should_use_parallel(num_rois, num_processes)
-
-    if use_parallel:
-        # Use parallel implementation
-        from ._calc_parallel import run_baseline_analysis_parallel
-
-        return run_baseline_analysis_parallel(
-            merged_results, num_processes=num_processes, **kwargs
-        )
-    else:
-        # Use sequential implementation
-        return run_baseline_analysis(merged_results, **kwargs)
 
 
 # Legacy aliases for backward compatibility
