@@ -278,8 +278,8 @@ Frame interval is automatically calculated based on video FPS and target interva
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Min Radius | 380 | Minimum organism size (pixels) |
-| Max Radius | 420 | Maximum organism size (pixels) |
+| Min Radius | 100 | Minimum organism size (pixels) |
+| Max Radius | 120 | Maximum organism size (pixels) |
 | DP Parameter | 0.5 | Hough transform sensitivity (lower = more sensitive) |
 | Min Distance | 150 | Minimum separation between ROIs (pixels) |
 | Param1 (Edge) | 40 | Canny edge detection threshold |
@@ -291,9 +291,9 @@ Frame interval is automatically calculated based on video FPS and target interva
 |-----------|---------|-------------|
 | Frame Interval | 5.0 s | Time between analyzed frames |
 | Baseline Duration | 5.0 min | Duration for baseline calculation |
-| Threshold Multiplier | 3.0 | Sensitivity factor for movement detection |
+| Threshold Multiplier | 0.1 | Sensitivity factor for movement detection |
 | Upper Threshold Factor | 1.0 | Hysteresis upper threshold |
-| Lower Threshold Factor | 0.5 | Hysteresis lower threshold |
+| Lower Threshold Factor | 1.0 | Hysteresis lower threshold |
 | Chunk Size | 50 | Frames per processing chunk |
 | Num Processes | 4 | Number of CPU cores for parallel processing |
 
@@ -401,8 +401,11 @@ Frame interval is automatically calculated based on video FPS and target interva
 1. **Pixel Difference**: `diff = abs(frame[t] - frame[t-1])`
 2. **ROI Masking**: Apply circular mask to each ROI
 3. **Normalization**: `movement = sum(diff * mask) / sum(mask)`
-4. **Thresholding**: Compare to baseline + (multiplier × std)
-5. **Hysteresis**: Separate upper/lower thresholds for state changes
+4. **Baseline Calculation**: `mean` and `std` from first N minutes
+5. **Symmetric Hysteresis Thresholds**:
+   - Upper: `mean + (multiplier × std)`
+   - Lower: `mean - (multiplier × std)`
+   - State changes require crossing both thresholds for noise resistance
 
 ### Multiprocessing Performance
 
