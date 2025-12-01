@@ -5407,22 +5407,22 @@ class HDF5AnalysisWidget(QWidget):
                         self._get_current_threshold_method_display(),
                         self.frame_interval.value(),
                         (
-                            getattr(self, "baseline_duration_minutes", {}).value()
+                            self.baseline_duration_minutes.value()
                             if hasattr(self, "baseline_duration_minutes")
                             else "N/A"
                         ),
                         (
-                            getattr(self, "threshold_multiplier", {}).value()
+                            self.threshold_multiplier.value()
                             if hasattr(self, "threshold_multiplier")
                             else "N/A"
                         ),
                         (
-                            getattr(self, "enable_detrending", {}).isChecked()
+                            self.enable_detrending.isChecked()
                             if hasattr(self, "enable_detrending")
                             else "N/A"
                         ),
                         (
-                            getattr(self, "enable_jump_correction", {}).isChecked()
+                            self.enable_jump_correction.isChecked()
                             if hasattr(self, "enable_jump_correction")
                             else "N/A"
                         ),
