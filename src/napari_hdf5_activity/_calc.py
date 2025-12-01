@@ -1177,15 +1177,15 @@ def bin_activity_data_for_lighting(
 # =============================================================================
 
 
-def _process_single_roi_baseline(
-    args: Tuple[int, List[Tuple[float, float]], float, float, float, float],
+def _process_single_roi_movement(
+    args: Tuple[int, List[Tuple[float, float]], float, float, float, float, float],
 ) -> Tuple[int, Dict[str, Any]]:
     """
-    Worker function for parallel ROI processing.
+    Worker function for parallel ROI movement detection with pre-calculated baseline.
 
     Args:
-        args: Tuple of (roi_id, data, baseline_duration_minutes, multiplier,
-                       frame_interval, bin_size_seconds)
+        args: Tuple of (roi_id, data, baseline_mean, upper_threshold,
+                       lower_threshold, bin_size_seconds, frame_interval)
 
     Returns:
         Tuple of (roi_id, results_dict)
@@ -1193,40 +1193,25 @@ def _process_single_roi_baseline(
     (
         roi_id,
         data,
-        baseline_duration_minutes,
-        multiplier,
-        frame_interval,
+        baseline_mean,
+        upper_threshold,
+        lower_threshold,
         bin_size_seconds,
+        frame_interval,
     ) = args
 
     results = {}
 
     if not data:
-        results["status"] = "no_data"
-        results["baseline_mean"] = 0.0
-        results["upper_threshold"] = 0.0
-        results["lower_threshold"] = 0.0
         results["movement_data"] = []
         results["fraction_data"] = []
         return roi_id, results
 
     try:
-        # Step 1: Compute baseline threshold
-        baseline_mean, upper_thresh, lower_thresh, stats = (
-            compute_threshold_baseline_hysteresis(
-                data, baseline_duration_minutes, multiplier, frame_interval
-            )
-        )
-
-        results["baseline_mean"] = baseline_mean
-        results["upper_threshold"] = upper_thresh
-        results["lower_threshold"] = lower_thresh
-        results["statistics"] = stats
-
-        # Step 2: Hysteresis movement detection
+        # Step 1: Hysteresis movement detection using pre-calculated baselines
         baseline_means_single = {roi_id: baseline_mean}
-        upper_thresholds_single = {roi_id: upper_thresh}
-        lower_thresholds_single = {roi_id: lower_thresh}
+        upper_thresholds_single = {roi_id: upper_threshold}
+        lower_thresholds_single = {roi_id: lower_threshold}
         data_single = {roi_id: data}
 
         movement_data_dict = define_movement_with_hysteresis(
@@ -1237,20 +1222,14 @@ def _process_single_roi_baseline(
         )
         results["movement_data"] = movement_data_dict.get(roi_id, [])
 
-        # Step 3: Bin fraction movement
+        # Step 2: Bin fraction movement
         fraction_data_dict = bin_fraction_movement(
             movement_data_dict, bin_size_seconds, frame_interval
         )
         results["fraction_data"] = fraction_data_dict.get(roi_id, [])
 
-        results["status"] = "success"
-
     except Exception as e:
-        results["status"] = "error"
         results["error"] = str(e)
-        results["baseline_mean"] = 0.0
-        results["upper_threshold"] = 0.0
-        results["lower_threshold"] = 0.0
         results["movement_data"] = []
         results["fraction_data"] = []
 
@@ -1325,6 +1304,33 @@ def run_baseline_analysis(
     else:
         normalized_data = merged_results
 
+    # Step 1a: Calculate baseline thresholds from normalized data (BEFORE detrending)
+    # This ensures baseline reflects the original signal, not the detrended signal
+    baseline_means = {}
+    upper_thresholds = {}
+    lower_thresholds = {}
+    roi_statistics = {}
+
+    for roi, data in normalized_data.items():
+        if not data:
+            baseline_means[roi] = 0.0
+            upper_thresholds[roi] = 0.0
+            lower_thresholds[roi] = 0.0
+            roi_statistics[roi] = {"method": "baseline", "status": "no_data"}
+            continue
+
+        baseline_mean, upper_thresh, lower_thresh, stats = (
+            compute_threshold_baseline_hysteresis(
+                data, baseline_duration_minutes, multiplier, frame_interval
+            )
+        )
+
+        baseline_means[roi] = baseline_mean
+        upper_thresholds[roi] = upper_thresh
+        lower_thresholds[roi] = lower_thresh
+        roi_statistics[roi] = stats
+
+    # Step 1b: Apply detrending and jump correction (if enabled)
     if enable_detrending and use_improved_detrending:
         processed_data = improved_full_dataset_detrending(
             normalized_data, enable_jump_correction=enable_jump_correction
@@ -1335,6 +1341,7 @@ def run_baseline_analysis(
     analysis_results["processed_data"] = processed_data
 
     # Step 2: ROI-level processing (parallel or sequential)
+    # Movement detection uses processed_data but pre-calculated baselines
     bin_size_seconds = kwargs.get("bin_size_seconds", 60)
 
     if use_parallel:
@@ -1342,63 +1349,30 @@ def run_baseline_analysis(
         roi_args = [
             (
                 roi_id,
-                data,
-                baseline_duration_minutes,
-                multiplier,
-                frame_interval,
+                processed_data[roi_id],
+                baseline_means[roi_id],
+                upper_thresholds[roi_id],
+                lower_thresholds[roi_id],
                 bin_size_seconds,
+                frame_interval,
             )
-            for roi_id, data in processed_data.items()
+            for roi_id in processed_data.keys()
         ]
 
         with Pool(processes=num_processes) as pool:
-            roi_results = pool.map(_process_single_roi_baseline, roi_args)
+            roi_results = pool.map(_process_single_roi_movement, roi_args)
 
         # Aggregate results from parallel workers
-        baseline_means = {}
-        upper_thresholds = {}
-        lower_thresholds = {}
-        roi_statistics = {}
         movement_data = {}
         fraction_data = {}
 
         for roi_id, results in roi_results:
-            baseline_means[roi_id] = results["baseline_mean"]
-            upper_thresholds[roi_id] = results["upper_threshold"]
-            lower_thresholds[roi_id] = results["lower_threshold"]
-            roi_statistics[roi_id] = results.get(
-                "statistics", {"status": results["status"]}
-            )
             movement_data[roi_id] = results["movement_data"]
             fraction_data[roi_id] = results["fraction_data"]
 
     else:
-        # Sequential processing (original logic)
-        baseline_means = {}
-        upper_thresholds = {}
-        lower_thresholds = {}
-        roi_statistics = {}
-
-        for roi, data in processed_data.items():
-            if not data:
-                baseline_means[roi] = 0.0
-                upper_thresholds[roi] = 0.0
-                lower_thresholds[roi] = 0.0
-                roi_statistics[roi] = {"method": "baseline", "status": "no_data"}
-                continue
-
-            baseline_mean, upper_thresh, lower_thresh, stats = (
-                compute_threshold_baseline_hysteresis(
-                    data, baseline_duration_minutes, multiplier, frame_interval
-                )
-            )
-
-            baseline_means[roi] = baseline_mean
-            upper_thresholds[roi] = upper_thresh
-            lower_thresholds[roi] = lower_thresh
-            roi_statistics[roi] = stats
-
-        # Movement detection
+        # Sequential processing
+        # Movement detection using processed_data with pre-calculated baselines
         movement_data = define_movement_with_hysteresis(
             processed_data, baseline_means, upper_thresholds, lower_thresholds
         )
