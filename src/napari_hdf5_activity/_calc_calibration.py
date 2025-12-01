@@ -250,21 +250,21 @@ def process_calibration_baseline(
             raise Exception("No calibration data obtained from processing")
 
         # Apply preprocessing to calibration data
-        from ._calc import (
-            apply_matlab_normalization_to_merged_results,
-            improved_full_dataset_detrending,
-        )
+        from ._calc import apply_matlab_normalization_to_merged_results
 
         normalized_calibration = apply_matlab_normalization_to_merged_results(
             calibration_roi_changes, enable_matlab_norm=True
         )
 
-        processed_calibration = improved_full_dataset_detrending(normalized_calibration)
+        # IMPORTANT: Calculate baseline from normalized data BEFORE detrending
+        # Detrending removes trends across the entire calibration file, which
+        # would distort the baseline thresholds. We want the baseline to reflect
+        # the actual signal characteristics, not detrended values.
 
         # Calculate baseline statistics for each ROI
         calibration_baseline_statistics = {}
 
-        for roi, data in processed_calibration.items():
+        for roi, data in normalized_calibration.items():
             if not data:
                 continue
 
