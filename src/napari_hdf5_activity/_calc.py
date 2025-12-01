@@ -697,10 +697,9 @@ Other methods are in separate modules:
 - _calc_integration.py: Method routing and integration
 """
 
-import os
 import time
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Any
 
 
 # =============================================================================
@@ -730,10 +729,78 @@ def apply_matlab_normalization_to_merged_results(
     return merged_results
 
 
+def detect_and_remove_jumps(
+    times: np.ndarray, values: np.ndarray, jump_threshold_factor: float = 1.5
+) -> Tuple[np.ndarray, List[int]]:
+    """
+    Detect and correct sudden jumps in time-series data.
+
+    Identifies abrupt changes (jumps) in the signal by comparing frame-to-frame
+    differences against a rolling standard deviation threshold. Corrects jumps
+    by subtracting the jump magnitude from all subsequent values.
+
+    Args:
+        times: Time array (not currently used, kept for API compatibility)
+        values: Value array
+        jump_threshold_factor: Factor for jump detection threshold (default: 1.5)
+                              Lower values = more sensitive detection
+
+    Returns:
+        Tuple of (corrected_values, jump_indices)
+    """
+    if len(values) < 10:
+        return values, []
+
+    # Use smaller window for more sensitive detection
+    window_size = min(20, len(values) // 5)
+    if window_size < 5:
+        return values, []
+
+    # Calculate frame-to-frame differences
+    diffs = np.diff(values)
+
+    # Calculate rolling standard deviation of differences
+    rolling_std = []
+    for i in range(len(diffs)):
+        start_idx = max(0, i - window_size // 2)
+        end_idx = min(len(diffs), i + window_size // 2 + 1)
+        window_diffs = diffs[start_idx:end_idx]
+        rolling_std.append(np.std(window_diffs))
+
+    rolling_std = np.array(rolling_std)
+
+    # Detect jumps using threshold based on median rolling std
+    jump_threshold = jump_threshold_factor * np.median(rolling_std)
+    jump_indices = np.where(np.abs(diffs) > jump_threshold)[0]
+
+    if len(jump_indices) == 0:
+        return values, []
+
+    # Correct jumps by adjusting subsequent values
+    corrected_values = values.copy()
+
+    for jump_idx in jump_indices:
+        jump_size = diffs[jump_idx]
+        # Subtract the jump from all subsequent values
+        corrected_values[jump_idx + 1 :] -= jump_size
+
+    return corrected_values, list(jump_indices)
+
+
 def improved_full_dataset_detrending(
     merged_results: Dict[int, List[Tuple[float, float]]],
+    enable_jump_correction: bool = False,
 ) -> Dict[int, List[Tuple[float, float]]]:
-    """Apply improved detrending to complete dataset."""
+    """
+    Apply improved detrending to complete dataset.
+
+    Args:
+        merged_results: Dictionary mapping ROI ID to list of (time, value) tuples
+        enable_jump_correction: Whether to apply jump correction before detrending
+
+    Returns:
+        Dictionary with detrended values
+    """
     detrended_results = {}
 
     for roi, data in merged_results.items():
@@ -746,7 +813,13 @@ def improved_full_dataset_detrending(
             times = np.array([t for t, _ in sorted_data])
             values = np.array([val for _, val in sorted_data])
 
-            # Remove polynomial trend (handles curved drift)
+            # Step 1: Jump correction (if enabled)
+            if enable_jump_correction:
+                values, jump_indices = detect_and_remove_jumps(times, values)
+                if len(jump_indices) > 0:
+                    print(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
+
+            # Step 2: Remove polynomial trend (handles curved drift)
             if len(values) >= 10:
                 poly_coeffs = np.polyfit(times, values, 2)
                 poly_trend = np.polyval(poly_coeffs, times)
@@ -754,7 +827,7 @@ def improved_full_dataset_detrending(
             else:
                 values_detrended = values
 
-            # Remove any remaining linear drift
+            # Step 3: Remove any remaining linear drift
             if len(values_detrended) >= 10:
                 slope, intercept = np.polyfit(times, values_detrended, 1)
                 total_drift = abs(slope * (times[-1] - times[0]))
@@ -823,7 +896,6 @@ def compute_threshold_baseline_hysteresis(
         )
 
     # Calculate statistics
-    times = np.array([t for t, _ in baseline_data])
     values = np.array([val for _, val in baseline_data])
 
     mean_val = np.mean(values)
@@ -1101,7 +1173,71 @@ def bin_activity_data_for_lighting(
 
 
 # =============================================================================
-# MAIN BASELINE ANALYSIS FUNCTION
+# MULTIPROCESSING WORKER FUNCTION
+# =============================================================================
+
+
+def _process_single_roi_movement(
+    args: Tuple[int, List[Tuple[float, float]], float, float, float, float, float],
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Worker function for parallel ROI movement detection with pre-calculated baseline.
+
+    Args:
+        args: Tuple of (roi_id, data, baseline_mean, upper_threshold,
+                       lower_threshold, bin_size_seconds, frame_interval)
+
+    Returns:
+        Tuple of (roi_id, results_dict)
+    """
+    (
+        roi_id,
+        data,
+        baseline_mean,
+        upper_threshold,
+        lower_threshold,
+        bin_size_seconds,
+        frame_interval,
+    ) = args
+
+    results = {}
+
+    if not data:
+        results["movement_data"] = []
+        results["fraction_data"] = []
+        return roi_id, results
+
+    try:
+        # Step 1: Hysteresis movement detection using pre-calculated baselines
+        baseline_means_single = {roi_id: baseline_mean}
+        upper_thresholds_single = {roi_id: upper_threshold}
+        lower_thresholds_single = {roi_id: lower_threshold}
+        data_single = {roi_id: data}
+
+        movement_data_dict = define_movement_with_hysteresis(
+            data_single,
+            baseline_means_single,
+            upper_thresholds_single,
+            lower_thresholds_single,
+        )
+        results["movement_data"] = movement_data_dict.get(roi_id, [])
+
+        # Step 2: Bin fraction movement
+        fraction_data_dict = bin_fraction_movement(
+            movement_data_dict, bin_size_seconds, frame_interval
+        )
+        results["fraction_data"] = fraction_data_dict.get(roi_id, [])
+
+    except Exception as e:
+        results["error"] = str(e)
+        results["movement_data"] = []
+        results["fraction_data"] = []
+
+    return roi_id, results
+
+
+# =============================================================================
+# MAIN BASELINE ANALYSIS FUNCTION (with integrated multiprocessing)
 # =============================================================================
 
 
@@ -1110,51 +1246,72 @@ def run_baseline_analysis(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
+    enable_jump_correction: bool = False,
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
+    num_processes: int = 1,
     **kwargs,
 ) -> Dict[str, Any]:
     """
     Run complete baseline analysis pipeline with MATLAB-compatible processing.
 
-    Now uses true MATLAB-style processing (no minimum subtraction) while
-    maintaining our advanced hysteresis-based movement detection.
+    Automatically chooses between sequential and parallel processing based on
+    num_processes parameter and number of ROIs.
+
+    Args:
+        merged_results: Dictionary mapping ROI IDs to time-series data
+        enable_matlab_norm: Apply MATLAB-style normalization
+        enable_detrending: Apply detrending to remove drift
+        use_improved_detrending: Use improved detrending algorithm
+        enable_jump_correction: Detect and correct sudden jumps before detrending
+        baseline_duration_minutes: Duration for baseline calculation
+        multiplier: Threshold multiplier
+        frame_interval: Time between frames (seconds)
+        num_processes: Number of parallel processes (1 = sequential)
+        **kwargs: Additional parameters
+
+    Returns:
+        Complete analysis results dictionary
     """
+    from multiprocessing import Pool, cpu_count
+
+    # Determine if we should use parallel processing
+    num_rois = len(merged_results)
+    if num_processes is None or num_processes < 1:
+        num_processes = max(1, cpu_count() - 1)
+    num_processes = min(num_processes, num_rois)  # Don't use more than ROIs
+    use_parallel = num_processes > 1 and num_rois >= 2
 
     analysis_results = {
         "method": "baseline",
         "parameters": {
             "enable_matlab_norm": enable_matlab_norm,
             "enable_detrending": enable_detrending,
+            "enable_jump_correction": enable_jump_correction,
             "baseline_duration_minutes": baseline_duration_minutes,
             "multiplier": multiplier,
             "frame_interval": frame_interval,
-            "matlab_compatible": True,  # Flag indicating MATLAB compatibility
+            "matlab_compatible": True,
+            "num_processes": num_processes,
+            "parallel": use_parallel,
         },
     }
 
-    # Step 1: Preprocessing (now MATLAB-compatible)
+    # Step 1: Preprocessing (sequential - shared across all ROIs)
     if enable_matlab_norm:
-        # True MATLAB processing: no minimum subtraction
         normalized_data = apply_matlab_normalization_to_merged_results(merged_results)
     else:
         normalized_data = merged_results
 
-    if enable_detrending and use_improved_detrending:
-        processed_data = improved_full_dataset_detrending(normalized_data)
-    else:
-        processed_data = normalized_data
-
-    analysis_results["processed_data"] = processed_data
-
-    # Step 2: Baseline threshold calculation (unchanged - works with MATLAB data)
+    # Step 1a: Calculate baseline thresholds from normalized data (BEFORE detrending)
+    # This ensures baseline reflects the original signal, not the detrended signal
     baseline_means = {}
     upper_thresholds = {}
     lower_thresholds = {}
     roi_statistics = {}
 
-    for roi, data in processed_data.items():
+    for roi, data in normalized_data.items():
         if not data:
             baseline_means[roi] = 0.0
             upper_thresholds[roi] = 0.0
@@ -1173,28 +1330,70 @@ def run_baseline_analysis(
         lower_thresholds[roi] = lower_thresh
         roi_statistics[roi] = stats
 
+    # Step 1b: Apply detrending and jump correction (if enabled)
+    if enable_detrending and use_improved_detrending:
+        processed_data = improved_full_dataset_detrending(
+            normalized_data, enable_jump_correction=enable_jump_correction
+        )
+    else:
+        processed_data = normalized_data
+
+    analysis_results["processed_data"] = processed_data
+
+    # Step 2: ROI-level processing (parallel or sequential)
+    # Movement detection uses processed_data but pre-calculated baselines
+    bin_size_seconds = kwargs.get("bin_size_seconds", 60)
+
+    if use_parallel:
+        # Parallel processing using multiprocessing.Pool
+        roi_args = [
+            (
+                roi_id,
+                processed_data[roi_id],
+                baseline_means[roi_id],
+                upper_thresholds[roi_id],
+                lower_thresholds[roi_id],
+                bin_size_seconds,
+                frame_interval,
+            )
+            for roi_id in processed_data.keys()
+        ]
+
+        with Pool(processes=num_processes) as pool:
+            roi_results = pool.map(_process_single_roi_movement, roi_args)
+
+        # Aggregate results from parallel workers
+        movement_data = {}
+        fraction_data = {}
+
+        for roi_id, results in roi_results:
+            movement_data[roi_id] = results["movement_data"]
+            fraction_data[roi_id] = results["fraction_data"]
+
+    else:
+        # Sequential processing
+        # Movement detection using processed_data with pre-calculated baselines
+        movement_data = define_movement_with_hysteresis(
+            processed_data, baseline_means, upper_thresholds, lower_thresholds
+        )
+
+        # Fraction movement
+        fraction_data = bin_fraction_movement(
+            movement_data, bin_size_seconds, frame_interval
+        )
+
     analysis_results.update(
         {
             "baseline_means": baseline_means,
             "upper_thresholds": upper_thresholds,
             "lower_thresholds": lower_thresholds,
             "roi_statistics": roi_statistics,
+            "movement_data": movement_data,
+            "fraction_data": fraction_data,
         }
     )
 
-    # Step 3: Hysteresis movement detection (unchanged - our advanced algorithm)
-    movement_data = define_movement_with_hysteresis(
-        processed_data, baseline_means, upper_thresholds, lower_thresholds
-    )
-    analysis_results["movement_data"] = movement_data
-
-    # Step 4: Behavioral analysis (unchanged - our advanced features)
-    bin_size_seconds = kwargs.get("bin_size_seconds", 60)
-    fraction_data = bin_fraction_movement(
-        movement_data, bin_size_seconds, frame_interval
-    )
-    analysis_results["fraction_data"] = fraction_data
-
+    # Step 3: Post-processing (sequential - needs all ROI data)
     quiescence_threshold = kwargs.get("quiescence_threshold", 0.5)
     quiescence_data = bin_quiescence(fraction_data, quiescence_threshold)
     analysis_results["quiescence_data"] = quiescence_data
@@ -1210,7 +1409,7 @@ def run_baseline_analysis(
         from ._reader import get_roi_colors
 
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
-    except:
+    except Exception:
         roi_colors = {
             roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
         }
@@ -1315,7 +1514,7 @@ def run_baseline_analysis_pure(
         from ._reader import get_roi_colors
 
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
-    except:
+    except Exception:
         roi_colors = {
             roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
         }
@@ -1332,6 +1531,16 @@ def run_baseline_analysis_pure(
 
 def get_performance_metrics(start_time: float, total_frames: int) -> Dict[str, Any]:
     """Calculate performance metrics."""
+    # Handle case where start_time might be None
+    if start_time is None:
+        return {
+            "elapsed_time": 0.0,
+            "fps": 0.0,
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
+            "total_frames": total_frames,
+        }
+
     try:
         import psutil
 
@@ -1417,8 +1626,15 @@ def integrate_baseline_analysis_with_widget(widget) -> bool:
         return False
 
 
+# =============================================================================
+# PARALLEL PROCESSING WRAPPER
+# =============================================================================
+
+
 # Legacy aliases for backward compatibility
 run_complete_hdf5_compatible_analysis = run_baseline_analysis
-test_baseline_analysis_direct = lambda merged_results: bool(
-    run_baseline_analysis(merged_results)
-)
+
+
+def test_baseline_analysis_direct(merged_results):
+    """Test function for baseline analysis."""
+    return bool(run_baseline_analysis(merged_results))
