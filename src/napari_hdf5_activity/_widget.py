@@ -1460,6 +1460,66 @@ class HDF5AnalysisWidget(QWidget):
         )
         layout.addWidget(self.btn_viewer_load)
 
+        # Export video/GIF section
+        export_group = QGroupBox("Export Video/GIF")
+        export_layout = QVBoxLayout()
+        export_group.setLayout(export_layout)
+
+        # Time range selection
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("Time Range:"))
+
+        self.export_start_frame = QSpinBox()
+        self.export_start_frame.setPrefix("Start Frame: ")
+        self.export_start_frame.setMinimum(0)
+        self.export_start_frame.setMaximum(0)
+        self.export_start_frame.setValue(0)
+        self.export_start_frame.setEnabled(False)
+        range_layout.addWidget(self.export_start_frame)
+
+        self.export_end_frame = QSpinBox()
+        self.export_end_frame.setPrefix("End Frame: ")
+        self.export_end_frame.setMinimum(0)
+        self.export_end_frame.setMaximum(0)
+        self.export_end_frame.setValue(0)
+        self.export_end_frame.setEnabled(False)
+        range_layout.addWidget(self.export_end_frame)
+
+        range_layout.addStretch()
+        export_layout.addLayout(range_layout)
+
+        # Export buttons
+        export_buttons_layout = QHBoxLayout()
+
+        self.btn_export_video = QPushButton("Export as Video (MP4)")
+        self.btn_export_video.setToolTip("Export selected frame range as MP4 video")
+        self.btn_export_video.clicked.connect(self._export_video)
+        self.btn_export_video.setEnabled(False)
+        export_buttons_layout.addWidget(self.btn_export_video)
+
+        self.btn_export_gif = QPushButton("Export as GIF")
+        self.btn_export_gif.setToolTip("Export selected frame range as animated GIF")
+        self.btn_export_gif.clicked.connect(self._export_gif)
+        self.btn_export_gif.setEnabled(False)
+        export_buttons_layout.addWidget(self.btn_export_gif)
+
+        export_layout.addLayout(export_buttons_layout)
+
+        # Export FPS control
+        export_fps_layout = QHBoxLayout()
+        export_fps_layout.addWidget(QLabel("Export FPS:"))
+
+        self.export_fps_spin = QSpinBox()
+        self.export_fps_spin.setRange(1, 60)
+        self.export_fps_spin.setValue(10)
+        self.export_fps_spin.setToolTip("Frames per second for exported video/GIF")
+        export_fps_layout.addWidget(self.export_fps_spin)
+        export_fps_layout.addStretch()
+
+        export_layout.addLayout(export_fps_layout)
+
+        layout.addWidget(export_group)
+
         # Info display
         self.viewer_info_text = QTextEdit()
         self.viewer_info_text.setReadOnly(True)
@@ -8081,6 +8141,20 @@ class HDF5AnalysisWidget(QWidget):
         self.btn_viewer_next.setEnabled(True)
         self.btn_viewer_last.setEnabled(True)
 
+        # Enable export controls
+        self.export_start_frame.setEnabled(True)
+        self.export_start_frame.setMaximum(self.viewer_n_frames - 1)
+        self.export_start_frame.setValue(0)
+
+        self.export_end_frame.setEnabled(True)
+        self.export_end_frame.setMaximum(self.viewer_n_frames - 1)
+        self.export_end_frame.setValue(
+            min(99, self.viewer_n_frames - 1)
+        )  # Default to first 100 frames
+
+        self.btn_export_video.setEnabled(True)
+        self.btn_export_gif.setEnabled(True)
+
         self.viewer_status_label.setText(
             f"✓ Loaded HDF5: {self.viewer_n_frames} frames (Interval: {self.viewer_frame_interval}s)"
         )
@@ -8127,6 +8201,20 @@ class HDF5AnalysisWidget(QWidget):
                 self.btn_viewer_play.setEnabled(True)
                 self.btn_viewer_next.setEnabled(True)
                 self.btn_viewer_last.setEnabled(True)
+
+                # Enable export controls
+                self.export_start_frame.setEnabled(True)
+                self.export_start_frame.setMaximum(self.viewer_n_frames - 1)
+                self.export_start_frame.setValue(0)
+
+                self.export_end_frame.setEnabled(True)
+                self.export_end_frame.setMaximum(self.viewer_n_frames - 1)
+                self.export_end_frame.setValue(
+                    min(99, self.viewer_n_frames - 1)
+                )  # Default to first 100 frames
+
+                self.btn_export_video.setEnabled(True)
+                self.btn_export_gif.setEnabled(True)
 
                 self.viewer_status_label.setText(
                     f"✓ Loaded AVI: {self.viewer_n_frames} frames (Interval: {self.viewer_frame_interval}s)"
@@ -8205,10 +8293,10 @@ class HDF5AnalysisWidget(QWidget):
             height, width = frame_with_text.shape[:2]
             text_position = (10, height - 10)
 
-            # Draw text in red (BGR: 0, 0, 255)
+            # Draw text in white (BGR: 255, 255, 255), 50% larger
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.8
-            color = (0, 0, 255)  # Red in BGR
+            font_scale = 1.2  # Increased from 0.8 (50% larger)
+            color = (255, 255, 255)  # White in BGR
             thickness = 2
 
             cv2.putText(
@@ -8305,6 +8393,300 @@ class HDF5AnalysisWidget(QWidget):
         if self.viewer_is_playing:
             interval = int(1000 / self.viewer_fps_spin.value())
             self.viewer_timer.setInterval(interval)
+
+    def _export_video(self):
+        """Export selected frame range as MP4 video."""
+        try:
+            import cv2
+            import numpy as np
+            from qtpy.QtWidgets import QFileDialog
+
+            # Get frame range
+            start_frame = self.export_start_frame.value()
+            end_frame = self.export_end_frame.value()
+
+            if start_frame >= end_frame:
+                self._log_message("❌ Start frame must be less than end frame")
+                return
+
+            # Get export FPS
+            export_fps = self.export_fps_spin.value()
+
+            # Ask user for save location
+            default_name = f"export_frames_{start_frame}-{end_frame}.mp4"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Video",
+                default_name,
+                "MP4 Video (*.mp4);;All Files (*)",
+            )
+
+            if not file_path:
+                return  # User cancelled
+
+            self._log_message(
+                f"🎬 Exporting frames {start_frame}-{end_frame} as video ({export_fps} FPS)..."
+            )
+
+            # Get first frame to determine dimensions
+            if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                if hasattr(self, "viewer_frame_names"):
+                    frame_name = self.viewer_frame_names[start_frame]
+                    first_frame = self.viewer_file_handle[
+                        f"{self.viewer_dataset_name}/{frame_name}"
+                    ][()]
+                else:
+                    first_frame = self.viewer_file_handle[self.viewer_dataset_name][
+                        start_frame
+                    ]
+            else:
+                first_frame = self.viewer_frames[start_frame]
+
+            # Prepare frame with text overlay
+            first_frame = np.array(first_frame, copy=True)
+            if first_frame.dtype != np.uint8:
+                frame_min = first_frame.min()
+                frame_max = first_frame.max()
+                if frame_max > frame_min:
+                    first_frame = (
+                        (first_frame - frame_min) / (frame_max - frame_min) * 255
+                    ).astype(np.uint8)
+                else:
+                    first_frame = np.zeros_like(first_frame, dtype=np.uint8)
+
+            if first_frame.ndim == 3 and first_frame.shape[2] == 1:
+                first_frame = first_frame[:, :, 0]
+
+            if len(first_frame.shape) == 2:
+                first_frame = cv2.cvtColor(first_frame, cv2.COLOR_GRAY2BGR)
+
+            height, width = first_frame.shape[:2]
+
+            # Initialize video writer
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(file_path, fourcc, export_fps, (width, height))
+
+            if not out.isOpened():
+                self._log_message(f"❌ Failed to create video file: {file_path}")
+                return
+
+            # Process each frame
+            n_frames = end_frame - start_frame + 1
+            for idx, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+                # Get frame data
+                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                    if hasattr(self, "viewer_frame_names"):
+                        frame_name = self.viewer_frame_names[frame_idx]
+                        frame_data = self.viewer_file_handle[
+                            f"{self.viewer_dataset_name}/{frame_name}"
+                        ][()]
+                    else:
+                        frame_data = self.viewer_file_handle[self.viewer_dataset_name][
+                            frame_idx
+                        ]
+                else:
+                    frame_data = self.viewer_frames[frame_idx]
+
+                # Prepare frame
+                frame = np.array(frame_data, copy=True)
+                if frame.dtype != np.uint8:
+                    frame_min = frame.min()
+                    frame_max = frame.max()
+                    if frame_max > frame_min:
+                        frame = (
+                            (frame - frame_min) / (frame_max - frame_min) * 255
+                        ).astype(np.uint8)
+                    else:
+                        frame = np.zeros_like(frame, dtype=np.uint8)
+
+                if frame.ndim == 3 and frame.shape[2] == 1:
+                    frame = frame[:, :, 0]
+
+                if len(frame.shape) == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+                # Add time text
+                frame_time_seconds = frame_idx * self.viewer_frame_interval
+                frame_time_minutes = frame_time_seconds / 60.0
+                time_text = (
+                    f"t = {frame_time_seconds:.1f}s ({frame_time_minutes:.2f}min)"
+                )
+
+                text_position = (10, height - 10)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1.2
+                color = (255, 255, 255)  # White
+                thickness = 2
+
+                cv2.putText(
+                    frame,
+                    time_text,
+                    text_position,
+                    font,
+                    font_scale,
+                    color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+
+                # Write frame
+                out.write(frame)
+
+                # Progress update
+                if (idx + 1) % 10 == 0 or idx == n_frames - 1:
+                    progress = ((idx + 1) / n_frames) * 100
+                    self._log_message(
+                        f"   Progress: {idx + 1}/{n_frames} frames ({progress:.1f}%)"
+                    )
+
+            # Finalize
+            out.release()
+            self._log_message(f"✅ Video exported successfully: {file_path}")
+            self._log_message(
+                f"   {n_frames} frames at {export_fps} FPS ({n_frames/export_fps:.1f}s duration)"
+            )
+
+        except Exception as e:
+            self._log_message(f"❌ Video export failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _export_gif(self):
+        """Export selected frame range as animated GIF."""
+        try:
+            import cv2
+            import numpy as np
+            from qtpy.QtWidgets import QFileDialog
+            from PIL import Image
+
+            # Get frame range
+            start_frame = self.export_start_frame.value()
+            end_frame = self.export_end_frame.value()
+
+            if start_frame >= end_frame:
+                self._log_message("❌ Start frame must be less than end frame")
+                return
+
+            # Get export FPS
+            export_fps = self.export_fps_spin.value()
+            frame_duration = int(1000 / export_fps)  # Duration in milliseconds
+
+            # Ask user for save location
+            default_name = f"export_frames_{start_frame}-{end_frame}.gif"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export GIF",
+                default_name,
+                "GIF Animation (*.gif);;All Files (*)",
+            )
+
+            if not file_path:
+                return  # User cancelled
+
+            self._log_message(
+                f"🎞️ Exporting frames {start_frame}-{end_frame} as GIF ({export_fps} FPS)..."
+            )
+
+            frames_for_gif = []
+            n_frames = end_frame - start_frame + 1
+
+            # Process each frame
+            for idx, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+                # Get frame data
+                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                    if hasattr(self, "viewer_frame_names"):
+                        frame_name = self.viewer_frame_names[frame_idx]
+                        frame_data = self.viewer_file_handle[
+                            f"{self.viewer_dataset_name}/{frame_name}"
+                        ][()]
+                    else:
+                        frame_data = self.viewer_file_handle[self.viewer_dataset_name][
+                            frame_idx
+                        ]
+                else:
+                    frame_data = self.viewer_frames[frame_idx]
+
+                # Prepare frame
+                frame = np.array(frame_data, copy=True)
+                if frame.dtype != np.uint8:
+                    frame_min = frame.min()
+                    frame_max = frame.max()
+                    if frame_max > frame_min:
+                        frame = (
+                            (frame - frame_min) / (frame_max - frame_min) * 255
+                        ).astype(np.uint8)
+                    else:
+                        frame = np.zeros_like(frame, dtype=np.uint8)
+
+                if frame.ndim == 3 and frame.shape[2] == 1:
+                    frame = frame[:, :, 0]
+
+                if len(frame.shape) == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+                # Add time text
+                frame_time_seconds = frame_idx * self.viewer_frame_interval
+                frame_time_minutes = frame_time_seconds / 60.0
+                time_text = (
+                    f"t = {frame_time_seconds:.1f}s ({frame_time_minutes:.2f}min)"
+                )
+
+                height, width = frame.shape[:2]
+                text_position = (10, height - 10)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1.2
+                color = (255, 255, 255)  # White
+                thickness = 2
+
+                cv2.putText(
+                    frame,
+                    time_text,
+                    text_position,
+                    font,
+                    font_scale,
+                    color,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+
+                # Convert BGR to RGB for PIL
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(frame_rgb)
+                frames_for_gif.append(pil_image)
+
+                # Progress update
+                if (idx + 1) % 10 == 0 or idx == n_frames - 1:
+                    progress = ((idx + 1) / n_frames) * 100
+                    self._log_message(
+                        f"   Progress: {idx + 1}/{n_frames} frames ({progress:.1f}%)"
+                    )
+
+            # Save as GIF
+            self._log_message(f"   Saving GIF file...")
+            frames_for_gif[0].save(
+                file_path,
+                save_all=True,
+                append_images=frames_for_gif[1:],
+                duration=frame_duration,
+                loop=0,
+                optimize=False,
+            )
+
+            self._log_message(f"✅ GIF exported successfully: {file_path}")
+            self._log_message(
+                f"   {n_frames} frames at {export_fps} FPS ({n_frames/export_fps:.1f}s duration)"
+            )
+
+        except ImportError:
+            self._log_message(
+                "❌ PIL (Pillow) is required for GIF export. Install with: pip install Pillow"
+            )
+        except Exception as e:
+            self._log_message(f"❌ GIF export failed: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     # ===================================================================
     # UTILITY METHODS
