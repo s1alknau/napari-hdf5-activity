@@ -4017,6 +4017,30 @@ class HDF5AnalysisWidget(QWidget):
                     lower = self.roi_lower_thresholds[roi]
                     self.roi_band_widths[roi] = (upper - lower) / 2
 
+            # Update plot time range based on actual data duration
+            if self.merged_results:
+                # Find the maximum time across all ROIs
+                max_time_seconds = 0.0
+                for roi_data in self.merged_results.values():
+                    if roi_data:
+                        # Each entry is (time, value)
+                        times = [t for t, _ in roi_data]
+                        if times:
+                            max_time_seconds = max(max_time_seconds, max(times))
+
+                # Convert to minutes
+                max_time_minutes = max_time_seconds / 60.0
+
+                # Update plot time range controls
+                if hasattr(self, "plot_end_time") and max_time_minutes > 0:
+                    self.plot_end_time.setRange(0.0, max_time_minutes)
+                    self.plot_end_time.setValue(max_time_minutes)
+                    self.plot_start_time.setRange(0.0, max_time_minutes)
+                    self.plot_start_time.setValue(0.0)
+                    self._log_message(
+                        f"📊 Plot time range updated: 0.0 - {max_time_minutes:.1f} minutes ({max_time_minutes/60:.2f} hours)"
+                    )
+
             # Calculate performance metrics using _calc.py
             total_frames = (
                 sum(len(data) for data in self.merged_results.values())
