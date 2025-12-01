@@ -3913,6 +3913,9 @@ class HDF5AnalysisWidget(QWidget):
     def _analysis_finished(self, result: Dict[str, Any]):
         """Handle successful analysis completion using results from _calc.py."""
         try:
+            # Capture start time immediately before it can be cleared by _analysis_done()
+            start_time = self.analysis_start_time
+
             # Store results from _calc.py - USE CORRECT KEY
             self.merged_results = result.get(
                 "processed_data", {}
@@ -3960,9 +3963,7 @@ class HDF5AnalysisWidget(QWidget):
                 if self.merged_results
                 else 0
             )
-            performance_metrics = get_performance_metrics(
-                self.analysis_start_time, total_frames
-            )
+            performance_metrics = get_performance_metrics(start_time, total_frames)
 
             # Generate summary using _calc.py
             summary = get_analysis_summary(result)
@@ -8028,9 +8029,13 @@ class HDF5AnalysisWidget(QWidget):
 
                     if isinstance(data_obj, h5py.Dataset):
                         # Stacked frames format: (N, H, W) or (N, H, W, C)
-                        self._log_message(f"Found stacked dataset: {dataset_name} with shape {data_obj.shape}")
+                        self._log_message(
+                            f"Found stacked dataset: {dataset_name} with shape {data_obj.shape}"
+                        )
                         self.viewer_frames = data_obj
-                        self.viewer_n_frames = data_obj.shape[0] if data_obj.ndim >= 3 else 1
+                        self.viewer_n_frames = (
+                            data_obj.shape[0] if data_obj.ndim >= 3 else 1
+                        )
                         self.viewer_file_handle = h5py.File(self.file_path, "r")
                         self.viewer_dataset_name = dataset_name
                         self.viewer_is_sequence = False
@@ -8042,7 +8047,9 @@ class HDF5AnalysisWidget(QWidget):
                             [k for k in data_obj.keys() if k.startswith("frame_")]
                         )
                         if frame_names:
-                            self._log_message(f"Found individual frames in group: {dataset_name} ({len(frame_names)} frames)")
+                            self._log_message(
+                                f"Found individual frames in group: {dataset_name} ({len(frame_names)} frames)"
+                            )
                             self.viewer_frames = None
                             self.viewer_frame_names = frame_names
                             self.viewer_n_frames = len(frame_names)

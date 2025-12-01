@@ -1557,6 +1557,16 @@ def run_baseline_analysis_pure(
 
 def get_performance_metrics(start_time: float, total_frames: int) -> Dict[str, Any]:
     """Calculate performance metrics."""
+    # Handle case where start_time might be None
+    if start_time is None:
+        return {
+            "elapsed_time": 0.0,
+            "fps": 0.0,
+            "cpu_percent": 0.0,
+            "memory_percent": 0.0,
+            "total_frames": total_frames,
+        }
+
     try:
         import psutil
 
