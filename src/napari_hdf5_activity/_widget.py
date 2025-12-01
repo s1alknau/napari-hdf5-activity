@@ -5687,7 +5687,14 @@ class HDF5AnalysisWidget(QWidget):
 
         try:
             if file_path.endswith(".xlsx") or "Excel" in file_type:
-                self.save_results_excel_format()
+                # Ensure .xlsx extension
+                if not file_path.endswith(".xlsx"):
+                    file_path += ".xlsx"
+                self._save_results_excel_to_path(file_path)
+                self.results_label.setText(
+                    f"Results saved to {os.path.basename(file_path)}"
+                )
+                self._log_message(f"Excel results saved: {file_path}")
             else:
                 # Default to CSV
                 if not file_path.endswith(".csv"):
@@ -5696,11 +5703,13 @@ class HDF5AnalysisWidget(QWidget):
                 self.results_label.setText(
                     f"Results saved to {os.path.basename(file_path)}"
                 )
-                self._log_message(f"Results saved: {file_path}")
+                self._log_message(f"CSV results saved: {file_path}")
 
         except Exception as e:
             self.results_label.setText(f"Error saving results: {str(e)}")
             self._log_message(f"ERROR saving results: {str(e)}")
+            import traceback
+            self._log_message(f"Traceback: {traceback.format_exc()}")
 
     def show_threshold_statistics(self):
         """Show detailed hysteresis statistics."""
