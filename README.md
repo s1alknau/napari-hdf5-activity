@@ -31,11 +31,83 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
   - Sleep/wake phase identification based on dominant periods
   - Configurable period range (0-100 hours)
   - Visual periodogram plots for all ROIs
-- **Frame Viewer**: Interactive dataset playback
+- **Frame Viewer**: Interactive dataset playback with export capabilities
   - Frame-by-frame navigation with slider
-  - Playback controls with adjustable FPS
-  - Time overlay (calculated from frame interval)
+  - Playback controls with adjustable FPS (1-60 FPS)
+  - Time overlay in white text (50% larger for better visibility)
+  - **Video/GIF Export**: Export selected frame ranges as MP4 or animated GIF
+    - Configurable frame range (start/end frames)
+    - Adjustable export FPS
+    - Time stamps included in exported videos
   - Support for both HDF5 and AVI datasets
+- **Jump Correction**: Detect and correct sudden signal jumps in time-series data
+  - Rolling standard deviation-based detection
+  - Automatic correction by subtracting jump magnitude
+  - Optional feature (can be enabled/disabled)
+- **Multiprocessing Support**: Parallel ROI processing for faster analysis
+  - Automatic CPU core detection and utilization
+  - 2.3x speedup with 4 cores on typical datasets
+  - Seamless integration (no configuration needed)
+
+## Recent Updates (2025)
+
+### Major Features Added
+- **Jump Correction for Time-Series Preprocessing**: Automatically detect and correct sudden signal jumps caused by equipment vibrations or external disturbances
+  - Uses rolling standard deviation-based detection
+  - Corrects jumps by subtracting magnitude from subsequent values
+  - Optional feature accessible via "Enable Jump Correction" checkbox in Analysis tab
+  - Works with both detrending enabled and disabled
+
+- **Frame Viewer Video/GIF Export**: Export selected frame ranges from your recordings
+  - Export as MP4 video or animated GIF
+  - Configurable frame range (start/end frames)
+  - Adjustable export FPS (1-60 FPS)
+  - Time stamps automatically included in exported videos
+  - Accessible via "Export Video/GIF" section in Frame Viewer tab
+
+- **Improved Frame Viewer Display**: Better visibility for time overlay
+  - Time text now displayed in white (previously blue)
+  - Font size increased by 50% for easier reading
+  - Time format: "Time: X.XX s" in lower-left corner
+
+- **Consolidated Multiprocessing Architecture**: Single unified calculation module
+  - All multiprocessing logic integrated into `_calc.py`
+  - Pre-calculated baselines passed to worker functions
+  - More maintainable codebase without separate parallel module
+
+### Critical Bug Fixes
+
+**IMPORTANT - Baseline Calculation Fix:**
+- **Fixed**: Baseline thresholds are now calculated from normalized data **BEFORE** detrending
+- **Why this matters**: Detrending removes trends across the entire video, which was distorting baseline calculations. The baseline should reflect the actual signal characteristics at the start of the recording, not detrended values.
+- **Impact**: This fix ensures more accurate movement detection thresholds
+- **Applies to**: Both Baseline Method and Calibration Method
+- **Backward compatible**: This is a bugfix that improves accuracy without changing output format
+- **Verification**: Test suite confirms baseline difference < 0.000001 between detrended and non-detrended modes
+
+**Other Bug Fixes:**
+- **Fixed**: Performance metrics calculation error (TypeError: start_time was None)
+  - Root cause: Qt signal race condition where cleanup happened before metrics capture
+  - Solution: Capture start_time at beginning of analysis_finished() method
+
+- **Fixed**: AVI batch processing plot time range auto-update
+  - Plots now automatically adjust to full duration of all AVI files
+  - Previously only showed first 1000 minutes even for longer recordings
+
+- **Fixed**: Save Results Excel export crash
+  - Corrected function call to `_save_results_excel_to_path()`
+  - Fixed AttributeError in parameters sheet from incorrect `getattr()` pattern
+
+- **Fixed**: Documentation for hysteresis thresholds
+  - Clarified that thresholds are symmetric: `mean ± (multiplier × std)`
+  - Updated both parameter table and Movement Calculation section
+
+### Compatibility Notes
+- 100% backward compatible with previous versions
+- Excel export format unchanged (7 sheets, same structure)
+- Metadata export format unchanged
+- All bug fixes apply to both old and new file formats
+- New features (jump correction, video export) are optional and don't affect existing workflows
 
 ### Visualization
 - **Real-time Plots**: Movement traces, activity fractions, sleep patterns
@@ -294,7 +366,7 @@ Frame interval is automatically calculated based on video FPS and target interva
 | Threshold Multiplier | 0.1 | Sensitivity factor for movement detection |
 | Upper Threshold Factor | 1.0 | Hysteresis upper threshold |
 | Lower Threshold Factor | 1.0 | Hysteresis lower threshold |
-| Chunk Size | 50 | Frames per processing chunk |
+| Chunk Size | 20 | Frames per processing chunk |
 | Num Processes | 4 | Number of CPU cores for parallel processing |
 
 ### Threshold Methods
@@ -528,6 +600,33 @@ The Frame Viewer provides interactive exploration of raw video data with tempora
 - **Analysis verification**: Visual confirmation of ROI detection and movement events
 
 ## Changelog
+
+### Version 0.3.2 (2025) - Feature/Multiprocessing Merge
+**Major Features:**
+- **Jump Correction**: Detect and correct sudden signal jumps in time-series data
+  - Rolling standard deviation-based detection
+  - Optional feature via checkbox
+  - Compatible with detrending
+- **Frame Viewer Export**: Video/GIF export with frame range selection
+  - MP4 and animated GIF support
+  - Configurable FPS (1-60)
+  - Time stamps included
+- **Improved Frame Viewer Display**: White text (was blue), 50% larger font
+- **Consolidated Architecture**: Single `_calc.py` module for multiprocessing
+
+**Critical Bug Fixes:**
+- **Baseline Calculation**: Now calculated from normalized data BEFORE detrending (both baseline and calibration methods)
+  - This was causing incorrect thresholds when detrending was enabled
+  - Verified with test suite (difference < 0.000001)
+- **Performance Metrics**: Fixed TypeError when start_time was None (Qt signal race condition)
+- **AVI Batch Plot Range**: Plot time range now auto-updates to full recording duration
+- **Save Results**: Fixed Excel export crash and AttributeError in parameters sheet
+- **Documentation**: Clarified symmetric hysteresis thresholds in multiple sections
+
+**Compatibility:**
+- 100% backward compatible
+- Excel/CSV formats unchanged
+- All changes are improvements or bugfixes
 
 ### Version 0.3.1 (2025)
 - **Multiprocessing support**: True parallel processing for baseline analysis
