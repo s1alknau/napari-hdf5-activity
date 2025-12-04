@@ -468,16 +468,254 @@ Frame interval is automatically calculated based on video FPS and target interva
   └── ...
 ```
 
-### Movement Calculation
+### Complete Processing Pipeline
 
-1. **Pixel Difference**: `diff = abs(frame[t] - frame[t-1])`
-2. **ROI Masking**: Apply circular mask to each ROI
-3. **Normalization**: `movement = sum(diff * mask) / sum(mask)`
-4. **Baseline Calculation**: `mean` and `std` from first N minutes
-5. **Symmetric Hysteresis Thresholds**:
-   - Upper: `mean + (multiplier × std)`
-   - Lower: `mean - (multiplier × std)`
-   - State changes require crossing both thresholds for noise resistance
+This section explains the full analysis pipeline from raw video frames to behavioral classifications.
+
+#### Step 1: ROI-Level Movement Quantification
+
+**Input**: Raw video frames (grayscale, 8-bit or 16-bit)
+
+**Frame-to-Frame Pixel Difference**:
+```
+For each ROI at time t:
+  1. Calculate pixel-wise difference: diff_pixels = abs(frame[t] - frame[t-1])
+  2. Apply circular ROI mask: masked_diff = diff_pixels * circular_mask
+  3. Sum absolute differences: total_change = sum(masked_diff)
+  4. Normalize by ROI area: movement_value = total_change / sum(circular_mask)
+```
+
+**Units**:
+- **Movement Value**: Average pixel intensity change per pixel within ROI
+- **Range**: 0 to 255 (for 8-bit images) or 0 to 65535 (for 16-bit images)
+- **Interpretation**: Higher values = more movement/activity
+- **Example**: Movement value of 15.3 means pixels changed by an average of 15.3 intensity units
+
+**Y-Axis in Movement Plots**: "Movement (pixel intensity change)" - raw pixel difference values
+
+#### Step 2: MATLAB-Compatible Normalization
+
+**Input**: Raw movement values from Step 1
+
+**Processing**:
+```
+For each ROI:
+  normalized_data = raw_movement_values (no minimum subtraction)
+```
+
+**Note**: True MATLAB compatibility means NO minimum subtraction. The data represents direct frame-to-frame pixel changes, matching MATLAB's `framePixelChange` calculation.
+
+**Units After Normalization**: Same as raw movement values (0-255 or 0-65535)
+
+#### Step 3: Baseline Calculation (CRITICAL - Before Detrending!)
+
+**Input**: Normalized movement data
+
+**Baseline Window**: First N minutes of recording (configurable, default: 200 minutes)
+
+**Calculation**:
+```
+For each ROI:
+  baseline_window = normalized_data[0:baseline_duration]
+  baseline_mean = mean(baseline_window)
+  baseline_std = std(baseline_window)
+
+  upper_threshold = baseline_mean + (multiplier × baseline_std)
+  lower_threshold = baseline_mean - (multiplier × baseline_std)
+```
+
+**Why Before Detrending?**: Detrending removes long-term trends across the ENTIRE video, which would distort the baseline thresholds. The baseline should reflect actual signal characteristics during the baseline period, not detrended values.
+
+**Units**: Same as movement values (pixel intensity change)
+
+**Threshold Interpretation**:
+- **Upper Threshold**: Movement above this = organism is ACTIVE
+- **Lower Threshold**: Movement below this = organism is QUIESCENT
+- **Between Thresholds**: Hysteresis zone - state remains unchanged (prevents flickering)
+
+**Example**:
+```
+Baseline Mean = 12.5 (average pixel change during baseline)
+Baseline Std = 3.2
+Multiplier = 0.1
+
+Upper Threshold = 12.5 + (0.1 × 3.2) = 12.82
+Lower Threshold = 12.5 - (0.1 × 3.2) = 12.18
+```
+
+#### Step 4: Optional Preprocessing
+
+**4a. Jump Correction (Optional)**:
+```
+If enabled:
+  For each ROI:
+    1. Calculate rolling std deviation (window = min(20 frames, len/5))
+    2. Find frame-to-frame differences: diff = values[t] - values[t-1]
+    3. Detect jumps: abs(diff) > jump_threshold_factor × median(rolling_std)
+    4. Correct jumps: values[t:] -= jump_magnitude
+```
+
+**When to Use**: When equipment vibrations or external disturbances cause sudden signal shifts
+
+**4b. Detrending (Optional)**:
+```
+If enabled:
+  For each ROI:
+    1. Fit polynomial trend line (degree 1-3) to entire dataset
+    2. Subtract trend: detrended_data = normalized_data - trend_line
+```
+
+**When to Use**: When long-term signal drift occurs (photobleaching, LED intensity changes)
+
+**Important**: Baseline thresholds calculated in Step 3 are NOT recalculated after detrending - they are preserved from the original normalized data.
+
+#### Step 5: Movement State Detection (Hysteresis Algorithm)
+
+**Input**: Processed data + baseline thresholds (from Step 3)
+
+**Hysteresis State Machine**:
+```
+For each time point t:
+  current_value = processed_data[t]
+
+  If current_state == QUIESCENT:
+    if current_value > upper_threshold:
+      current_state = MOVEMENT
+      movement_binary[t] = 1
+    else:
+      movement_binary[t] = 0
+
+  Elif current_state == MOVEMENT:
+    if current_value < lower_threshold:
+      current_state = QUIESCENT
+      movement_binary[t] = 0
+    else:
+      movement_binary[t] = 1
+```
+
+**Output**: Binary movement array (0 = quiescent, 1 = movement)
+
+**Why Hysteresis?**: Prevents rapid state flickering due to noise. State only changes when signal crosses both upper AND lower thresholds.
+
+**Y-Axis in Binary Movement Plots**: 0 (quiescent) or 1 (movement)
+
+#### Step 6: Activity Fraction Calculation
+
+**Input**: Binary movement array
+
+**Time Binning**:
+```
+bin_size = 60 seconds (default, configurable)
+
+For each time bin:
+  movement_frames = count(movement_binary[bin] == 1)
+  total_frames = count(all_frames[bin])
+
+  activity_fraction[bin] = movement_frames / total_frames
+```
+
+**Units**: Fraction (0.0 to 1.0) or Percentage (0% to 100%)
+
+**Y-Axis in Activity Fraction Plots**: "Activity Fraction" (0.0-1.0) or "% Active" (0-100%)
+
+**Example**:
+```
+Bin size = 60 seconds
+Frame interval = 5 seconds
+Frames per bin = 60/5 = 12 frames
+
+If 8 out of 12 frames show movement:
+Activity fraction = 8/12 = 0.667 (66.7%)
+```
+
+#### Step 7: Quiescence Detection
+
+**Input**: Activity fraction data
+
+**Threshold-Based Classification**:
+```
+quiescence_threshold = 0.5 (default, configurable)
+
+For each time bin:
+  if activity_fraction[bin] < quiescence_threshold:
+    quiescence_binary[bin] = 1  # Organism is quiescent
+  else:
+    quiescence_binary[bin] = 0  # Organism is active
+```
+
+**Y-Axis in Quiescence Plots**: Binary (0 = active, 1 = quiescent)
+
+#### Step 8: Sleep Bout Detection
+
+**Input**: Quiescence binary data
+
+**Temporal Consolidation**:
+```
+sleep_threshold_minutes = 8 (default, configurable)
+
+For each quiescence period:
+  if duration >= sleep_threshold_minutes:
+    classify_as_SLEEP
+  else:
+    classify_as_SHORT_QUIESCENCE (not sleep)
+```
+
+**Output**: Sleep bouts with start time, end time, and duration
+
+**Units**:
+- **Start/End Time**: Minutes or hours from recording start
+- **Duration**: Minutes
+
+**Sleep Bout Characteristics**:
+- **Minimum duration**: Defined by sleep_threshold_minutes parameter
+- **Represents**: Sustained periods of inactivity (behavioral sleep)
+- **Excludes**: Brief pauses in activity
+
+#### Summary: Data Flow and Units
+
+```
+Raw Frames (8-bit grayscale)
+  ↓
+Movement Values (0-255 pixel intensity change)
+  ↓
+Normalized Data (0-255, no minimum subtraction)
+  ↓
+Baseline Thresholds (mean ± multiplier×std, in pixel units)
+  ↓
+[Optional: Jump Correction + Detrending]
+  ↓
+Binary Movement (0 or 1)
+  ↓
+Activity Fraction (0.0-1.0, per 60-second bin)
+  ↓
+Quiescence Binary (0 or 1)
+  ↓
+Sleep Bouts (start, end, duration in minutes)
+```
+
+#### Understanding Plot Y-Axes
+
+1. **Movement Trace Plot**:
+   - Y-axis: "Movement (pixel intensity change)"
+   - Units: Average pixel value change per pixel within ROI
+   - Range: 0-255 (8-bit) or 0-65535 (16-bit)
+   - Horizontal lines: Upper/lower thresholds from baseline
+
+2. **Activity Fraction Plot**:
+   - Y-axis: "Activity Fraction" or "% Active"
+   - Units: Fraction (0.0-1.0) or Percentage (0-100%)
+   - Time bins: Default 60 seconds
+
+3. **Sleep Pattern Plot**:
+   - Y-axis: ROI labels
+   - Horizontal bars: Sleep bouts
+   - Bar length: Sleep duration (minutes)
+
+4. **Periodogram (Fisher Analysis)**:
+   - X-axis: "Period (hours)"
+   - Y-axis: "Fischer Z-Score" (dimensionless)
+   - Range: 0 to ~30+ (higher = stronger rhythm)
+   - Horizontal line: Significance threshold (chi-square, df=2)
 
 ### Multiprocessing Performance
 
@@ -561,34 +799,293 @@ If you encounter any problems, please [file an issue](https://github.com/s1alkna
 
 ## Scientific Background
 
-### Fischer Z-Transformation
+### Fischer Z-Transformation for Circadian Rhythm Detection
 
-The plugin implements **Fischer Z-transformation** for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries.
+The plugin implements **Fischer's Z-transformation periodogram** for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries. This method tests for correlations between the time series and sine/cosine waves at different periods.
 
-**What is a Periodogram?**
+#### What is a Periodogram?
 
-A periodogram is a statistical tool that identifies periodic (repeating) patterns in timeseries data. It answers: "Does the organism show rhythmic activity, and if so, at what period (e.g., 24 hours)?"
+A periodogram is a statistical tool that identifies periodic (repeating) patterns in timeseries data. It answers two key questions:
+1. **Does the organism show rhythmic activity?** (statistical significance test)
+2. **If so, at what period?** (e.g., 24 hours for circadian rhythms)
 
-**How it works:**
+#### Mathematical Foundation
 
-1. **Input**: Movement activity data over time (e.g., 3 days of recording)
-2. **Analysis**: Tests multiple period lengths (e.g., 12h, 18h, 24h, 30h, 36h)
-3. **Output**: Z-scores indicating strength of each period
-4. **Significance**: Chi-square test determines if patterns are statistically significant
+**Input Requirements**:
+- Time series data: Activity fraction over time (from Step 6 of processing pipeline)
+- Minimum 10 data points required
+- Longer recordings provide better resolution (recommended: ≥2-3 days for circadian analysis)
 
-**Interpretation:**
+**Algorithm Steps**:
 
-- **High Z-score peak at 24h**: Strong circadian (24-hour) rhythm
-- **Peak at 12h**: Ultradian (twice daily) activity pattern
-- **No significant peaks**: Irregular/random activity
-- **Green ROI title**: Statistically significant rhythm detected
-- **Red marker**: Dominant period (strongest rhythm)
+1. **Period Testing Range**:
+   ```
+   Default: 12-36 hours (captures circadian and ultradian rhythms)
+   Number of test periods: 100 (evenly spaced)
 
-**Use cases:**
-- Detect light/dark cycle entrainment
-- Identify free-running circadian periods
-- Compare rhythmicity between experimental groups
-- Detect ultradian or infradian rhythms
+   Example periods tested:
+   12.0h, 12.24h, 12.48h, ..., 35.76h, 36.0h
+   ```
+
+2. **For Each Test Period P**:
+   ```
+   a. Calculate angular frequency: ω = 2π / P
+   b. Generate cosine wave: cos_wave = cos(ω × t)
+   c. Generate sine wave: sin_wave = sin(ω × t)
+   d. Calculate correlations:
+      - r_cos = correlation(activity_data, cos_wave)
+      - r_sin = correlation(activity_data, sin_wave)
+   e. Calculate coherence squared: C² = r_cos² + r_sin²
+   f. Calculate Fischer Z-score: Z = n × C²
+      (where n = number of data points)
+   ```
+
+3. **Statistical Significance**:
+   ```
+   Z-scores follow chi-square distribution (df=2)
+
+   Significance threshold (α = 0.05):
+   Critical Z = 5.99 (chi-square critical value, 2 df, p<0.05)
+
+   Interpretation:
+   - Z > 5.99: Statistically significant rhythm (p < 0.05)
+   - Z < 5.99: No significant rhythm detected
+   ```
+
+4. **Dominant Period Identification**:
+   ```
+   Dominant period = period with maximum Z-score
+   p-value = 1 - χ²_cdf(max_Z, df=2)
+   ```
+
+#### Periodogram Plot Interpretation
+
+**X-Axis: Period (hours)**
+- Range: Minimum period (e.g., 12h) to Maximum period (e.g., 36h)
+- Resolution: 100 test points
+- Covers circadian (24h) and ultradian (<24h) rhythms
+
+**Y-Axis: Fischer Z-Score (dimensionless)**
+- Range: Typically 0 to 30+
+- **Z > 5.99**: Statistically significant (p < 0.05)
+- **Z > 9.21**: Highly significant (p < 0.01)
+- **Z > 13.82**: Very highly significant (p < 0.001)
+- Higher Z-scores indicate stronger, more consistent rhythms
+
+**Visual Elements**:
+1. **Horizontal line**: Critical threshold (Z = 5.99 for α=0.05)
+2. **Red marker**: Dominant period (peak Z-score)
+3. **Green title**: ROI has significant rhythm (p < 0.05)
+4. **Black title**: No significant rhythm detected
+
+#### Example Interpretations
+
+**Case 1: Strong Circadian Rhythm**
+```
+Periodogram shows:
+- Sharp peak at 24.0 hours
+- Z-score = 18.5 (well above 5.99)
+- p-value = 0.0001
+
+Interpretation:
+Organism exhibits robust 24-hour circadian rhythm, likely entrained to
+light/dark cycles. High Z-score indicates consistent phase relationship
+across entire recording.
+
+Biological meaning:
+- Strong clock-driven behavior
+- Reliable entrainment to environmental cycles
+- Good candidate for circadian rhythm studies
+```
+
+**Case 2: Ultradian Rhythm**
+```
+Periodogram shows:
+- Peak at 12.0 hours
+- Z-score = 10.2
+- Secondary peak at 24.0 hours (Z = 7.1)
+
+Interpretation:
+Organism shows twice-daily (ultradian) activity pattern. Could indicate:
+- Bimodal activity (e.g., dawn/dusk activity)
+- Harmonic of 24h rhythm
+- Response to twice-daily feeding schedule
+
+Next steps:
+- Check lighting conditions (are there two light phases?)
+- Examine activity fraction plot for two daily peaks
+- Compare with control group in constant conditions
+```
+
+**Case 3: Free-Running Period**
+```
+Periodogram shows:
+- Peak at 25.2 hours (not 24.0h)
+- Z-score = 12.4
+- No light/dark data available (constant darkness)
+
+Interpretation:
+Organism's endogenous circadian period is ~25.2 hours (longer than 24h).
+This is a "free-running" rhythm in the absence of external time cues.
+
+Biological meaning:
+- Demonstrates endogenous clock (not driven by environment)
+- Period slightly longer than Earth's rotation (common in many organisms)
+- Useful for studying internal clock mechanisms
+```
+
+**Case 4: No Significant Rhythm**
+```
+Periodogram shows:
+- Flat profile, no clear peaks
+- Maximum Z-score = 4.2 (below 5.99 threshold)
+- p-value = 0.12
+
+Interpretation:
+No statistically significant periodic pattern detected. Possible reasons:
+1. Organism is arrhythmic (lacks circadian clock)
+2. Recording too short (need more cycles)
+3. Highly variable activity obscures rhythm
+4. Developmental stage lacks rhythmicity
+
+Next steps:
+- Extend recording duration (try 5-7 days)
+- Check for masking effects (light directly suppressing activity)
+- Try stronger entrainment conditions (stronger LD cycles)
+- Examine individual days for day-to-day variability
+```
+
+**Case 5: Multiple Significant Periods**
+```
+Periodogram shows:
+- Peak 1 at 24.0h (Z = 15.3)
+- Peak 2 at 12.0h (Z = 8.7)
+- Peak 3 at 8.0h (Z = 6.2)
+
+Interpretation:
+Multiple rhythmic components detected:
+- 24h: Fundamental circadian rhythm
+- 12h: Second harmonic (ultradian)
+- 8h: Third harmonic or independent rhythm
+
+This is common in complex behaviors with multiple regulatory mechanisms.
+
+Analysis approach:
+- Focus on dominant period (24h) for circadian studies
+- Secondary peaks may reflect meal timing, tidal cycles, or other factors
+- Use filtering to isolate specific frequency components if needed
+```
+
+#### Parameter Selection Guidelines
+
+**Minimum Period (Default: 12 hours)**:
+- Set based on expected rhythm range
+- For circadian only: 20-22 hours
+- For ultradian + circadian: 8-12 hours
+- For infradian: Increase to 24-48 hours
+
+**Maximum Period (Default: 36 hours)**:
+- Should be < recording_duration / 2
+- For 3-day recording: Max ~36h allows 2 full cycles
+- For 7-day recording: Can test up to 84h (3.5 days)
+- Longer periods need longer recordings for reliable detection
+
+**Significance Level (Default: 0.05)**:
+- 0.05: Standard (95% confidence)
+- 0.01: Conservative (99% confidence, fewer false positives)
+- 0.10: Exploratory (90% confidence, more sensitive)
+
+**Recording Duration Recommendations**:
+```
+Target Period    Minimum Recording    Recommended
+12h ultradian    1 day               2-3 days
+24h circadian    2 days              3-5 days
+48h infradian    4 days              7-10 days
+>72h rhythms     1 week              2-3 weeks
+```
+
+#### Common Pitfalls and Solutions
+
+**Problem 1: "No significant rhythm, but I see daily patterns in the plot"**
+- **Cause**: High day-to-day variability
+- **Solution**: Check if rhythm phase shifts across days. Try longer recordings or more stringent entrainment.
+
+**Problem 2: "Multiple similar peaks, can't determine dominant period"**
+- **Cause**: Broad spectral power, noisy rhythm
+- **Solution**: Increase bin size for activity fraction, smooth data, or use bandpass filtering.
+
+**Problem 3: "Peak at wrong period (e.g., 23.1h instead of 24.0h)"**
+- **Cause**: Limited frequency resolution (only 100 test periods)
+- **Solution**: This is normal - report dominant period as detected. Resolution = (max-min)/100.
+
+**Problem 4: "Z-scores very low despite clear activity patterns"**
+- **Cause**: Activity patterns are not sinusoidal (e.g., square wave LD response)
+- **Solution**: Fischer Z tests for sinusoidal rhythms. Try autocorrelation analysis for non-sinusoidal patterns.
+
+#### Technical Notes
+
+**Data Preprocessing for Fisher Analysis**:
+```
+Input: Activity fraction data (Step 6 output)
+- Already binned (default 60-second bins)
+- Values range 0.0-1.0 (fraction of time active)
+- No additional normalization applied
+
+Note: Analysis uses activity fraction, NOT raw movement values
+```
+
+**Sampling Interval Consideration**:
+```
+Fisher analysis inherits sampling from activity fraction:
+- Bin size = 60 seconds → 60 samples per hour
+- For 24h period: ~1440 samples per cycle
+- Nyquist frequency: Can detect periods down to 120 seconds
+
+In practice:
+- Circadian analysis: 60s bins are excellent
+- Ultradian (<12h): 60s bins are adequate
+- Very fast rhythms (<1h): Consider finer binning
+```
+
+**Statistical Power**:
+```
+Longer recordings = higher n = higher Z-scores (for same rhythm strength)
+
+Example:
+Same rhythm amplitude, different recording lengths:
+- 1 day (n=1440): Z = 8.5 (marginally significant)
+- 3 days (n=4320): Z = 25.5 (highly significant)
+- 7 days (n=10080): Z = 59.5 (extremely significant)
+
+Recommendation: Aim for 3-5 days minimum for circadian studies
+```
+
+#### Use Cases in Research
+
+1. **Circadian Clock Studies**:
+   - Quantify rhythm robustness (Z-score strength)
+   - Measure endogenous period (free-running conditions)
+   - Assess entrainment quality (peak at 24h vs. other periods)
+
+2. **Drug/Treatment Effects**:
+   - Compare Z-scores between control and treated groups
+   - Detect period changes (e.g., 24h → 23h after treatment)
+   - Identify arrhythmicity (loss of significant peak)
+
+3. **Developmental Studies**:
+   - Track rhythm emergence during development
+   - Quantify rhythm strength at different life stages
+   - Identify critical periods for rhythm establishment
+
+4. **Environmental Entrainment**:
+   - Verify light/dark cycle entrainment (peak at LD period)
+   - Test non-24h cycles (e.g., 20h or 28h)
+   - Study zeitgeber strength (how strongly environment drives rhythm)
+
+5. **Comparative Chronobiology**:
+   - Compare circadian periods across species
+   - Identify strain/genotype differences in rhythm parameters
+   - Quantify inter-individual variability within populations
 
 ### Frame Viewer
 
