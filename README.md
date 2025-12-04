@@ -505,14 +505,22 @@ For each ROI at time t:
 
 **What the Numbers Mean**:
 - **Movement Value**: Average pixel intensity change per pixel within ROI
-- **Range**: 0 to 255 (for 8-bit images) or 0 to 65535 (for 16-bit images)
-- **Interpretation**:
-  - **0**: No movement detected (organism completely still)
-  - **1-5**: Very subtle movement (small positional shifts)
-  - **5-20**: Moderate movement (typical slow crawling or body contractions)
-  - **20-50**: Strong movement (rapid locomotion or large body changes)
-  - **>50**: Very strong movement (fast swimming or major morphology changes)
-- **Example**: Movement value of 15.3 means pixels changed by an average of 15.3 intensity units between frames
+- **Theoretical Range**: 0 to 255 (for 8-bit images) or 0 to 65535 (for 16-bit images)
+- **Typical Observed Range**: Depends on organism size, contrast, and ROI area
+  - Small organisms (100-500 pixels): Often 50-500
+  - Medium organisms (500-2000 pixels): Often 100-2000
+  - Large organisms (>2000 pixels): Often 500-5000+
+- **Interpretation** (RELATIVE to your baseline thresholds, not absolute):
+  - Values are dataset-specific and depend on:
+    - **Organism contrast**: High contrast organisms produce higher values
+    - **ROI size**: Larger ROIs accumulate more pixel changes
+    - **Movement type**: Fast vs. slow, whole-body vs. partial
+  - **Use baseline thresholds to classify movement**, not absolute numbers
+  - Example from your data: Baseline mean ~130, std ~20, threshold ~132
+    - Below 130: Quiescent
+    - Above 132: Active
+    - Values typically range 100-200 in this example
+- **Example**: Movement value of 150 with baseline mean=130 indicates organism is active (above threshold)
 
 **Physical Meaning**:
 When an organism moves, its body position changes relative to the background. Dark pixels become light (or vice versa) as the organism moves across the frame. The movement value captures the magnitude of these brightness changes as a proxy for physical movement.
