@@ -476,20 +476,46 @@ This section explains the full analysis pipeline from raw video frames to behavi
 
 **Input**: Raw video frames (grayscale, 8-bit or 16-bit)
 
-**Frame-to-Frame Pixel Difference**:
+**Process Description**:
+This step quantifies how much each organism moves by comparing consecutive video frames. The algorithm calculates the absolute difference in pixel brightness between each frame and the previous frame, focusing only on pixels within each detected ROI (Region of Interest - the circular area around each organism).
+
+**Detailed Algorithm**:
 ```
 For each ROI at time t:
   1. Calculate pixel-wise difference: diff_pixels = abs(frame[t] - frame[t-1])
+     → Compare current frame with previous frame, pixel by pixel
+     → Take absolute value to get magnitude of change (positive number)
+     → Example: If pixel was 100, now 115 → difference = 15
+
   2. Apply circular ROI mask: masked_diff = diff_pixels * circular_mask
+     → Isolate only pixels inside the circular ROI boundary
+     → Ignore pixels outside the organism's area
+     → Circular mask = 1 inside ROI, 0 outside ROI
+
   3. Sum absolute differences: total_change = sum(masked_diff)
+     → Add up all pixel changes within the ROI
+     → Gives total amount of change in the organism's area
+     → Example: If ROI has 1000 pixels and each changed by ~15 → total ≈ 15000
+
   4. Normalize by ROI area: movement_value = total_change / sum(circular_mask)
+     → Divide by number of pixels in ROI to get average change per pixel
+     → This makes values comparable between different sized organisms
+     → Example: 15000 / 1000 pixels = 15.0 average change per pixel
 ```
 
-**Units**:
+**What the Numbers Mean**:
 - **Movement Value**: Average pixel intensity change per pixel within ROI
 - **Range**: 0 to 255 (for 8-bit images) or 0 to 65535 (for 16-bit images)
-- **Interpretation**: Higher values = more movement/activity
-- **Example**: Movement value of 15.3 means pixels changed by an average of 15.3 intensity units
+- **Interpretation**:
+  - **0**: No movement detected (organism completely still)
+  - **1-5**: Very subtle movement (small positional shifts)
+  - **5-20**: Moderate movement (typical slow crawling or body contractions)
+  - **20-50**: Strong movement (rapid locomotion or large body changes)
+  - **>50**: Very strong movement (fast swimming or major morphology changes)
+- **Example**: Movement value of 15.3 means pixels changed by an average of 15.3 intensity units between frames
+
+**Physical Meaning**:
+When an organism moves, its body position changes relative to the background. Dark pixels become light (or vice versa) as the organism moves across the frame. The movement value captures the magnitude of these brightness changes as a proxy for physical movement.
 
 **Y-Axis in Movement Plots**: "Movement (pixel intensity change)" - raw pixel difference values
 
