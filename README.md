@@ -83,7 +83,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - **Impact**: This fix ensures more accurate movement detection thresholds
 - **Applies to**: Both Baseline Method and Calibration Method
 - **Backward compatible**: This is a bugfix that improves accuracy without changing output format
-- **Verification**: Test suite confirms baseline difference < 0.000001 between detrended and non-detrended modes
+
 
 **Other Bug Fixes:**
 - **Fixed**: Performance metrics calculation error (TypeError: start_time was None)
