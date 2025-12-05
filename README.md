@@ -1037,6 +1037,48 @@ Number of ROIs    Recommended Processes    Expected Speedup
 
 **Note:** Beyond 8 processes, overhead typically outweighs benefits for most datasets.
 
+#### AVI Batch Processing and Multiprocessing
+
+The AVI batch processing pipeline **also uses multiprocessing** for the baseline analysis step:
+
+**AVI Processing Pipeline:**
+1. **Frame Loading** (sequential): Videos are loaded sequentially to maintain temporal order
+   - Uses streaming analysis to minimize memory usage
+   - Loads, analyzes, and discards frames in chunks
+   - Multiple videos can be loaded in parallel using `ThreadPoolExecutor` (I/O-bound)
+
+2. **Movement Detection** (sequential): Frame-to-frame differences calculated during streaming
+   - Processes one video at a time to preserve temporal continuity
+   - Chunk-based processing (default: 100 frames per chunk)
+
+3. **Baseline Analysis** (parallel multiprocessing): After ROI movement data is collected, the same multiprocessing system is used
+   - Calls `run_baseline_analysis()` from `_calc.py` with `num_processes` parameter
+   - Distributes ROIs across CPU cores (same as HDF5 processing)
+   - Each process independently calculates: hysteresis thresholds, movement classification, binned fraction data
+
+**Key Differences Between HDF5 and AVI Processing:**
+- **HDF5**: Frame loading can be parallelized across ROIs, entire pipeline uses multiprocessing
+- **AVI**: Frame loading is sequential (maintains temporal order), but baseline analysis uses multiprocessing
+
+**Why Sequential Frame Loading for AVI?**
+- AVI videos must be processed in temporal order to construct continuous timeseries
+- Video files are accessed sequentially by nature (seeking is expensive)
+- Streaming approach prevents memory overflow with large video batches
+- Multiprocessing is applied where it matters most: computationally intensive baseline analysis
+
+**Performance Example (6 ROIs, 12 AVI files, ~60 minutes total):**
+```
+Stage                     Time      Parallel Method
+────────────────────────────────────────────────────────
+Frame Loading             ~3-5 min  ThreadPoolExecutor (I/O)
+Movement Detection        ~2-3 min  Sequential (streaming)
+Baseline Analysis         ~8 sec    multiprocessing.Pool (CPU)
+────────────────────────────────────────────────────────
+Total                     ~5-8 min  Hybrid parallel approach
+```
+
+The multiprocessing speedup for baseline analysis is the same as HDF5 processing (2.3x with 4 cores), but represents a smaller fraction of total AVI processing time because video decoding dominates.
+
 ### LED-Based Lighting Detection
 
 - **Light Phase**: White LED power > 0.5%
