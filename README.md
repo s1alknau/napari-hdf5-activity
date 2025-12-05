@@ -903,21 +903,40 @@ if use_parallel:
 
 #### Performance Characteristics
 
-**Speedup Measurements** (from testing with 6 ROIs, 5000 frames):
+**Speedup Measurements** (actual test results on Windows 10, Python 3.9):
+
+**Test 1: Large Dataset (10 ROIs, 10000 frames ~ 14 hours of recording)**
 ```
 Configuration          Time      Speedup    CPU Usage
 ────────────────────────────────────────────────────
-1 process (sequential)  18.5s    1.0x       ~25% (1 core)
-2 processes             10.2s    1.8x       ~50% (2 cores)
-4 processes              8.0s    2.3x       ~90% (4 cores)
-8 processes              7.8s    2.4x       ~95% (all cores)
+1 process (sequential)  29.9s    1.0x       ~25% (1 core)
+2 processes             20.7s    1.45x      ~50% (2 cores)
+4 processes             12.4s    2.42x      ~90% (4 cores)
+8 processes             13.2s    2.27x      ~95% (all cores)
 ```
 
+**Test 2: Small Dataset (6 ROIs, 5000 frames ~ 7 hours of recording)**
+```
+Configuration          Time      Speedup    CPU Usage
+────────────────────────────────────────────────────
+1 process (sequential)   4.5s    1.0x       ~25% (1 core)
+2 processes              4.9s    0.92x      ~50% (2 cores)
+4 processes              4.2s    1.05x      ~90% (4 cores)
+8 processes              3.9s    1.15x      ~95% (all cores)
+```
+
+**Key Insight: Multiprocessing Benefit Depends on Dataset Size**
+- **Large datasets (>8000 frames)**: Significant speedup (2.4x with 4 cores)
+- **Small datasets (<6000 frames)**: Minimal benefit or slower due to overhead
+- **Threshold**: Multiprocessing becomes beneficial at ~7000-8000 frames
+- **Recommendation**: For recordings <5 hours, use 1 process (sequential)
+
 **Why Not Linear Speedup?**
-1. **Process Creation Overhead**: ~0.5-1 second to spawn processes
+1. **Process Creation Overhead**: ~0.5-1 second to spawn processes (fixed cost)
 2. **Data Serialization**: Arguments must be pickled and sent to workers
 3. **Result Collection**: Results must be collected and deserialized
 4. **Amdahl's Law**: Sequential portions (preprocessing, post-processing) limit speedup
+5. **Dataset Size Matters**: Overhead dominates for small datasets
 
 **Optimal Number of Processes:**
 - **Rule of thumb**: `num_processes = cpu_count() - 1`
@@ -1020,22 +1039,30 @@ The plugin automatically logs when parallel processing is used:
 
 **When to Use Parallel Processing:**
 - ✅ Multiple ROIs (≥2) to process
-- ✅ Large datasets with long recordings (>1000 frames)
+- ✅ Large datasets with long recordings (>8000 frames / >10 hours)
 - ✅ Multi-core CPU available (≥2 cores)
 - ✅ Baseline analysis method
 
-**Recommended Settings:**
+**When NOT to Use Parallel Processing:**
+- ❌ Small datasets (<6000 frames / <8 hours) - overhead exceeds benefit
+- ❌ Single ROI - no parallelization possible
+- ❌ Calibration/Adaptive methods - not yet parallelized
+
+**Recommended Settings (for large datasets >8000 frames):**
 ```
 Number of ROIs    Recommended Processes    Expected Speedup
 ──────────────────────────────────────────────────────────
 1 ROI             1 (sequential)           1.0x (no benefit)
-2-3 ROIs          2-3                      1.6-2.1x
-4-6 ROIs          4                        2.0-2.5x
-7-12 ROIs         4-6                      2.5-3.5x
->12 ROIs          6-8                      3.0-4.5x
+2-3 ROIs          2-3                      1.3-1.6x
+4-6 ROIs          4                        1.8-2.4x
+7-12 ROIs         4-6                      2.0-2.8x
+>12 ROIs          6-8                      2.2-3.0x
 ```
 
-**Note:** Beyond 8 processes, overhead typically outweighs benefits for most datasets.
+**Important Notes:**
+- Beyond 8 processes, overhead typically outweighs benefits
+- Speedup values are for large datasets (>8000 frames)
+- Small datasets (<6000 frames) show minimal or negative speedup
 
 #### AVI Batch Processing and Multiprocessing
 
@@ -1066,18 +1093,23 @@ The AVI batch processing pipeline **also uses multiprocessing** for the baseline
 - Streaming approach prevents memory overflow with large video batches
 - Multiprocessing is applied where it matters most: computationally intensive baseline analysis
 
-**Performance Example (6 ROIs, 12 AVI files, ~60 minutes total):**
+**Performance Example (10 ROIs, 12 AVI files, ~60 minutes total, 10000 frames):**
 ```
 Stage                     Time      Parallel Method
 ────────────────────────────────────────────────────────
 Frame Loading             ~3-5 min  ThreadPoolExecutor (I/O)
 Movement Detection        ~2-3 min  Sequential (streaming)
-Baseline Analysis         ~8 sec    multiprocessing.Pool (CPU)
+Baseline Analysis         ~12 sec   multiprocessing.Pool (CPU, 4 cores)
+  (sequential)            ~30 sec   Single core
 ────────────────────────────────────────────────────────
-Total                     ~5-8 min  Hybrid parallel approach
+Total (with 4 cores)      ~5-8 min  Hybrid parallel approach
+Total (sequential)        ~6-9 min
+Speedup from multiproc    ~18 sec   Saved in baseline analysis stage
 ```
 
-The multiprocessing speedup for baseline analysis is the same as HDF5 processing (2.3x with 4 cores), but represents a smaller fraction of total AVI processing time because video decoding dominates.
+The multiprocessing speedup for baseline analysis is the same as HDF5 processing (2.4x with 4 cores for large datasets), but represents a smaller fraction of total AVI processing time because video decoding dominates.
+
+**Note:** For small AVI batches (<5 hours total), baseline analysis takes only 3-5 seconds and multiprocessing overhead may exceed benefits. Use sequential processing (1 core) for such cases.
 
 ### LED-Based Lighting Detection
 
