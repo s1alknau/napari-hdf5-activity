@@ -85,3 +85,6 @@ venv/
 
 # written by setuptools_scm
 **/_version.py
+
+# Publication documents (internal use only)
+PUBLICATION_SUMMARY.md
