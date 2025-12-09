@@ -772,49 +772,128 @@ The plugin implements **true multiprocessing** (not multithreading) using Python
 
 #### Technical Implementation
 
-**Architecture Overview:**
+**Complete Processing Pipeline:**
+
 ```
-Main Process (GUI Thread)
-    ↓
-  Preprocessing (Sequential)
-    - Load video frames
-    - Calculate pixel differences per ROI
-    - Apply normalization
-    - Calculate baseline thresholds (BEFORE detrending)
-    - Apply optional detrending/jump correction
-    ↓
-  ROI-Level Parallelization Decision
-    ↓
-  ┌──────────────────────────────────────┐
-  │ IF num_processes > 1 AND num_rois ≥ 2│
-  └──────────────────────────────────────┘
-           │                    │
-           ├─ YES ─────────────┤
-           │                    │
-    Parallel Path          Sequential Path
-    (multiprocessing)       (single core)
-           ↓                    ↓
-  ┌─────────────────┐    Movement Detection
-  │ Process Pool    │    (all ROIs in main)
-  │ (N workers)     │         ↓
-  └─────────────────┘    Activity Fraction
-           │                    │
-    ┌──────┴──────┬───────┬────┘
-    │             │       │
- Worker 1      Worker 2  Worker N
- (ROI 0)       (ROI 1)   (ROI N-1)
-    │             │       │
-    ├─Movement────┤       │
-    ├─Activity────┤       │
-    └─Results─────┴───────┘
-           │
-    Result Aggregation
-           ↓
-  Post-Processing (Sequential)
-    - Quiescence detection
-    - Sleep bout identification
-    - ROI color assignment
+┌─────────────────────────────────────────────────────────────────┐
+│                    MAIN PROCESS (GUI)                           │
+│                   Single Python Interpreter                     │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 1: PREPROCESSING (Sequential - Cannot be parallelized)  │
+├─────────────────────────────────────────────────────────────────┤
+│  ✓ Load HDF5/AVI frames                                        │
+│  ✓ Calculate pixel differences (frame[t] - frame[t-1])         │
+│  ✓ Normalize data (optional)                                   │
+│  ✓ Calculate baseline thresholds (mean ± std)                  │
+│    → Must use data from ALL ROIs                               │
+│  ✓ Optional: Detrending & Jump Correction                      │
+│                                                                 │
+│  Time: ~2-3 seconds for 10 ROIs, 10000 frames                  │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+         ┌────────────────────────────────────────┐
+         │    PARALLELIZATION DECISION            │
+         │  IF (num_processes > 1) AND (rois ≥ 2) │
+         └────────────────────────────────────────┘
+                      ▼           ▼
+              ┌───────┘           └───────┐
+              │ YES                   NO  │
+              ▼                           ▼
+┌──────────────────────────┐   ┌──────────────────────┐
+│  PARALLEL PATH           │   │  SEQUENTIAL PATH     │
+│  (4 Worker Processes)    │   │  (Main Process)      │
+└──────────────────────────┘   └──────────────────────┘
+              ▼                           ▼
+┌──────────────────────────┐   ┌──────────────────────┐
+│  CREATE PROCESS POOL     │   │  Process Each ROI    │
+│  (~2 seconds overhead)   │   │  in Main Process     │
+├──────────────────────────┤   │                      │
+│  Worker 1  Worker 2      │   │  For each ROI:       │
+│  Worker 3  Worker 4      │   │  • Movement Detection│
+│                          │   │  • Activity Fraction │
+│  Each = New Python       │   │                      │
+│         Interpreter!     │   │  Time: ~26s          │
+└──────────────────────────┘   │  (10 ROIs)           │
+              ▼                 └──────────────────────┘
+┌──────────────────────────┐              │
+│  DISTRIBUTE ROI TASKS    │              │
+├──────────────────────────┤              │
+│  Task Queue:             │              │
+│  [ROI 0][ROI 1][ROI 2]   │              │
+│  [ROI 3][ROI 4][ROI 5]   │              │
+│  [ROI 6][ROI 7][ROI 8]   │              │
+│  [ROI 9]                 │              │
+└──────────────────────────┘              │
+              ▼                            │
+┌──────────────────────────┐              │
+│  PARALLEL EXECUTION      │              │
+├──────────────────────────┤              │
+│                          │              │
+│  Worker 1: ROI 0 → ROI 4 │              │
+│  Worker 2: ROI 1 → ROI 5 │              │
+│  Worker 3: ROI 2 → ROI 6 │              │
+│  Worker 4: ROI 3 → ROI 7 │              │
+│                          │              │
+│  Each Worker:            │              │
+│  1. Movement Detection   │              │
+│     (Hysteresis)         │              │
+│  2. Activity Fraction    │              │
+│     (Binning)            │              │
+│                          │              │
+│  Time: ~7s (parallel)    │              │
+│  vs. ~26s (sequential)   │              │
+└──────────────────────────┘              │
+              ▼                            │
+┌──────────────────────────┐              │
+│  COLLECT RESULTS         │              │
+├──────────────────────────┤              │
+│  From all 4 workers:     │              │
+│  • ROI 0 results         │              │
+│  • ROI 1 results         │              │
+│  • ...                   │              │
+│  • ROI 9 results         │              │
+└──────────────────────────┘              │
+              ▼                            │
+              └────────────┬───────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PHASE 3: POST-PROCESSING (Sequential - Needs all ROI data)    │
+├─────────────────────────────────────────────────────────────────┤
+│  ✓ Quiescence detection (compare activity across ROIs)         │
+│  ✓ Sleep bout identification (temporal consolidation)          │
+│  ✓ ROI color assignment for plots                              │
+│  ✓ Statistical calculations                                    │
+│                                                                 │
+│  Time: ~1 second                                                │
+└─────────────────────────────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    RESULTS READY                                │
+│  • Movement data per ROI                                        │
+│  • Activity fractions                                           │
+│  • Sleep bouts                                                  │
+│  • Statistics                                                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Points:**
+- **Phase 1 (Preprocessing)**: MUST be sequential - needs all data at once
+- **Phase 2 (ROI Processing)**: CAN be parallelized - each ROI is independent
+- **Phase 3 (Post-processing)**: MUST be sequential - needs all results together
+
+**Time Breakdown Example (10 ROIs, 10000 frames):**
+
+| Phase | Sequential (1 core) | Parallel (4 cores) | Saved Time |
+|-------|--------------------|--------------------|------------|
+| **Preprocessing** | 2s | 2s | 0s (cannot parallelize) |
+| **Overhead** | 0s | 2s | -2s (process creation) |
+| **ROI Processing** | 26s | 7s | +19s (4x faster) |
+| **Post-processing** | 1s | 1s | 0s (cannot parallelize) |
+| **TOTAL** | **29s** | **12s** | **+17s saved** |
+
+**Speedup: 2.42x** (not 4x due to overhead and sequential portions)
 
 **Code Implementation** (from `_calc.py:1343-1380`):
 
