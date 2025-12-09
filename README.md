@@ -768,7 +768,7 @@ The plugin implements **true multiprocessing** (not multithreading) using Python
 - Each process has its own Python interpreter and memory space
 - Each process has its own GIL, so they can run truly in parallel
 - Ideal for CPU-bound tasks like ROI movement detection
-- Python 3.9+ fully supports `multiprocessing.Pool` on Windows, macOS, and Linux
+- Fully tested and optimized for Windows 11 with Python 3.9+
 
 #### Technical Implementation
 
@@ -1019,21 +1019,13 @@ The plugin automatically logs when parallel processing is used:
    - Cause: Not an issue! Multiprocessing runs in background
    - GUI should remain responsive even during heavy computation
 
-#### Platform-Specific Notes
+#### Implementation Notes (Windows 11)
 
-**Windows:**
-- Uses `spawn` method (starts fresh Python interpreter)
-- Slightly higher process creation overhead (~1-2 seconds)
-- Requires `if __name__ == '__main__':` guard (handled internally)
-
-**macOS:**
-- Uses `spawn` method (since Python 3.8+)
-- Similar performance to Windows
-
-**Linux:**
-- Uses `fork` method (faster process creation, ~0.2-0.5 seconds)
-- Best multiprocessing performance of all platforms
-- Shared memory inheritance reduces memory usage
+**Process Creation Method:**
+- Uses `spawn` method (starts fresh Python interpreter for each worker)
+- Process creation overhead: ~1-2 seconds for 4 workers
+- `if __name__ == '__main__':` guard handled internally by the plugin
+- Each worker process gets its own copy of input data (no shared memory)
 
 #### Performance Guidelines
 
