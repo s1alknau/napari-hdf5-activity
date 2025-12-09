@@ -488,31 +488,32 @@ This step quantifies how much each organism moves by comparing consecutive video
 
 **Detailed Algorithm**:
 ```
-For each ROI at time t:
-  0. Use pre-created circular mask for this ROI
-     → Mask was created during ROI detection step
-     → Circular mask = 1 inside ROI, 0 outside ROI
-     → Example: ROI with radius 100px → ~31,400 pixels inside circle
+Setup (done once during ROI detection):
+  Create circular mask for each ROI
+  → Binary mask: 1 for pixels inside circle, 0 for pixels outside
+  → Example: ROI with radius 100px contains ~31,400 pixels
 
-  1. Calculate pixel-wise difference: diff_pixels = abs(frame[t] - frame[t-1])
-     → Compare current frame with previous frame, pixel by pixel
-     → Take absolute value to get magnitude of change (positive number)
-     → Example: If pixel was 100, now 115 → difference = 15
+For each frame t (repeated for all frames):
+  For each ROI:
+    1. Calculate pixel-wise difference: diff_pixels = abs(frame[t] - frame[t-1])
+       → Compare current frame with previous frame, pixel by pixel
+       → Take absolute value to get magnitude of change (positive number)
+       → Example: If pixel was 100, now 115 → difference = 15
 
-  2. Apply circular ROI mask: masked_diff = diff_pixels * circular_mask
-     → Multiply by mask to isolate only pixels inside the circular ROI
-     → All pixels outside ROI become 0 (ignored)
-     → Only pixels inside ROI boundary contribute to movement calculation
+    2. Apply circular ROI mask: masked_diff = diff_pixels * circular_mask
+       → Multiply by mask to isolate only pixels inside the circular ROI
+       → All pixels outside ROI become 0 (ignored)
+       → Only pixels inside ROI boundary contribute to movement calculation
 
-  3. Sum absolute differences: total_change = sum(masked_diff)
-     → Add up all pixel changes within the ROI
-     → Gives total amount of change in the organism's area
-     → Example: If ROI has 1000 pixels and each changed by ~15 → total ≈ 15000
+    3. Sum absolute differences: total_change = sum(masked_diff)
+       → Add up all pixel changes within the ROI
+       → Gives total amount of change in the organism's area
+       → Example: If ROI has 1000 pixels and each changed by ~15 → total ≈ 15000
 
-  4. Normalize by ROI area: movement_value = total_change / sum(circular_mask)
-     → Divide by number of pixels in ROI to get average change per pixel
-     → This makes values comparable between different sized organisms
-     → Example: 15000 / 1000 pixels = 15.0 average change per pixel
+    4. Normalize by ROI area: movement_value = total_change / sum(circular_mask)
+       → Divide by number of pixels in ROI to get average change per pixel
+       → This makes values comparable between different sized organisms
+       → Example: 15000 / 1000 pixels = 15.0 average change per pixel
 ```
 
 **What the Numbers Mean**:
