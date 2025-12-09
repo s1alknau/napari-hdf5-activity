@@ -474,23 +474,35 @@ This section explains the full analysis pipeline from raw video frames to behavi
 
 #### Step 1: ROI-Level Movement Quantification
 
-**Input**: Raw video frames (grayscale, 8-bit or 16-bit)
+**Input**:
+- Raw video frames (grayscale, 8-bit or 16-bit)
+- Pre-detected ROIs with circular masks (created during ROI detection phase)
 
 **Process Description**:
 This step quantifies how much each organism moves by comparing consecutive video frames. The algorithm calculates the absolute difference in pixel brightness between each frame and the previous frame, focusing only on pixels within each detected ROI (Region of Interest - the circular area around each organism).
 
+**Prerequisites**:
+- ROI Detection must be performed FIRST to create circular masks
+- Each mask defines which pixels belong to each organism
+- Mask is binary: 1 for pixels inside ROI circle, 0 for pixels outside
+
 **Detailed Algorithm**:
 ```
 For each ROI at time t:
+  0. Use pre-created circular mask for this ROI
+     → Mask was created during ROI detection step
+     → Circular mask = 1 inside ROI, 0 outside ROI
+     → Example: ROI with radius 100px → ~31,400 pixels inside circle
+
   1. Calculate pixel-wise difference: diff_pixels = abs(frame[t] - frame[t-1])
      → Compare current frame with previous frame, pixel by pixel
      → Take absolute value to get magnitude of change (positive number)
      → Example: If pixel was 100, now 115 → difference = 15
 
   2. Apply circular ROI mask: masked_diff = diff_pixels * circular_mask
-     → Isolate only pixels inside the circular ROI boundary
-     → Ignore pixels outside the organism's area
-     → Circular mask = 1 inside ROI, 0 outside ROI
+     → Multiply by mask to isolate only pixels inside the circular ROI
+     → All pixels outside ROI become 0 (ignored)
+     → Only pixels inside ROI boundary contribute to movement calculation
 
   3. Sum absolute differences: total_change = sum(masked_diff)
      → Add up all pixel changes within the ROI
@@ -783,12 +795,23 @@ The plugin implements **true multiprocessing** (not multithreading) using Python
 ┌─────────────────────────────────────────────────────────────────┐
 │  PHASE 1: PREPROCESSING (Sequential - Cannot be parallelized)  │
 ├─────────────────────────────────────────────────────────────────┤
-│  ✓ Load HDF5/AVI frames                                        │
-│  ✓ Calculate pixel differences (frame[t] - frame[t-1])         │
-│  ✓ Normalize data (optional)                                   │
-│  ✓ Calculate baseline thresholds (mean ± std)                  │
-│    → Must use data from ALL ROIs                               │
-│  ✓ Optional: Detrending & Jump Correction                      │
+│  1. Create ROI masks (circular masks for each detected ROI)    │
+│     → Defines which pixels belong to each organism             │
+│                                                                 │
+│  2. Load HDF5/AVI frames                                        │
+│                                                                 │
+│  3. Calculate pixel differences WITHIN each ROI mask:           │
+│     For each ROI:                                               │
+│       diff = abs(frame[t] - frame[t-1]) * circular_mask        │
+│       movement = sum(diff) / count(mask_pixels)                │
+│     → Only pixels inside ROI are used for calculation          │
+│                                                                 │
+│  4. Normalize data (optional)                                   │
+│                                                                 │
+│  5. Calculate baseline thresholds (mean ± std)                  │
+│     → Must use data from ALL ROIs                               │
+│                                                                 │
+│  6. Optional: Detrending & Jump Correction                      │
 │                                                                 │
 │  Time: ~2-3 seconds for 10 ROIs, 10000 frames                  │
 └─────────────────────────────────────────────────────────────────┘
