@@ -242,17 +242,21 @@ def analyze_roi_circadian_patterns(
     max_period_hours: float = 36.0,
     significance_level: float = 0.05,
     phase_threshold: float = 0.5,
+    bin_size_seconds: int = None,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Analyze circadian patterns for all ROIs using Fischer Z-transformation.
 
     Args:
-        movement_data: Dictionary mapping ROI ID to list of (time, movement) tuples
+        movement_data: Dictionary mapping ROI ID to list of (time, value) tuples
+                      Can be fraction_data (binned, 0-1) or processed_data (raw signal)
         sampling_interval: Time interval between samples (seconds)
         min_period_hours: Minimum period to test (hours)
         max_period_hours: Maximum period to test (hours)
         significance_level: Statistical significance threshold
         phase_threshold: Threshold for sleep/wake classification
+        bin_size_seconds: Optional bin size for averaging data (e.g., 60 for 1-minute bins)
+                         If None, data is used as-is. Useful for high-resolution raw data.
 
     Returns:
         Dictionary mapping ROI ID to analysis results
@@ -267,13 +271,20 @@ def analyze_roi_circadian_patterns(
             }
             continue
 
-        # Extract movement values (ignore time for now, assume regular sampling)
-        movement_values = np.array([m for _, m in data])
+        # Extract values and times
+        times = np.array([t for t, _ in data])
+        values = np.array([v for _, v in data])
+
+        # Apply binning if requested (for high-resolution raw data)
+        if bin_size_seconds is not None and bin_size_seconds > 0:
+            values, effective_interval = _bin_data(times, values, bin_size_seconds)
+        else:
+            effective_interval = sampling_interval
 
         # Run Fisher periodogram
         periodogram = fisher_z_periodogram(
-            movement_values,
-            sampling_interval=sampling_interval,
+            values,
+            sampling_interval=effective_interval,
             min_period_hours=min_period_hours,
             max_period_hours=max_period_hours,
             significance_level=significance_level,
@@ -282,9 +293,9 @@ def analyze_roi_circadian_patterns(
         # If significant rhythm detected, analyze sleep/wake phases
         if periodogram.get("is_significant", False):
             phase_analysis = detect_sleep_wake_phases(
-                movement_values,
+                values,
                 periodogram["dominant_period"],
-                sampling_interval=sampling_interval,
+                sampling_interval=effective_interval,
                 phase_threshold=phase_threshold,
             )
         else:
@@ -298,12 +309,60 @@ def analyze_roi_circadian_patterns(
         results[roi_id] = {
             "periodogram": periodogram,
             "phase_analysis": phase_analysis,
-            "n_samples": len(movement_values),
-            "mean_activity": np.mean(movement_values),
-            "std_activity": np.std(movement_values),
+            "n_samples": len(values),
+            "mean_activity": np.mean(values),
+            "std_activity": np.std(values),
+            "data_type": "binned" if bin_size_seconds else "raw",
+            "effective_sampling_interval": effective_interval,
         }
 
     return results
+
+
+def _bin_data(
+    times: np.ndarray,
+    values: np.ndarray,
+    bin_size_seconds: int,
+) -> Tuple[np.ndarray, float]:
+    """
+    Bin data into time windows by averaging.
+
+    Args:
+        times: Array of time points (seconds)
+        values: Array of data values
+        bin_size_seconds: Size of time bins (seconds)
+
+    Returns:
+        Tuple of (binned_values, effective_sampling_interval)
+    """
+    if len(times) == 0:
+        return np.array([]), bin_size_seconds
+
+    # Create bins
+    start_time = times[0]
+    end_time = times[-1]
+    bin_edges = np.arange(start_time, end_time + bin_size_seconds, bin_size_seconds)
+
+    # Assign data points to bins and average
+    binned_values = []
+    for i in range(len(bin_edges) - 1):
+        bin_start = bin_edges[i]
+        bin_end = bin_edges[i + 1]
+
+        # Find all values in this bin
+        mask = (times >= bin_start) & (times < bin_end)
+        bin_data = values[mask]
+
+        if len(bin_data) > 0:
+            binned_values.append(np.mean(bin_data))
+        else:
+            # No data in this bin - use interpolation or skip
+            if len(binned_values) > 0:
+                binned_values.append(binned_values[-1])  # Forward fill
+            else:
+                binned_values.append(0.0)
+
+    return np.array(binned_values), float(bin_size_seconds)
 
 
 def generate_circadian_summary(results: Dict[int, Dict[str, Any]]) -> str:
