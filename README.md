@@ -109,6 +109,69 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - All bug fixes apply to both old and new file formats
 - New features (jump correction, video export) are optional and don't affect existing workflows
 
+## Changelog
+
+### Version 0.3.2 (2025) - Feature/Multiprocessing Merge
+**Major Features:**
+- **Jump Correction**: Detect and correct sudden signal jumps in time-series data
+  - Rolling standard deviation-based detection
+  - Optional feature via checkbox
+  - Compatible with detrending
+- **Frame Viewer Export**: Video/GIF export with frame range selection
+  - MP4 and animated GIF support
+  - Configurable FPS (1-60)
+  - Time stamps included
+- **Improved Frame Viewer Display**: White text (was blue), 50% larger font
+- **Consolidated Architecture**: Single `_calc.py` module for multiprocessing
+
+**Critical Bug Fixes:**
+- **Baseline Calculation**: Now calculated from normalized data BEFORE detrending (both baseline and calibration methods)
+  - This was causing incorrect thresholds when detrending was enabled
+  - Verified with test suite (difference < 0.000001)
+- **Performance Metrics**: Fixed TypeError when start_time was None (Qt signal race condition)
+- **AVI Batch Plot Range**: Plot time range now auto-updates to full recording duration
+- **Save Results**: Fixed Excel export crash and AttributeError in parameters sheet
+- **Documentation**: Clarified symmetric hysteresis thresholds in multiple sections
+
+**Compatibility:**
+- 100% backward compatible
+- Excel/CSV formats unchanged
+- All changes are improvements or bugfixes
+
+### Version 0.3.1 (2025)
+- **Multiprocessing support**: True parallel processing for baseline analysis
+  - ROI-level parallelization using Python's `multiprocessing.Pool`
+  - Automatic core count detection (cpu_count() - 1)
+  - 2-5x speedup for multi-ROI datasets
+  - Python 3.9+ compatible
+- Enhanced "Number of Processes" parameter now functional
+
+### Version 0.3.0 (2025)
+- Added Extended Analysis tab with Fischer Z-transformation
+- Periodogram visualization for circadian rhythm detection
+- Statistical significance testing for periodic patterns
+- Sleep/wake phase identification
+- Frame Viewer for interactive dataset playback
+- Time overlay in frames (calculated from metadata)
+- Playback controls with adjustable FPS
+- Flexible period range configuration (0-100 hours)
+
+### Version 0.2.0 (2025)
+- Added AVI video file support
+- Memory-efficient loading (first frame only for ROI detection)
+- Batch processing for multiple AVI files
+- LED-based lighting condition detection
+- Modular calculation system (_calc.py modules)
+- Enhanced metadata handling
+- Improved plot generation
+
+### Version 0.1.0 (2024)
+- Initial release
+- HDF5 dual structure support
+- ROI detection
+- Movement analysis with multiple threshold methods
+- Basic plotting and export
+
 ### Visualization
 - **Real-time Plots**: Movement traces, activity fractions, sleep patterns
 - **Lighting Conditions**: Automatic detection and visualization of light/dark phases from LED data
@@ -324,26 +387,6 @@ Then: `Plugins` → `napari-hdf5-activity`
 3. Detect ROIs on main dataset
 4. Process Data (uses calibration thresholds)
 
-## AVI File Support
-
-### Frame Sampling
-
-AVI videos are sampled at configurable intervals (default: 5 seconds):
-
-| Video FPS | Interval | Frames Sampled | Effective FPS |
-|-----------|----------|----------------|---------------|
-| 30 FPS    | 5s       | Every 150th    | 0.2 FPS       |
-| 5 FPS     | 5s       | Every 25th     | 0.2 FPS       |
-
-Frame interval is automatically calculated based on video FPS and target interval (default: 5s).
-
-### Memory Efficiency
-
-- **Loading**: Only first frame loaded (~2 MB instead of 500 MB)
-- **ROI Detection**: Performed on first frame
-- **Analysis**: All frames loaded on-demand during processing
-- **Benefit**: Fast UI, minimal memory footprint for preview
-
 ## Parameter Guide
 
 ### ROI Detection
@@ -386,6 +429,26 @@ Frame interval is automatically calculated based on video FPS and target interva
 - Sliding window baseline calculation
 - Best for: Variable conditions, long recordings
 
+## AVI File Support
+
+### Frame Sampling
+
+AVI videos are sampled at configurable intervals (default: 5 seconds):
+
+| Video FPS | Interval | Frames Sampled | Effective FPS |
+|-----------|----------|----------------|---------------|
+| 30 FPS    | 5s       | Every 150th    | 0.2 FPS       |
+| 5 FPS     | 5s       | Every 25th     | 0.2 FPS       |
+
+Frame interval is automatically calculated based on video FPS and target interval (default: 5s).
+
+### Memory Efficiency
+
+- **Loading**: Only first frame loaded (~2 MB instead of 500 MB)
+- **ROI Detection**: Performed on first frame
+- **Analysis**: All frames loaded on-demand during processing
+- **Benefit**: Fast UI, minimal memory footprint for preview
+
 ## Output Files
 
 ### Excel Export
@@ -411,45 +474,6 @@ Frame interval is automatically calculated based on video FPS and target interva
 - `lighting_conditions.png`: Light/dark phases
 - `sleep_pattern.png`: Sleep bout visualization
 - Each plot also saved as `.pdf`
-
-## Troubleshooting
-
-### Issue: No ROIs detected
-
-**Solutions:**
-- Adjust Min/Max Radius to match organism size
-- Decrease DP Parameter (e.g., 0.3) for more sensitivity
-- Check first frame contrast (use "Debug HDF5 Structure")
-
-### Issue: AVI files not loading
-
-**Solutions:**
-- Install opencv: `pip install opencv-python`
-- Verify AVI codec is supported (MJPEG, H264, etc.)
-- Check if file is corrupted
-
-### Issue: "Structure detection failed" error
-
-**Solutions:**
-- File is likely AVI, not HDF5 - use Load File for AVIs
-- Check HDF5 file integrity with `h5py`
-- Try "Load Directory" for batch processing
-
-### Issue: Analysis very slow
-
-**Solutions:**
-- Increase Chunk Size (e.g., 100 frames)
-- Reduce Num Processes (memory vs. speed tradeoff)
-- Use smaller time window (Start/End Time)
-- For AVI: Consider reducing frame interval
-
-### Issue: Memory error during AVI analysis
-
-**Solutions:**
-- Process fewer videos at once
-- Increase frame interval (e.g., 10s instead of 5s)
-- Reduce Chunk Size
-- Close other applications
 
 ## Technical Details
 
@@ -1215,55 +1239,44 @@ The multiprocessing speedup for baseline analysis is the same as HDF5 processing
 - **IR LED**: Continuous 100% for video recording
 - **Source**: HDF5 timeseries only (not available for AVI files)
 
-## Citation
+## Troubleshooting
 
-If you use this plugin in your research, please cite:
+### Issue: No ROIs detected
 
-```
-@software{napari_hdf5_activity,
-  author = {s1alknau},
-  title = {napari-hdf5-activity: Activity analysis plugin for napari},
-  year = {2025},
-  url = {https://github.com/s1alknau/napari-hdf5-activity}
-}
-```
+**Solutions:**
+- Adjust Min/Max Radius to match organism size
+- Decrease DP Parameter (e.g., 0.3) for more sensitivity
+- Check first frame contrast (use "Debug HDF5 Structure")
 
-## Contributing
+### Issue: AVI files not loading
 
-Contributions are welcome! Please:
+**Solutions:**
+- Install opencv: `pip install opencv-python`
+- Verify AVI codec is supported (MJPEG, H264, etc.)
+- Check if file is corrupted
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/improvement`)
-3. Commit your changes
-4. Push to the branch (`git push origin feature/improvement`)
-5. Open a Pull Request
+### Issue: "Structure detection failed" error
 
-### Development Setup
+**Solutions:**
+- File is likely AVI, not HDF5 - use Load File for AVIs
+- Check HDF5 file integrity with `h5py`
+- Try "Load Directory" for batch processing
 
-```bash
-git clone https://github.com/s1alknau/napari-hdf5-activity.git
-cd napari-hdf5-activity
-pip install -e ".[dev]"
-```
+### Issue: Analysis very slow
 
-### Running Tests
+**Solutions:**
+- Increase Chunk Size (e.g., 100 frames)
+- Reduce Num Processes (memory vs. speed tradeoff)
+- Use smaller time window (Start/End Time)
+- For AVI: Consider reducing frame interval
 
-```bash
-pytest
-```
+### Issue: Memory error during AVI analysis
 
-## License
-
-Distributed under the terms of the [MIT](http://opensource.org/licenses/MIT) license, "napari-hdf5-activity" is free and open source software.
-
-## Issues
-
-If you encounter any problems, please [file an issue](https://github.com/s1alknau/napari-hdf5-activity/issues) with:
-- Operating system and version
-- Python version
-- napari version
-- Error message and full traceback
-- Minimal example to reproduce the issue
+**Solutions:**
+- Process fewer videos at once
+- Increase frame interval (e.g., 10s instead of 5s)
+- Reduce Chunk Size
+- Close other applications
 
 ## Scientific Background
 
@@ -1564,68 +1577,55 @@ The Frame Viewer provides interactive exploration of raw video data with tempora
 - **Memory efficient**: Loads frames on-demand during playback
 - **Analysis verification**: Visual confirmation of ROI detection and movement events
 
-## Changelog
+## Citation
 
-### Version 0.3.2 (2025) - Feature/Multiprocessing Merge
-**Major Features:**
-- **Jump Correction**: Detect and correct sudden signal jumps in time-series data
-  - Rolling standard deviation-based detection
-  - Optional feature via checkbox
-  - Compatible with detrending
-- **Frame Viewer Export**: Video/GIF export with frame range selection
-  - MP4 and animated GIF support
-  - Configurable FPS (1-60)
-  - Time stamps included
-- **Improved Frame Viewer Display**: White text (was blue), 50% larger font
-- **Consolidated Architecture**: Single `_calc.py` module for multiprocessing
+If you use this plugin in your research, please cite:
 
-**Critical Bug Fixes:**
-- **Baseline Calculation**: Now calculated from normalized data BEFORE detrending (both baseline and calibration methods)
-  - This was causing incorrect thresholds when detrending was enabled
-  - Verified with test suite (difference < 0.000001)
-- **Performance Metrics**: Fixed TypeError when start_time was None (Qt signal race condition)
-- **AVI Batch Plot Range**: Plot time range now auto-updates to full recording duration
-- **Save Results**: Fixed Excel export crash and AttributeError in parameters sheet
-- **Documentation**: Clarified symmetric hysteresis thresholds in multiple sections
+```
+@software{napari_hdf5_activity,
+  author = {s1alknau},
+  title = {napari-hdf5-activity: Activity analysis plugin for napari},
+  year = {2025},
+  url = {https://github.com/s1alknau/napari-hdf5-activity}
+}
+```
 
-**Compatibility:**
-- 100% backward compatible
-- Excel/CSV formats unchanged
-- All changes are improvements or bugfixes
+## Contributing
 
-### Version 0.3.1 (2025)
-- **Multiprocessing support**: True parallel processing for baseline analysis
-  - ROI-level parallelization using Python's `multiprocessing.Pool`
-  - Automatic core count detection (cpu_count() - 1)
-  - 2-5x speedup for multi-ROI datasets
-  - Python 3.9+ compatible
-- Enhanced "Number of Processes" parameter now functional
+Contributions are welcome! Please:
 
-### Version 0.3.0 (2025)
-- Added Extended Analysis tab with Fischer Z-transformation
-- Periodogram visualization for circadian rhythm detection
-- Statistical significance testing for periodic patterns
-- Sleep/wake phase identification
-- Frame Viewer for interactive dataset playback
-- Time overlay in frames (calculated from metadata)
-- Playback controls with adjustable FPS
-- Flexible period range configuration (0-100 hours)
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/improvement`)
+3. Commit your changes
+4. Push to the branch (`git push origin feature/improvement`)
+5. Open a Pull Request
 
-### Version 0.2.0 (2025)
-- Added AVI video file support
-- Memory-efficient loading (first frame only for ROI detection)
-- Batch processing for multiple AVI files
-- LED-based lighting condition detection
-- Modular calculation system (_calc.py modules)
-- Enhanced metadata handling
-- Improved plot generation
+### Development Setup
 
-### Version 0.1.0 (2024)
-- Initial release
-- HDF5 dual structure support
-- ROI detection
-- Movement analysis with multiple threshold methods
-- Basic plotting and export
+```bash
+git clone https://github.com/s1alknau/napari-hdf5-activity.git
+cd napari-hdf5-activity
+pip install -e ".[dev]"
+```
+
+### Running Tests
+
+```bash
+pytest
+```
+
+## License
+
+Distributed under the terms of the [MIT](http://opensource.org/licenses/MIT) license, "napari-hdf5-activity" is free and open source software.
+
+## Issues
+
+If you encounter any problems, please [file an issue](https://github.com/s1alknau/napari-hdf5-activity/issues) with:
+- Operating system and version
+- Python version
+- napari version
+- Error message and full traceback
+- Minimal example to reproduce the issue
 
 ## Acknowledgments
 
