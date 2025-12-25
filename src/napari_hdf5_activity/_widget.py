@@ -1234,45 +1234,54 @@ class HDF5AnalysisWidget(QWidget):
         layout.addWidget(plot_buttons_group)
 
     def setup_extended_tab(self):
-        """Setup the Extended Analysis tab for circadian rhythm detection."""
+        """Setup the Extended Analysis tab for rhythmic pattern detection."""
         layout = QVBoxLayout()
         self.tab_extended.setLayout(layout)
 
         # Title and description
-        title_label = QLabel("Circadian Rhythm Analysis")
+        title_label = QLabel("Rhythmic Pattern Analysis")
         title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         layout.addWidget(title_label)
 
         desc_label = QLabel(
-            "Use Fischer Z-transformation to detect recurring sleep/wake patterns "
-            "and circadian rhythms in activity data."
+            "Detect any recurring periodic patterns in activity data: "
+            "circadian rhythms (24h), ultradian rhythms (<20h), short activity cycles, "
+            "or custom periods using Fischer Z-transformation, FFT, and correlation methods."
         )
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("color: #666; font-size: 10px; margin-bottom: 10px;")
         layout.addWidget(desc_label)
 
-        # Fischer Z-transformation parameters
-        fisher_params_group = QGroupBox("Fischer Z-Transformation Parameters")
+        # Period range parameters
+        fisher_params_group = QGroupBox("Period Range Parameters")
         fisher_params_layout = QFormLayout()
         fisher_params_group.setLayout(fisher_params_layout)
 
         self.fisher_min_period = QDoubleSpinBox()
-        self.fisher_min_period.setRange(0.0, 100.0)
-        self.fisher_min_period.setValue(12.0)
-        self.fisher_min_period.setSingleStep(1.0)
+        self.fisher_min_period.setRange(0.1, 100.0)
+        self.fisher_min_period.setValue(0.5)
+        self.fisher_min_period.setSingleStep(0.5)
+        self.fisher_min_period.setDecimals(1)
         self.fisher_min_period.setSuffix(" hours")
         self.fisher_min_period.setToolTip(
-            "Minimum period to test (e.g., 12 hours for semi-circadian)"
+            "Minimum period to test:\n"
+            "• 0.5-6h: Short activity cycles, ultradian rhythms\n"
+            "• 12-20h: Semi-circadian patterns\n"
+            "• 20-28h: Circadian rhythms (day/night cycles)"
         )
         fisher_params_layout.addRow("Minimum Period:", self.fisher_min_period)
 
         self.fisher_max_period = QDoubleSpinBox()
-        self.fisher_max_period.setRange(0.0, 100.0)
-        self.fisher_max_period.setValue(36.0)
+        self.fisher_max_period.setRange(0.1, 200.0)
+        self.fisher_max_period.setValue(8.0)
         self.fisher_max_period.setSingleStep(1.0)
+        self.fisher_max_period.setDecimals(1)
         self.fisher_max_period.setSuffix(" hours")
         self.fisher_max_period.setToolTip(
-            "Maximum period to test (e.g., 36 hours for extended circadian)"
+            "Maximum period to test:\n"
+            "• 6-8h: For short recordings\n"
+            "• 28-36h: For circadian analysis\n"
+            "• >48h: For longer cycles (needs multi-day recordings)"
         )
         fisher_params_layout.addRow("Maximum Period:", self.fisher_max_period)
 
@@ -1298,14 +1307,116 @@ class HDF5AnalysisWidget(QWidget):
 
         layout.addWidget(fisher_params_group)
 
+        # Quick preset buttons
+        preset_group = QGroupBox("Quick Presets")
+        preset_layout = QHBoxLayout()
+        preset_group.setLayout(preset_layout)
+
+        from qtpy.QtWidgets import QPushButton
+
+        btn_preset_short = QPushButton("Short Cycles\n(0.5-6h)")
+        btn_preset_short.setToolTip(
+            "For recordings <12 hours: detect ultradian rhythms and activity cycles"
+        )
+        btn_preset_short.clicked.connect(lambda: self._set_period_preset(0.5, 6.0))
+        preset_layout.addWidget(btn_preset_short)
+
+        btn_preset_medium = QPushButton("Semi-Daily\n(6-18h)")
+        btn_preset_medium.setToolTip(
+            "For recordings 12-24 hours: detect semi-circadian patterns"
+        )
+        btn_preset_medium.clicked.connect(lambda: self._set_period_preset(6.0, 18.0))
+        preset_layout.addWidget(btn_preset_medium)
+
+        btn_preset_circadian = QPushButton("Circadian\n(12-36h)")
+        btn_preset_circadian.setToolTip(
+            "For recordings >48 hours: detect day/night circadian rhythms"
+        )
+        btn_preset_circadian.clicked.connect(
+            lambda: self._set_period_preset(12.0, 36.0)
+        )
+        preset_layout.addWidget(btn_preset_circadian)
+
+        btn_preset_auto = QPushButton("Auto-Detect\nRange")
+        btn_preset_auto.setToolTip(
+            "Automatically determine optimal period range based on recording duration"
+        )
+        btn_preset_auto.clicked.connect(self._auto_detect_period_range)
+        preset_layout.addWidget(btn_preset_auto)
+
+        layout.addWidget(preset_group)
+
+        # Analysis method selection
+        method_group = QGroupBox("Analysis Method")
+        method_layout = QFormLayout()
+        method_group.setLayout(method_layout)
+
+        from qtpy.QtWidgets import QComboBox
+
+        self.fisher_method_combo = QComboBox()
+        self.fisher_method_combo.addItems(
+            [
+                "Fisher Z-Transformation",
+                "FFT Power Spectrum",
+                "ROI Similarity Matrix",
+                "Coherence Analysis",
+                "Phase Clustering",
+            ]
+        )
+        self.fisher_method_combo.setToolTip(
+            "Select the circadian analysis method:\n"
+            "• Fisher Z: Statistical periodogram (default)\n"
+            "• FFT: Fast Fourier Transform spectrum\n"
+            "• Similarity: Cross-correlation between ROIs\n"
+            "• Coherence: Frequency-specific synchronization\n"
+            "• Phase Clustering: Group ROIs by activity phase"
+        )
+        self.fisher_method_combo.currentIndexChanged.connect(
+            self._on_fisher_method_changed
+        )
+        method_layout.addRow("Method:", self.fisher_method_combo)
+
+        layout.addWidget(method_group)
+
+        # Buttons layout
+        buttons_layout = QHBoxLayout()
+
         # Run analysis button
-        self.btn_run_fisher = QPushButton("Run Circadian Analysis")
+        self.btn_run_fisher = QPushButton("Run Rhythmic Pattern Analysis")
         self.btn_run_fisher.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; "
             "padding: 10px; } QPushButton:hover { background-color: #45a049; }"
         )
         self.btn_run_fisher.clicked.connect(self.run_fisher_analysis)
-        layout.addWidget(self.btn_run_fisher)
+        buttons_layout.addWidget(self.btn_run_fisher)
+
+        # Load results from HDF5 button (for test data)
+        self.btn_load_hdf5_results = QPushButton("Load Results from HDF5")
+        self.btn_load_hdf5_results.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
+            "padding: 10px; } QPushButton:hover { background-color: #0b7dda; }"
+        )
+        self.btn_load_hdf5_results.setToolTip(
+            "Load pre-computed results directly from HDF5 file.\n"
+            "Use this for test data that already contains analysis results."
+        )
+        self.btn_load_hdf5_results.clicked.connect(self._load_results_from_hdf5)
+        buttons_layout.addWidget(self.btn_load_hdf5_results)
+
+        # Save results to HDF5 button
+        self.btn_save_hdf5_results = QPushButton("Save Results to HDF5")
+        self.btn_save_hdf5_results.setStyleSheet(
+            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; "
+            "padding: 10px; } QPushButton:hover { background-color: #e68900; }"
+        )
+        self.btn_save_hdf5_results.setToolTip(
+            "Save current analysis results to HDF5 file.\n"
+            "This allows you to reload results later without re-running analysis."
+        )
+        self.btn_save_hdf5_results.clicked.connect(self._save_results_to_hdf5)
+        buttons_layout.addWidget(self.btn_save_hdf5_results)
+
+        layout.addLayout(buttons_layout)
 
         # Create a horizontal splitter for results and plot
         splitter = QSplitter()
@@ -1315,7 +1426,8 @@ class HDF5AnalysisWidget(QWidget):
         self.fisher_results_text = QTextEdit()
         self.fisher_results_text.setReadOnly(True)
         self.fisher_results_text.setPlaceholderText(
-            "Circadian analysis results will appear here..."
+            "Rhythmic pattern analysis results will appear here...\n\n"
+            "Tip: Use 'Auto-Detect Range' to automatically set optimal period range for your recording duration."
         )
         splitter.addWidget(self.fisher_results_text)
 
@@ -1343,7 +1455,7 @@ class HDF5AnalysisWidget(QWidget):
         layout.addWidget(splitter)
 
         # Export button
-        self.btn_export_fisher = QPushButton("Export Circadian Results")
+        self.btn_export_fisher = QPushButton("Export Rhythmic Pattern Results")
         self.btn_export_fisher.clicked.connect(self.export_fisher_results)
         self.btn_export_fisher.setEnabled(False)
         layout.addWidget(self.btn_export_fisher)
@@ -5709,6 +5821,7 @@ class HDF5AnalysisWidget(QWidget):
             self.results_label.setText(f"Error saving results: {str(e)}")
             self._log_message(f"ERROR saving results: {str(e)}")
             import traceback
+
             self._log_message(f"Traceback: {traceback.format_exc()}")
 
     def show_threshold_statistics(self):
@@ -7693,29 +7806,277 @@ class HDF5AnalysisWidget(QWidget):
     # EXTENDED ANALYSIS METHODS (FISCHER Z-TRANSFORMATION)
     # ===================================================================
 
+    def _set_period_preset(self, min_period, max_period):
+        """Set period range from preset."""
+        self.fisher_min_period.setValue(min_period)
+        self.fisher_max_period.setValue(max_period)
+        self._log_message(
+            f"Period range set to: {min_period:.1f} - {max_period:.1f} hours"
+        )
+
+    def _auto_detect_period_range(self):
+        """Automatically detect optimal period range based on recording duration."""
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("⚠️ No data loaded. Please run analysis first.")
+            return
+
+        # Get recording duration from first ROI
+        first_roi_data = next(iter(self.merged_results.values()))
+        if not first_roi_data:
+            return
+
+        times = [t for t, _ in first_roi_data]
+        duration_seconds = max(times) - min(times)
+        duration_hours = duration_seconds / 3600.0
+
+        # Determine optimal range based on duration
+        # Rule: max_period should be at most 1/2 of recording duration
+        if duration_hours < 12:
+            # Short recording: 0.5h - duration/2
+            min_period = 0.5
+            max_period = max(3.0, duration_hours / 2)
+            preset_name = "Short Cycles"
+        elif duration_hours < 48:
+            # Medium recording: 1h - duration/2
+            min_period = 1.0
+            max_period = min(18.0, duration_hours / 2)
+            preset_name = "Ultradian/Semi-Daily"
+        else:
+            # Long recording: circadian analysis
+            min_period = 12.0
+            max_period = min(36.0, duration_hours / 2)
+            preset_name = "Circadian"
+
+        self.fisher_min_period.setValue(min_period)
+        self.fisher_max_period.setValue(max_period)
+
+        self._log_message(
+            f"Auto-detected: Recording duration = {duration_hours:.1f}h\n"
+            f"  → Using '{preset_name}' preset: {min_period:.1f} - {max_period:.1f} hours"
+        )
+
+    def _on_fisher_method_changed(self, index):
+        """Handle change in analysis method selection."""
+        methods = [
+            "Fisher Z-Transformation",
+            "FFT Power Spectrum",
+            "ROI Similarity Matrix",
+            "Coherence Analysis",
+            "Phase Clustering",
+        ]
+        self._log_message(f"Analysis method changed to: {methods[index]}")
+
+    def _load_results_from_hdf5(self):
+        """Load pre-computed results directly from HDF5 file."""
+        import h5py
+
+        if not hasattr(self, "file_path") or not self.file_path:
+            self.fisher_results_text.setPlainText(
+                "ERROR: No HDF5 file loaded.\n\n"
+                "Please load an HDF5 file first (Input tab -> Load File)."
+            )
+            self._log_message("⚠️ Cannot load results: No HDF5 file loaded")
+            return
+
+        try:
+            self._log_message(f"Loading results from HDF5: {self.file_path}")
+
+            with h5py.File(self.file_path, "r") as f:
+                # Check if results group exists
+                if "results" not in f:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No 'results' group found in HDF5 file.\n\n"
+                        "This file does not contain pre-computed analysis results."
+                    )
+                    self._log_message("⚠️ No 'results' group found in HDF5 file")
+                    return
+
+                results_group = f["results"]
+                roi_ids = [
+                    int(key.split("_")[1])
+                    for key in results_group.keys()
+                    if key.startswith("roi_")
+                ]
+
+                if not roi_ids:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No ROI data found in results group."
+                    )
+                    self._log_message("⚠️ No ROI data found")
+                    return
+
+                # Load data for each ROI
+                self.merged_results = {}
+                self.fraction_data = {}
+
+                for roi_id in roi_ids:
+                    roi_group = results_group[f"roi_{roi_id}"]
+
+                    # Load processed_data (preferred) or fraction_data
+                    if "processed_data" in roi_group:
+                        data = roi_group["processed_data"][:]
+                    elif "fraction_data" in roi_group:
+                        data = roi_group["fraction_data"][:]
+                    else:
+                        self._log_message(f"⚠️ ROI {roi_id}: No data found, skipping")
+                        continue
+
+                    # Convert to list of tuples
+                    data_list = [(float(t), float(v)) for t, v in data]
+                    self.merged_results[roi_id] = data_list
+                    self.fraction_data[roi_id] = data_list
+
+                self._log_message(f"✓ Loaded data for {len(roi_ids)} ROIs from HDF5")
+                self.fisher_results_text.setPlainText(
+                    f"Successfully loaded results from HDF5!\n\n"
+                    f"ROIs loaded: {len(roi_ids)}\n"
+                    f"ROI IDs: {sorted(roi_ids)}\n\n"
+                    f"You can now run rhythmic pattern analysis."
+                )
+
+        except Exception as e:
+            self.fisher_results_text.setPlainText(
+                f"ERROR loading results from HDF5:\n\n{str(e)}"
+            )
+            self._log_message(f"ERROR loading results from HDF5: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _save_results_to_hdf5(self):
+        """Save current analysis results to HDF5 file."""
+        import h5py
+        from qtpy.QtWidgets import QFileDialog
+        import os
+
+        # Check if we have results to save
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self.fisher_results_text.setPlainText(
+                "ERROR: No analysis results to save.\n\n"
+                "Please run analysis first or load data before saving."
+            )
+            self._log_message("⚠️ Cannot save: No analysis results available")
+            return
+
+        # Open file dialog to select save location
+        default_name = "rhythmic_analysis_results.h5"
+        if hasattr(self, "file_path") and self.file_path:
+            # Suggest name based on current file
+            base_name = os.path.splitext(os.path.basename(self.file_path))[0]
+            default_name = f"{base_name}_rhythmic_results.h5"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Results to HDF5",
+            default_name,
+            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+        )
+
+        if not file_path:
+            self._log_message("Save cancelled by user")
+            return
+
+        try:
+            self._log_message(f"Saving results to: {file_path}")
+
+            with h5py.File(file_path, "w") as f:
+                # Create results group
+                results_group = f.create_group("results")
+
+                # Save each ROI's data
+                for roi_id, data in self.merged_results.items():
+                    roi_group = results_group.create_group(f"roi_{roi_id}")
+
+                    # Convert data to numpy array
+                    processed_data = [(float(t), float(v)) for t, v in data]
+                    processed_dtype = np.dtype([("time", "f8"), ("value", "f8")])
+                    processed_array = np.array(processed_data, dtype=processed_dtype)
+
+                    # Save as processed_data
+                    roi_group.create_dataset("processed_data", data=processed_array)
+
+                    # Also save as fraction_data if available
+                    if hasattr(self, "fraction_data") and roi_id in self.fraction_data:
+                        fraction_array = np.array(
+                            self.fraction_data[roi_id], dtype=processed_dtype
+                        )
+                        roi_group.create_dataset("fraction_data", data=fraction_array)
+                    else:
+                        roi_group.create_dataset("fraction_data", data=processed_array)
+
+                    # Save metadata
+                    roi_group.attrs["roi_id"] = roi_id
+                    roi_group.attrs["n_samples"] = len(data)
+                    if data:
+                        times = [t for t, _ in data]
+                        roi_group.attrs["duration_seconds"] = max(times) - min(times)
+
+                # Save global metadata
+                meta_group = f.create_group("metadata")
+                meta_group.attrs["n_rois"] = len(self.merged_results)
+                meta_group.attrs["saved_from"] = (
+                    "napari-hdf5-activity rhythmic pattern analysis"
+                )
+
+                if hasattr(self, "frame_interval"):
+                    meta_group.attrs["frame_interval"] = self.frame_interval.value()
+
+                # Save analysis parameters if available
+                params_group = f.create_group("analysis_parameters")
+                params_group.attrs["min_period_hours"] = self.fisher_min_period.value()
+                params_group.attrs["max_period_hours"] = self.fisher_max_period.value()
+                params_group.attrs["significance_level"] = (
+                    self.fisher_significance.value()
+                )
+                params_group.attrs["phase_threshold"] = (
+                    self.fisher_phase_threshold.value()
+                )
+                params_group.attrs["analysis_method"] = (
+                    self.fisher_method_combo.currentText()
+                )
+
+            self._log_message(
+                f"✓ Successfully saved results for {len(self.merged_results)} ROIs"
+            )
+            self.fisher_results_text.setPlainText(
+                f"Successfully saved results to HDF5!\n\n"
+                f"File: {file_path}\n"
+                f"ROIs saved: {len(self.merged_results)}\n"
+                f"ROI IDs: {sorted(self.merged_results.keys())}\n\n"
+                f"You can reload these results anytime using 'Load Results from HDF5'."
+            )
+
+        except Exception as e:
+            self.fisher_results_text.setPlainText(
+                f"ERROR saving results to HDF5:\n\n{str(e)}"
+            )
+            self._log_message(f"ERROR saving results: {e}")
+            import traceback
+
+            traceback.print_exc()
+
     def run_fisher_analysis(self):
-        """Run Fischer Z-transformation circadian analysis on movement data."""
+        """Run rhythmic pattern analysis on movement data using selected method."""
         # Check if we have analysis results
         if not hasattr(self, "fraction_data") or not self.fraction_data:
             self.fisher_results_text.setPlainText(
                 "ERROR: No analysis results available.\n\n"
                 "Please run the main analysis first (Analysis tab) before "
-                "attempting circadian pattern detection."
+                "attempting rhythmic pattern detection."
             )
             self._log_message(
-                "⚠️ Fisher analysis requires movement data from main analysis"
+                "⚠️ Rhythmic pattern analysis requires movement data from main analysis"
             )
             return
 
-        self._log_message("Starting Fischer Z-transformation circadian analysis...")
+        # Get selected method
+        method_index = self.fisher_method_combo.currentIndex()
+        method_name = self.fisher_method_combo.currentText()
+
+        self._log_message(f"Starting {method_name} analysis...")
         self.fisher_results_text.setPlainText("Running analysis...\n")
 
         try:
-            from ._fisher_analysis import (
-                analyze_roi_circadian_patterns,
-                generate_circadian_summary,
-            )
-
             # Get parameters
             min_period = self.fisher_min_period.value()
             max_period = self.fisher_max_period.value()
@@ -7723,104 +8084,902 @@ class HDF5AnalysisWidget(QWidget):
             phase_threshold = self.fisher_phase_threshold.value()
             sampling_interval = self.frame_interval.value()
 
-            # Run analysis
-            self._log_message(
-                f"  Period range: {min_period:.1f} - {max_period:.1f} hours"
-            )
-            self._log_message(f"  Significance level: {significance:.3f}")
-            self._log_message(f"  Phase threshold: {phase_threshold:.2f}")
+            # Use processed_data (raw signal) instead of fraction_data
+            if not hasattr(self, "merged_results") or not self.merged_results:
+                self.fisher_results_text.setPlainText(
+                    "ERROR: No processed data available.\n\n"
+                    "Please run the main analysis first."
+                )
+                self._log_message(
+                    "⚠️ No processed data available for rhythmic pattern analysis"
+                )
+                return
 
-            fisher_results = analyze_roi_circadian_patterns(
-                self.fraction_data,
-                sampling_interval=sampling_interval,
-                min_period_hours=min_period,
-                max_period_hours=max_period,
-                significance_level=significance,
-                phase_threshold=phase_threshold,
+            bin_size = 60  # Average raw data into 60-second bins
+            self._log_message(
+                f"  Analyzing processed signal data (binned to {bin_size}s)"
             )
+            self._log_message(
+                f"  Detecting periods: {min_period:.1f} - {max_period:.1f} hours"
+            )
+
+            # Route to appropriate analysis method
+            if method_index == 0:  # Fisher Z-Transformation
+                results, summary = self._run_fisher_method(
+                    min_period,
+                    max_period,
+                    significance,
+                    phase_threshold,
+                    sampling_interval,
+                    bin_size,
+                )
+            elif method_index == 1:  # FFT Power Spectrum
+                results, summary = self._run_fft_method(
+                    min_period, max_period, sampling_interval, bin_size
+                )
+            elif method_index == 2:  # ROI Similarity Matrix
+                results, summary = self._run_similarity_method(
+                    sampling_interval, bin_size
+                )
+            elif method_index == 3:  # Coherence Analysis
+                results, summary = self._run_coherence_method(
+                    sampling_interval, bin_size
+                )
+            elif method_index == 4:  # Phase Clustering
+                results, summary = self._run_phase_clustering_method(
+                    sampling_interval, bin_size
+                )
+            else:
+                raise ValueError(f"Unknown method index: {method_index}")
 
             # Store results
-            self.fisher_analysis_results = fisher_results
-
-            # Generate summary
-            summary = generate_circadian_summary(fisher_results)
+            self.fisher_analysis_results = results
+            self.current_fisher_method = method_index
 
             # Display results
             self.fisher_results_text.setPlainText(summary)
 
             # Create and display plot
-            self._create_fisher_plot(fisher_results)
+            self._create_circadian_plot(results, method_index)
 
             # Enable export button
             self.btn_export_fisher.setEnabled(True)
 
-            # Count significant results
-            n_significant = sum(
-                1
-                for r in fisher_results.values()
-                if r.get("periodogram", {}).get("is_significant", False)
+            self._log_message(f"✓ Rhythmic pattern analysis complete ({method_name})")
+
+        except Exception as e:
+            error_msg = f"ERROR during rhythmic pattern analysis:\n\n{str(e)}\n\nPlease check the console for details."
+            self.fisher_results_text.setPlainText(error_msg)
+            self._log_message(f"❌ Rhythmic pattern analysis failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _run_fisher_method(
+        self,
+        min_period,
+        max_period,
+        significance,
+        phase_threshold,
+        sampling_interval,
+        bin_size,
+    ):
+        """Run Fisher Z-Transformation analysis."""
+        from ._fisher_analysis import (
+            analyze_roi_circadian_patterns,
+            generate_circadian_summary,
+        )
+
+        results = analyze_roi_circadian_patterns(
+            self.merged_results,
+            sampling_interval=sampling_interval,
+            min_period_hours=min_period,
+            max_period_hours=max_period,
+            significance_level=significance,
+            phase_threshold=phase_threshold,
+            bin_size_seconds=bin_size,
+        )
+
+        summary = generate_circadian_summary(results)
+        return results, summary
+
+    def _run_fft_method(self, min_period, max_period, sampling_interval, bin_size):
+        """Run FFT Power Spectrum analysis."""
+        from ._circadian_fft import analyze_roi_fft_patterns, generate_fft_summary
+
+        results = analyze_roi_fft_patterns(
+            self.merged_results,
+            sampling_interval=sampling_interval,
+            min_period_hours=min_period,
+            max_period_hours=max_period,
+            bin_size_seconds=bin_size,
+            window="hann",
+        )
+
+        summary = generate_fft_summary(results)
+        return results, summary
+
+    def _run_similarity_method(self, sampling_interval, bin_size):
+        """Run ROI Similarity analysis."""
+        from ._circadian_similarity import (
+            calculate_roi_correlation_matrix,
+            hierarchical_clustering,
+            generate_similarity_summary,
+        )
+
+        # Use half of max period as max lag (adaptive to period range)
+        max_lag = self.fisher_max_period.value() / 2
+
+        correlation_results = calculate_roi_correlation_matrix(
+            self.merged_results,
+            sampling_interval=sampling_interval,
+            bin_size_seconds=bin_size,
+            max_lag_hours=max_lag,
+        )
+
+        clustering_results = hierarchical_clustering(
+            correlation_results["correlation_matrix"],
+            correlation_results["roi_ids"],
+            method="average",
+        )
+
+        correlation_results["clustering"] = clustering_results
+        summary = generate_similarity_summary(correlation_results, clustering_results)
+
+        return correlation_results, summary
+
+    def _run_coherence_method(self, sampling_interval, bin_size):
+        """Run Coherence analysis."""
+        from ._circadian_coherence import (
+            calculate_coherence_matrix,
+            generate_coherence_summary,
+        )
+
+        # Use midpoint of period range from GUI instead of hardcoded 24h
+        midpoint_period = (
+            self.fisher_min_period.value() + self.fisher_max_period.value()
+        ) / 2
+
+        results = calculate_coherence_matrix(
+            self.merged_results,
+            sampling_interval=sampling_interval,
+            bin_size_seconds=bin_size,
+            target_period_hours=midpoint_period,
+        )
+
+        summary = generate_coherence_summary(results)
+        return results, summary
+
+    def _run_phase_clustering_method(self, sampling_interval, bin_size):
+        """Run Phase Clustering analysis."""
+        from ._circadian_coherence import detect_phase_clusters
+
+        # Use midpoint of period range from GUI instead of hardcoded 24h
+        midpoint_period = (
+            self.fisher_min_period.value() + self.fisher_max_period.value()
+        ) / 2
+
+        results = detect_phase_clusters(
+            self.merged_results,
+            dominant_period_hours=midpoint_period,
+            sampling_interval=sampling_interval,
+            bin_size_seconds=bin_size,
+        )
+
+        # Generate summary
+        summary_lines = [
+            "=" * 60,
+            "PHASE CLUSTERING ANALYSIS",
+            "=" * 60,
+            "",
+            f"Total ROIs analyzed: {results['n_rois']}",
+            f"Dominant period: {results['dominant_period_hours']:.1f} hours",
+            "",
+            "ROI Phase Clusters:",
+            "",
+        ]
+
+        for cluster_name, roi_list in results["phase_clusters"].items():
+            if roi_list:
+                summary_lines.append(
+                    f"  {cluster_name.replace('_', ' ').title()}: {len(roi_list)} ROIs"
+                )
+                summary_lines.append(f"    ROIs: {', '.join(map(str, roi_list))}")
+                summary_lines.append("")
+
+        summary_lines.append("")
+        summary_lines.append("Individual ROI Phases:")
+        summary_lines.append("")
+
+        for roi_id, phase_info in sorted(results["roi_phases"].items()):
+            summary_lines.append(
+                f"  ROI {roi_id}: Peak activity at {phase_info['phase_hours']:.1f}h "
+                f"(amplitude: {phase_info['amplitude']:.2f})"
             )
 
-            self._log_message(
-                f"✓ Fisher analysis complete: {n_significant}/{len(fisher_results)} ROIs show significant rhythms"
+        summary_lines.append("")
+        summary_lines.append("=" * 60)
+
+        summary = "\n".join(summary_lines)
+        return results, summary
+
+    def _create_circadian_plot(self, results: Dict, method_index: int):
+        """Create and display plot based on selected analysis method."""
+        if method_index == 0:  # Fisher Z-Transformation
+            self._create_fisher_plot(results)
+        elif method_index == 1:  # FFT Power Spectrum
+            self._create_fft_plot(results)
+        elif method_index == 2:  # ROI Similarity Matrix
+            self._create_similarity_plot(results)
+        elif method_index == 3:  # Coherence Analysis
+            self._create_coherence_plot(results)
+        elif method_index == 4:  # Phase Clustering
+            self._create_phase_cluster_plot(results)
+
+    def _create_fft_plot(self, fft_results: Dict[int, Dict]):
+        """Create FFT power spectrum plots."""
+        try:
+            import matplotlib.pyplot as plt
+            from qtpy.QtGui import QPixmap
+            import io
+
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+
+            n_rois = len(fft_results)
+            n_cols = min(3, n_rois)
+            n_rows = (n_rois + n_cols - 1) // n_cols
+
+            fig, axes = plt.subplots(
+                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+            )
+            fig.suptitle("FFT Power Spectrum", fontsize=14, fontweight="bold")
+
+            for idx, (roi_id, result) in enumerate(sorted(fft_results.items())):
+                row, col = idx // n_cols, idx % n_cols
+                ax = axes[row, col]
+
+                # Get ROI-specific color
+                roi_color = (
+                    self.roi_colors.get(roi_id, f"C{idx}")
+                    if hasattr(self, "roi_colors")
+                    else f"C{idx}"
+                )
+
+                if "error" in result:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"ROI {roi_id}\n{result['error']}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                else:
+                    periods = result.get("relevant_periods", [])
+                    power = result.get("relevant_power", [])
+
+                    # Plot with ROI-specific color
+                    ax.plot(periods, power, color=roi_color, linewidth=1.5)
+                    ax.set_xlabel("Period (hours)")
+                    ax.set_ylabel("Power")
+                    ax.set_title(f"ROI {roi_id}")
+                    ax.grid(True, alpha=0.3)
+
+                    # Mark dominant period with vertical line and point
+                    if "dominant_period" in result:
+                        dominant_period = result["dominant_period"]
+                        dominant_power = result.get("dominant_power", 0)
+                        ax.axvline(
+                            x=dominant_period,
+                            color=roi_color,
+                            linestyle="--",
+                            linewidth=1.5,
+                            alpha=0.5,
+                        )
+                        ax.plot(
+                            dominant_period,
+                            dominant_power,
+                            "o",
+                            color=roi_color,
+                            markersize=8,
+                            markeredgecolor="black",
+                            markeredgewidth=1,
+                            label=f"Peak: {dominant_period:.1f}h",
+                        )
+                        ax.legend(fontsize=7)
+
+            # Hide unused subplots
+            for idx in range(n_rois, n_rows * n_cols):
+                axes[idx // n_cols, idx % n_cols].axis("off")
+
+            plt.tight_layout()
+            self.fisher_plot_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(
+                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
             )
 
         except Exception as e:
-            error_msg = f"ERROR during Fischer analysis:\n\n{str(e)}\n\nPlease check the console for details."
-            self.fisher_results_text.setPlainText(error_msg)
-            self._log_message(f"❌ Fisher analysis failed: {e}")
+            self._log_message(f"⚠️ Could not create FFT plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _create_similarity_plot(self, similarity_results: Dict):
+        """Create correlation matrix heatmap and dendrogram."""
+        try:
+            import matplotlib.pyplot as plt
+            from qtpy.QtGui import QPixmap
+            import io
+            from scipy.cluster import hierarchy
+
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+
+            fig = plt.figure(figsize=(14, 6))
+
+            # Correlation heatmap
+            ax1 = plt.subplot(1, 2, 1)
+            corr_matrix = similarity_results["correlation_matrix"]
+            roi_ids = similarity_results["roi_ids"]
+
+            im = ax1.imshow(corr_matrix, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto")
+            ax1.set_xticks(range(len(roi_ids)))
+            ax1.set_yticks(range(len(roi_ids)))
+            ax1.set_xticklabels(roi_ids, rotation=45)
+            ax1.set_yticklabels(roi_ids)
+            ax1.set_title("ROI Correlation Matrix")
+            plt.colorbar(im, ax=ax1, label="Correlation")
+
+            # Dendrogram
+            ax2 = plt.subplot(1, 2, 2)
+            if "clustering" in similarity_results:
+                linkage = similarity_results["clustering"]["linkage_matrix"]
+
+                # Calculate color threshold (30% of max distance)
+                max_distance = np.max(linkage[:, 2])
+                color_threshold = max_distance * 0.3
+
+                # Create dendrogram with colors
+                hierarchy.dendrogram(
+                    linkage,
+                    labels=[f"ROI {r}" for r in roi_ids],
+                    ax=ax2,
+                    color_threshold=color_threshold,
+                    above_threshold_color="gray",
+                )
+
+                ax2.set_title("Hierarchical Clustering", fontsize=12, fontweight="bold")
+                ax2.set_xlabel("ROI", fontsize=11)
+                ax2.set_ylabel("Distance (1 - correlation)", fontsize=11)
+                ax2.tick_params(axis="both", labelsize=10)
+
+                # Add horizontal line at threshold
+                ax2.axhline(
+                    y=color_threshold,
+                    color="red",
+                    linestyle="--",
+                    linewidth=1.5,
+                    alpha=0.7,
+                    label=f"Cluster threshold ({color_threshold:.2f})",
+                )
+                ax2.legend(fontsize=9)
+
+                # Add grid for better readability
+                ax2.grid(True, alpha=0.3, axis="y")
+
+            plt.tight_layout()
+            self.fisher_plot_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(
+                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
+            )
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create similarity plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _create_coherence_plot(self, coherence_results: Dict):
+        """Create coherence matrix heatmap."""
+        try:
+            import matplotlib.pyplot as plt
+            from qtpy.QtGui import QPixmap
+            import io
+
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+
+            fig, ax = plt.subplots(figsize=(10, 8))
+
+            coherence_matrix = coherence_results["coherence_matrix"]
+            roi_ids = coherence_results["roi_ids"]
+
+            im = ax.imshow(coherence_matrix, cmap="hot", vmin=0, vmax=1, aspect="auto")
+            ax.set_xticks(range(len(roi_ids)))
+            ax.set_yticks(range(len(roi_ids)))
+            ax.set_xticklabels(roi_ids, rotation=45)
+            ax.set_yticklabels(roi_ids)
+            ax.set_title(
+                f"ROI Coherence at ~{coherence_results['target_period_hours']:.0f}h Period"
+            )
+            plt.colorbar(im, ax=ax, label="Coherence")
+
+            plt.tight_layout()
+            self.fisher_plot_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(
+                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
+            )
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create coherence plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _create_phase_cluster_plot(self, phase_results: Dict):
+        """Create polar plot showing ROI phases."""
+        try:
+            import matplotlib.pyplot as plt
+            from qtpy.QtGui import QPixmap
+            import io
+
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+
+            fig = plt.figure(figsize=(10, 10))
+            ax = fig.add_subplot(111, projection="polar")
+
+            roi_phases = phase_results["roi_phases"]
+
+            for idx, (roi_id, phase_info) in enumerate(sorted(roi_phases.items())):
+                # Get ROI-specific color
+                roi_color = (
+                    self.roi_colors.get(roi_id, f"C{idx}")
+                    if hasattr(self, "roi_colors")
+                    else f"C{idx}"
+                )
+
+                theta = (phase_info["phase_radians"] + np.pi) % (
+                    2 * np.pi
+                )  # Adjust for polar plot
+                r = phase_info["amplitude"]
+                ax.plot(
+                    [theta, theta],
+                    [0, r],
+                    color=roi_color,
+                    linewidth=2,
+                    label=f"ROI {roi_id}",
+                )
+                ax.scatter(
+                    [theta],
+                    [r],
+                    color=roi_color,
+                    s=100,
+                    edgecolor="black",
+                    linewidth=1,
+                    zorder=5,
+                )
+
+            ax.set_theta_zero_location("N")
+            ax.set_theta_direction(-1)
+            ax.set_title("ROI Activity Phases", fontsize=14, fontweight="bold", pad=20)
+            ax.legend(loc="upper left", bbox_to_anchor=(1.1, 1.0), fontsize=8)
+
+            plt.tight_layout()
+            self.fisher_plot_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(
+                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
+            )
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create phase plot: {e}")
             import traceback
 
             traceback.print_exc()
 
     def export_fisher_results(self):
-        """Export Fischer Z-transformation analysis results to Excel/CSV."""
+        """Export rhythmic pattern analysis results to Excel/CSV."""
         if not hasattr(self, "fisher_analysis_results"):
-            self._log_message("⚠️ No Fisher analysis results to export")
+            self._log_message("⚠️ No analysis results to export")
+            return
+
+        if not hasattr(self, "current_fisher_method"):
+            self._log_message("⚠️ Cannot determine analysis method")
             return
 
         from qtpy.QtWidgets import QFileDialog
         import os
 
+        # Determine method name for file naming
+        method_names = {
+            0: "fisher_z",
+            1: "fft_spectrum",
+            2: "roi_similarity",
+            3: "coherence_analysis",
+            4: "phase_clustering",
+        }
+        method_name = method_names.get(self.current_fisher_method, "rhythmic_analysis")
+
         # Get save location
-        default_name = "circadian_analysis_results"
+        default_name = f"rhythmic_{method_name}_results"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Circadian Analysis Results",
+            "Export Rhythmic Pattern Analysis Results",
             default_name,
-            "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*.*)",
+            "Excel Files (*.xlsx);;All Files (*.*)",
         )
 
         if not file_path:
             self._log_message("Export cancelled by user")
             return
 
+        # Ensure .xlsx extension
+        if not file_path.endswith(".xlsx"):
+            file_path = f"{file_path}.xlsx"
+
         # Remove extension for consistent naming
         base_path = os.path.splitext(file_path)[0]
 
         try:
-            # Export to CSV
-            csv_path = f"{base_path}.csv"
-            self._export_fisher_to_csv(csv_path)
-            self._log_message(f"✓ Exported circadian results to CSV: {csv_path}")
-
-            # Try to export to Excel if pandas is available
-            try:
-                import pandas as pd
-
-                excel_path = f"{base_path}.xlsx"
-                self._export_fisher_to_excel(excel_path)
+            # Route to appropriate export method based on analysis type
+            if self.current_fisher_method == 0:  # Fisher Z-Transformation
+                self._export_fisher_method_results(base_path)
+            elif self.current_fisher_method == 1:  # FFT Power Spectrum
+                self._export_fft_method_results(base_path)
+            elif self.current_fisher_method == 2:  # ROI Similarity Matrix
+                self._export_similarity_method_results(file_path)
+            elif self.current_fisher_method == 3:  # Coherence Analysis
+                self._export_coherence_method_results(file_path)
+            elif self.current_fisher_method == 4:  # Phase Clustering
+                self._export_phase_clustering_method_results(file_path)
+            else:
                 self._log_message(
-                    f"✓ Exported circadian results to Excel: {excel_path}"
+                    f"❌ Unknown analysis method: {self.current_fisher_method}"
                 )
-            except ImportError:
-                self._log_message("⚠️ Excel export not available (pandas not installed)")
+                return
+
+            # Export plot if available
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plot_path = f"{base_path}_plot.png"
+                self.fisher_plot_figure.savefig(
+                    plot_path, dpi=300, bbox_inches="tight", facecolor="white"
+                )
+                self._log_message(f"✓ Exported plot to: {plot_path}")
+
+            self._log_message("✓ Export complete!")
 
         except Exception as e:
             self._log_message(f"❌ Export failed: {e}")
             import traceback
 
             traceback.print_exc()
+
+    def _export_fisher_method_results(self, base_path):
+        """Export Fisher Z-Transformation results to CSV and Excel."""
+        # Export to CSV
+        csv_path = f"{base_path}.csv"
+        self._export_fisher_to_csv(csv_path)
+        self._log_message(f"✓ Exported Fisher results to CSV: {csv_path}")
+
+        # Export to Excel
+        try:
+            import pandas as pd
+
+            excel_path = f"{base_path}.xlsx"
+            self._export_fisher_to_excel(excel_path)
+            self._log_message(f"✓ Exported Fisher results to Excel: {excel_path}")
+        except ImportError:
+            self._log_message("⚠️ Excel export not available (pandas not installed)")
+
+    def _export_fft_method_results(self, base_path):
+        """Export FFT Power Spectrum results to CSV and Excel."""
+        # Export to CSV (similar to Fisher)
+        csv_path = f"{base_path}.csv"
+        self._export_fft_to_csv(csv_path)
+        self._log_message(f"✓ Exported FFT results to CSV: {csv_path}")
+
+        # Export to Excel
+        try:
+            import pandas as pd
+
+            excel_path = f"{base_path}.xlsx"
+            self._export_fft_to_excel(excel_path)
+            self._log_message(f"✓ Exported FFT results to Excel: {excel_path}")
+        except ImportError:
+            self._log_message("⚠️ Excel export not available (pandas not installed)")
+
+    def _export_similarity_method_results(self, file_path):
+        """Export ROI Similarity results using module function."""
+        from ._circadian_similarity import export_similarity_to_excel
+
+        export_similarity_to_excel(file_path, self.fisher_analysis_results)
+        self._log_message(f"✓ Exported Similarity results to: {file_path}")
+
+    def _export_coherence_method_results(self, file_path):
+        """Export Coherence Analysis results using module function."""
+        from ._circadian_coherence import export_coherence_to_excel
+
+        export_coherence_to_excel(file_path, self.fisher_analysis_results)
+        self._log_message(f"✓ Exported Coherence results to: {file_path}")
+
+    def _export_phase_clustering_method_results(self, file_path):
+        """Export Phase Clustering results to Excel."""
+        import pandas as pd
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Phase Clusters
+            if "phase_clusters" in self.fisher_analysis_results:
+                cluster_data = []
+                for cluster_name, roi_list in self.fisher_analysis_results[
+                    "phase_clusters"
+                ].items():
+                    for roi in roi_list:
+                        cluster_data.append(
+                            {
+                                "ROI": roi,
+                                "Cluster": cluster_name.replace("_", " ").title(),
+                                "Cluster_Size": len(roi_list),
+                            }
+                        )
+
+                if cluster_data:
+                    cluster_df = pd.DataFrame(cluster_data)
+                    cluster_df = cluster_df.sort_values(["Cluster", "ROI"])
+                    cluster_df.to_excel(
+                        writer, sheet_name="Phase_Clusters", index=False
+                    )
+
+            # Sheet 2: Phase Values
+            if "roi_phases" in self.fisher_analysis_results:
+                phase_data = []
+                for roi_id, phase_info in self.fisher_analysis_results[
+                    "roi_phases"
+                ].items():
+                    phase_data.append(
+                        {
+                            "ROI": roi_id,
+                            "Phase_Radians": phase_info["phase_radians"],
+                            "Phase_Degrees": np.degrees(phase_info["phase_radians"]),
+                            "Phase_Hours": phase_info["phase_hours"],
+                            "Amplitude": phase_info["amplitude"],
+                        }
+                    )
+
+                phase_df = pd.DataFrame(phase_data)
+                phase_df = phase_df.sort_values("ROI")
+                phase_df.to_excel(writer, sheet_name="Phase_Values", index=False)
+
+            # Sheet 3: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": [
+                        "Number of Clusters",
+                        "Number of ROIs",
+                        "Dominant Period (hours)",
+                    ],
+                    "Value": [
+                        str(
+                            len(self.fisher_analysis_results.get("phase_clusters", {}))
+                        ),
+                        str(self.fisher_analysis_results.get("n_rois", 0)),
+                        f"{self.fisher_analysis_results.get('dominant_period_hours', 0):.1f}",
+                    ],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
+
+        self._log_message(f"✓ Exported Phase Clustering results to: {file_path}")
+
+    def _export_fft_to_csv(self, file_path: str):
+        """Export FFT Power Spectrum results to CSV format."""
+        import csv
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            # Header
+            writer.writerow(["FFT Power Spectrum Analysis Results"])
+            writer.writerow(
+                [f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+            )
+            writer.writerow([])
+
+            # Summary table
+            writer.writerow(["ROI Summary"])
+            writer.writerow(
+                [
+                    "ROI",
+                    "Dominant Period (hours)",
+                    "Dominant Frequency (Hz)",
+                    "Spectral Power",
+                    "Number of Peaks",
+                    "Mean Activity",
+                    "Std Activity",
+                ]
+            )
+
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    writer.writerow([roi_id, "Error", result["error"], "", "", "", ""])
+                    continue
+
+                dominant_period = result.get("dominant_period", 0)
+                dominant_freq = result.get("dominant_frequency", 0)
+                dominant_power = result.get("dominant_power", 0)
+                n_peaks = len(result.get("frequency_peaks", []))
+                mean_activity = result.get("mean_activity", 0)
+                std_activity = result.get("std_activity", 0)
+
+                writer.writerow(
+                    [
+                        roi_id,
+                        f"{dominant_period:.2f}",
+                        f"{dominant_freq:.6f}",
+                        f"{dominant_power:.2e}",
+                        n_peaks,
+                        f"{mean_activity:.4f}",
+                        f"{std_activity:.4f}",
+                    ]
+                )
+
+            # Detailed peak information
+            writer.writerow([])
+            writer.writerow(["Detailed Peak Information"])
+            writer.writerow(
+                [
+                    "ROI",
+                    "Peak #",
+                    "Period (hours)",
+                    "Frequency (Hz)",
+                    "Power",
+                    "Prominence",
+                ]
+            )
+
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    continue
+
+                peaks = result.get("frequency_peaks", [])
+                for idx, peak in enumerate(peaks[:5], 1):  # Top 5 peaks
+                    writer.writerow(
+                        [
+                            roi_id,
+                            idx,
+                            f"{peak['period_hours']:.2f}",
+                            f"{peak['frequency_hz']:.6f}",
+                            f"{peak['power']:.2e}",
+                            f"{peak['prominence']:.2e}",
+                        ]
+                    )
+
+    def _export_fft_to_excel(self, file_path: str):
+        """Export FFT Power Spectrum results to Excel format."""
+        import pandas as pd
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Summary
+            summary_data = []
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    summary_data.append(
+                        {
+                            "ROI": roi_id,
+                            "Error": result["error"],
+                            "Dominant_Period_h": None,
+                            "Dominant_Frequency_Hz": None,
+                            "Spectral_Power": None,
+                            "N_Peaks": None,
+                            "Mean_Activity": None,
+                            "Std_Activity": None,
+                        }
+                    )
+                    continue
+
+                summary_data.append(
+                    {
+                        "ROI": roi_id,
+                        "Error": None,
+                        "Dominant_Period_h": result.get("dominant_period", 0),
+                        "Dominant_Frequency_Hz": result.get("dominant_frequency", 0),
+                        "Spectral_Power": result.get("dominant_power", 0),
+                        "N_Peaks": len(result.get("frequency_peaks", [])),
+                        "Mean_Activity": result.get("mean_activity", 0),
+                        "Std_Activity": result.get("std_activity", 0),
+                    }
+                )
+
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+            # Sheet 2: All Peaks
+            all_peaks_data = []
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    continue
+
+                peaks = result.get("frequency_peaks", [])
+                for idx, peak in enumerate(peaks[:10], 1):  # Top 10 peaks
+                    all_peaks_data.append(
+                        {
+                            "ROI": roi_id,
+                            "Peak_Number": idx,
+                            "Period_hours": peak["period_hours"],
+                            "Frequency_Hz": peak["frequency_hz"],
+                            "Power": peak["power"],
+                            "Prominence": peak["prominence"],
+                        }
+                    )
+
+            if all_peaks_data:
+                peaks_df = pd.DataFrame(all_peaks_data)
+                peaks_df.to_excel(writer, sheet_name="Frequency_Peaks", index=False)
+
+            # Sheet 3: Full Power Spectra (for plotting)
+            # Export complete power spectrum data for each ROI
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    continue
+
+                # Get relevant period range data
+                relevant_periods = result.get("relevant_periods", [])
+                relevant_power = result.get("relevant_power", [])
+
+                if len(relevant_periods) > 0 and len(relevant_power) > 0:
+                    spectrum_data = pd.DataFrame(
+                        {
+                            "Period_hours": relevant_periods,
+                            "Power": relevant_power,
+                        }
+                    )
+                    # Limit to reasonable number of points for Excel (max 10000)
+                    if len(spectrum_data) > 10000:
+                        # Downsample by taking every nth point
+                        step = len(spectrum_data) // 10000 + 1
+                        spectrum_data = spectrum_data.iloc[::step]
+
+                    spectrum_data.to_excel(
+                        writer, sheet_name=f"ROI_{roi_id}_Spectrum", index=False
+                    )
+
+            # Sheet 4: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": ["Analysis Method", "Generated"],
+                    "Value": [
+                        "FFT Power Spectrum",
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
     def _export_fisher_to_csv(self, file_path: str):
         """Export Fisher results to CSV format."""
@@ -7918,7 +9077,34 @@ class HDF5AnalysisWidget(QWidget):
             summary_df = pd.DataFrame(summary_data)
             summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
-            # Sheet 2: Parameters
+            # Sheet 2: Full Periodograms (for plotting)
+            # Export complete periodogram data for each ROI
+            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+                if "error" in result:
+                    continue
+
+                periodogram = result.get("periodogram", {})
+                periods = periodogram.get("periods", [])
+                z_scores = periodogram.get("z_scores", [])
+
+                if len(periods) > 0 and len(z_scores) > 0:
+                    periodogram_data = pd.DataFrame(
+                        {
+                            "Period_hours": periods,
+                            "Z_Score": z_scores,
+                        }
+                    )
+                    # Limit to reasonable number of points for Excel (max 10000)
+                    if len(periodogram_data) > 10000:
+                        # Downsample by taking every nth point
+                        step = len(periodogram_data) // 10000 + 1
+                        periodogram_data = periodogram_data.iloc[::step]
+
+                    periodogram_data.to_excel(
+                        writer, sheet_name=f"ROI_{roi_id}_Periodogram", index=False
+                    )
+
+            # Sheet 3: Parameters
             params_df = pd.DataFrame(
                 {
                     "Parameter": [
@@ -7939,13 +9125,190 @@ class HDF5AnalysisWidget(QWidget):
             )
             params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
+    def _export_similarity_to_excel(self, file_path: str, similarity_results: Dict):
+        """Export ROI Similarity results to Excel format."""
+        import pandas as pd
+        import numpy as np
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Correlation Matrix
+            corr_matrix = similarity_results.get("correlation_matrix", np.array([]))
+            roi_ids = similarity_results.get("roi_ids", [])
+
+            if len(corr_matrix) > 0:
+                corr_df = pd.DataFrame(
+                    corr_matrix,
+                    index=[f"ROI {r}" for r in roi_ids],
+                    columns=[f"ROI {r}" for r in roi_ids],
+                )
+                corr_df.to_excel(writer, sheet_name="Correlation_Matrix")
+
+            # Sheet 2: Pairwise Correlations
+            pairwise_data = []
+            for i, roi1 in enumerate(roi_ids):
+                for j, roi2 in enumerate(roi_ids):
+                    if i < j:  # Upper triangle only
+                        correlation = corr_matrix[i, j]
+                        pairwise_data.append(
+                            {
+                                "ROI_1": roi1,
+                                "ROI_2": roi2,
+                                "Correlation": correlation,
+                                "Status": (
+                                    "Synchronized"
+                                    if correlation > 0.7
+                                    else ("Moderate" if correlation > 0.3 else "Low")
+                                ),
+                            }
+                        )
+
+            pairwise_df = pd.DataFrame(pairwise_data)
+            pairwise_df = pairwise_df.sort_values("Correlation", ascending=False)
+            pairwise_df.to_excel(
+                writer, sheet_name="Pairwise_Correlations", index=False
+            )
+
+            # Sheet 3: Clustering
+            if "clustering" in similarity_results:
+                cluster_info = similarity_results["clustering"]
+                cluster_data = []
+                for cluster_id, roi_list in cluster_info.get("clusters", {}).items():
+                    for roi in roi_list:
+                        cluster_data.append(
+                            {
+                                "ROI": roi,
+                                "Cluster": cluster_id,
+                                "Cluster_Size": len(roi_list),
+                            }
+                        )
+
+                cluster_df = pd.DataFrame(cluster_data)
+                cluster_df = cluster_df.sort_values(["Cluster", "ROI"])
+                cluster_df.to_excel(writer, sheet_name="Clusters", index=False)
+
+    def _export_coherence_to_excel(self, file_path: str, coherence_results: Dict):
+        """Export Coherence Analysis results to Excel format."""
+        import pandas as pd
+        import numpy as np
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Coherence Matrix
+            coherence_matrix = coherence_results.get("coherence_matrix", np.array([]))
+            roi_ids = coherence_results.get("roi_ids", [])
+            target_period = coherence_results.get("target_period_hours", 24.0)
+
+            if len(coherence_matrix) > 0:
+                coherence_df = pd.DataFrame(
+                    coherence_matrix,
+                    index=[f"ROI {r}" for r in roi_ids],
+                    columns=[f"ROI {r}" for r in roi_ids],
+                )
+                coherence_df.to_excel(writer, sheet_name="Coherence_Matrix")
+
+            # Sheet 2: Pairwise Coherence
+            pairwise_coherence = coherence_results.get("pairwise_coherence", {})
+            pairwise_data = []
+
+            for (roi1, roi2), result in pairwise_coherence.items():
+                pairwise_data.append(
+                    {
+                        "ROI_1": roi1,
+                        "ROI_2": roi2,
+                        "Coherence": result.get("circadian_coherence", 0),
+                        "Coherence_Period": result.get(
+                            "circadian_period", target_period
+                        ),
+                        "Max_Coherence": result.get("max_coherence", 0),
+                        "Max_Coherence_Period": result.get("max_coherence_period", 0),
+                        "Synchronized": (
+                            "Yes" if result.get("is_synchronized", False) else "No"
+                        ),
+                    }
+                )
+
+            pairwise_df = pd.DataFrame(pairwise_data)
+            pairwise_df = pairwise_df.sort_values("Coherence", ascending=False)
+            pairwise_df.to_excel(writer, sheet_name="Pairwise_Coherence", index=False)
+
+            # Sheet 3: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": ["Target Period", "Number of ROIs"],
+                    "Value": [f"{target_period:.1f} hours", str(len(roi_ids))],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
+
+    def _export_phase_clustering_to_excel(self, file_path: str, phase_results: Dict):
+        """Export Phase Clustering results to Excel format."""
+        import pandas as pd
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Phase Clusters
+            clusters = phase_results.get("clusters", {})
+            cluster_data = []
+
+            for cluster_name, cluster_info in clusters.items():
+                roi_list = cluster_info.get("rois", [])
+                for roi in roi_list:
+                    cluster_data.append(
+                        {
+                            "Cluster": cluster_name,
+                            "ROI": roi,
+                            "Cluster_Size": len(roi_list),
+                        }
+                    )
+
+            cluster_df = pd.DataFrame(cluster_data)
+            cluster_df = cluster_df.sort_values(["Cluster", "ROI"])
+            cluster_df.to_excel(writer, sheet_name="Phase_Clusters", index=False)
+
+            # Sheet 2: Individual ROI Phases
+            roi_phases = phase_results.get("roi_phases", {})
+            phase_data = []
+
+            for roi_id, phase_info in sorted(roi_phases.items()):
+                phase_data.append(
+                    {
+                        "ROI": roi_id,
+                        "Peak_Time_Hours": phase_info.get("peak_time_hours", 0),
+                        "Phase_Radians": phase_info.get("phase_radians", 0),
+                        "Amplitude": phase_info.get("amplitude", 0),
+                        "Mean_Activity": phase_info.get("mean_activity", 0),
+                    }
+                )
+
+            phase_df = pd.DataFrame(phase_data)
+            phase_df.to_excel(writer, sheet_name="ROI_Phases", index=False)
+
+            # Sheet 3: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": [
+                        "Dominant Period",
+                        "Total ROIs",
+                        "Number of Clusters",
+                    ],
+                    "Value": [
+                        f"{phase_results.get('dominant_period_hours', 0):.1f} hours",
+                        str(phase_results.get("n_rois", 0)),
+                        str(len(clusters)),
+                    ],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
+
     def _create_fisher_plot(self, fisher_results: Dict[int, Dict]):
         """Create and display periodogram plot for Fisher analysis results."""
         try:
             import matplotlib.pyplot as plt
-            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
             from qtpy.QtGui import QPixmap
             import io
+
+            # Close old figure if it exists to free memory
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+                self.fisher_plot_figure = None
 
             # Create figure with subplots
             n_rois = len(fisher_results)
@@ -7976,6 +9339,13 @@ class HDF5AnalysisWidget(QWidget):
 
                 periodogram = result.get("periodogram", {})
 
+                # Get ROI-specific color
+                roi_color = (
+                    self.roi_colors.get(roi_id, f"C{idx}")
+                    if hasattr(self, "roi_colors")
+                    else f"C{idx}"
+                )
+
                 if "error" in result or "error" in periodogram:
                     # Show error message
                     ax.text(
@@ -7995,28 +9365,44 @@ class HDF5AnalysisWidget(QWidget):
                     critical_z = periodogram.get("critical_z", 0)
                     is_significant = periodogram.get("is_significant", False)
 
-                    # Plot Z-scores
-                    ax.plot(periods, z_scores, "b-", linewidth=1.5, label="Z-score")
+                    # Plot Z-scores with ROI-specific color
+                    ax.plot(
+                        periods,
+                        z_scores,
+                        color=roi_color,
+                        linewidth=1.5,
+                        label="Z-score",
+                    )
 
                     # Plot significance threshold
                     if critical_z > 0:
                         ax.axhline(
                             y=critical_z,
-                            color="r",
+                            color="gray",
                             linestyle="--",
                             linewidth=1,
                             label="Significance",
                         )
 
-                    # Mark dominant period
+                    # Mark dominant period with point and vertical line
                     if is_significant:
                         dominant_period = periodogram.get("dominant_period", 0)
                         dominant_z = periodogram.get("dominant_z_score", 0)
+                        ax.axvline(
+                            x=dominant_period,
+                            color=roi_color,
+                            linestyle="--",
+                            linewidth=1.5,
+                            alpha=0.5,
+                        )
                         ax.plot(
                             dominant_period,
                             dominant_z,
-                            "ro",
+                            "o",
+                            color=roi_color,
                             markersize=8,
+                            markeredgecolor="black",
+                            markeredgewidth=1,
                             label=f"Peak: {dominant_period:.1f}h",
                         )
 
@@ -8036,6 +9422,9 @@ class HDF5AnalysisWidget(QWidget):
 
             plt.tight_layout()
 
+            # Store figure for later export
+            self.fisher_plot_figure = fig
+
             # Convert to QPixmap and display
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -8050,7 +9439,7 @@ class HDF5AnalysisWidget(QWidget):
                 )
             )
 
-            plt.close(fig)
+            # Note: Don't close fig - we need it for export
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create Fisher plot: {e}")
@@ -8696,7 +10085,7 @@ class HDF5AnalysisWidget(QWidget):
                     )
 
             # Save as GIF
-            self._log_message(f"   Saving GIF file...")
+            self._log_message("   Saving GIF file...")
             frames_for_gif[0].save(
                 file_path,
                 save_all=True,
