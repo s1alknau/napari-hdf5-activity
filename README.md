@@ -9,6 +9,34 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 
 ----------------------------------
 
+## Table of Contents
+
+- [Features](#features)
+- [Recent Updates (2025)](#recent-updates-2025)
+- [Changelog](#changelog)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Usage Examples](#usage-examples)
+- [Parameter Guide](#parameter-guide)
+- [AVI File Support](#avi-file-support)
+- [Output Files](#output-files)
+- [Technical Details](#technical-details)
+  - [HDF5 Structure Support](#hdf5-structure-support)
+  - [Complete Processing Pipeline](#complete-processing-pipeline)
+  - [Multiprocessing Implementation](#multiprocessing-implementation-and-performance)
+  - [LED-Based Lighting Detection](#led-based-lighting-detection)
+- [Troubleshooting](#troubleshooting)
+- [Scientific Background](#scientific-background)
+  - [Fischer Z-Transformation](#fischer-z-transformation-for-circadian-rhythm-detection)
+  - [Frame Viewer](#frame-viewer)
+- [Citation](#citation)
+- [Contributing](#contributing)
+- [License](#license)
+- [Issues](#issues)
+- [Acknowledgments](#acknowledgments)
+
+----------------------------------
+
 ## Features
 
 ### File Format Support
