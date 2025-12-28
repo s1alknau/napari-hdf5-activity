@@ -11,6 +11,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 
 ## Table of Contents
 
+- [Overview](#overview)
 - [Features](#features)
 - [Recent Updates (2025)](#recent-updates-2025)
 - [Changelog](#changelog)
@@ -25,6 +26,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
   - [Complete Processing Pipeline](#complete-processing-pipeline)
   - [Multiprocessing Implementation](#multiprocessing-implementation-and-performance)
   - [LED-Based Lighting Detection](#led-based-lighting-detection)
+- [📚 Additional Documentation](#-additional-documentation)
 - [Troubleshooting](#troubleshooting)
 - [Scientific Background](#scientific-background)
   - [Fischer Z-Transformation](#fischer-z-transformation-for-circadian-rhythm-detection)
@@ -34,6 +36,67 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - [License](#license)
 - [Issues](#issues)
 - [Acknowledgments](#acknowledgments)
+
+----------------------------------
+
+## Overview
+
+**napari-hdf5-activity** enables automated quantitative analysis of organism behavior in long-term timelapse recordings. Whether you're studying circadian rhythms, sleep-wake cycles, or locomotor activity patterns, this plugin transforms hours of video data into actionable insights.
+
+### Why Use This Plugin?
+
+**For Chronobiology & Behavioral Neuroscience Researchers:**
+- Analyze circadian rhythms and ultradian cycles in model organisms (C. elegans, Drosophila, zebrafish, Nematostella, etc.)
+- Automatically detect sleep/wake states based on movement patterns
+- Quantify activity levels across light/dark cycles with LED-based lighting detection
+- Statistical periodogram analysis (Fisher Z-transformation, FFT) to identify dominant rhythmic patterns
+
+**Key Advantages:**
+- **Automated ROI detection**: No manual tracking required - automatically identifies and monitors multiple organisms
+- **Optimized for large datasets**: Process hours of high-resolution recordings with multiprocessing (3-4× speedup)
+- **Publication-ready outputs**: Excel/CSV files with statistical metrics, publication-quality plots
+- **Flexible file support**: Works with both HDF5 timelapse files and standard AVI videos
+- **Memory efficient**: Dynamic RAM management adapts to your system's capabilities
+
+**Typical Use Cases:**
+- Screening mutant phenotypes for altered activity/sleep patterns
+- Monitoring drug effects on circadian behavior
+- Analyzing developmental changes in locomotor activity
+- Comparing activity patterns across environmental conditions
+
+----------------------------------
+
+## 📚 Additional Documentation
+
+Detailed documentation for advanced features and workflows:
+
+### Analysis & Methods
+- **[Extended Analysis Guide](EXTENDED_ANALYSIS.md)** - Comprehensive guide for rhythmic pattern analysis
+  - Fisher Z-Transformation Periodogram
+  - FFT Power Spectrum
+  - ROI Similarity Matrix
+  - Coherence Analysis
+  - Phase Clustering
+  - Scientific rationale and best practices
+
+### File Format Support
+- **[AVI Integration Guide](AVI_INTEGRATION_README.md)** - Working with AVI video files
+  - Single and batch AVI processing
+  - Temporal concatenation
+  - Frame interval configuration
+  - Best practices for video analysis
+
+### Performance & Optimization
+- **[Performance Optimizations](PERFORMANCE_OPTIMIZATIONS.md)** - Performance tuning and benchmarks
+  - RGB→Grayscale conversion optimization (10-100× speedup)
+  - Dynamic RAM management
+  - Worker thread improvements
+  - Real-world benchmark results (3.35× speedup with 4 processes)
+  - Hardware-specific recommendations
+
+### User Guides
+- **[User Guide](docs/USER_GUIDE.md)** - Detailed usage instructions
+- **[Circadian Analysis Guide](docs/CIRCADIAN_ANALYSIS.md)** - Circadian rhythm analysis workflows
 
 ----------------------------------
 
