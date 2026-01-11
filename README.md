@@ -670,7 +670,7 @@ When an organism moves, its body position changes relative to the background. Da
 
 **Y-Axis in Movement Plots**: "Movement (pixel intensity change)" - raw pixel difference values
 
-#### Step 2: MATLAB-Compatible Normalization
+#### Step 2: Data Normalization
 
 **Input**: Raw movement values from Step 1
 
@@ -680,7 +680,7 @@ For each ROI:
   normalized_data = raw_movement_values (no minimum subtraction)
 ```
 
-**Note**: True MATLAB compatibility means NO minimum subtraction. The data represents direct frame-to-frame pixel changes, matching MATLAB's `framePixelChange` calculation.
+**Note**: The data represents direct frame-to-frame pixel changes.
 
 **Units After Normalization**: Same as raw movement values (0-255 or 0-65535)
 
@@ -1747,7 +1747,7 @@ m_i,t = C_i,t / N_i
 - Units: 0-255 (8-bit) or 0-65535 (16-bit)
 - Physical meaning: Magnitude of brightness changes due to organism movement
 
-**MATLAB Compatibility:**
+**Normalization:**
 ```
 m̃_i,t = m_i,t  (no minimum subtraction)
 ```

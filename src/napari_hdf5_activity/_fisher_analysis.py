@@ -1,9 +1,10 @@
 """
-_fisher_analysis.py - Fischer Z-transformation for circadian pattern detection
+_fisher_analysis.py - Fischer Z-transformation for periodic pattern detection
 
-This module implements Fischer's Z-transformation to detect recurring sleep/wake
-patterns in activity data. The method is particularly useful for identifying
-circadian rhythms and periodic behavioral patterns.
+This module implements Fischer's Z-transformation to detect periodic patterns
+in activity data. The method identifies the dominant period(s) and their
+statistical significance, but does not directly classify sleep/wake timing.
+For actual sleep/wake timing, use the Main Analysis Quiescence and Sleep plots.
 """
 
 import numpy as np
@@ -125,116 +126,6 @@ def fisher_z_periodogram(
     }
 
 
-def detect_sleep_wake_phases(
-    time_series: np.ndarray,
-    dominant_period: float,
-    sampling_interval: float = 5.0,
-    phase_threshold: float = 0.5,
-) -> Dict[str, Any]:
-    """
-    Detect sleep and wake phases based on the dominant circadian period.
-
-    Args:
-        time_series: 1D array of activity values
-        dominant_period: Dominant period detected (hours)
-        sampling_interval: Time interval between samples (seconds)
-        phase_threshold: Threshold for classifying sleep vs wake
-
-    Returns:
-        Dictionary containing detected phases and their timing
-    """
-    sampling_hours = sampling_interval / 3600.0
-    period_samples = dominant_period / sampling_hours
-
-    # Calculate frequency
-    freq = 1.0 / period_samples
-    omega = 2 * np.pi * freq
-
-    # Create time indices
-    t = np.arange(len(time_series))
-
-    # Calculate cosine and sine components
-    cos_component = np.cos(omega * t)
-    sin_component = np.sin(omega * t)
-
-    # Fit the rhythm using linear regression
-    # Activity = A*cos(ωt) + B*sin(ωt) + C
-    X = np.column_stack([cos_component, sin_component, np.ones(len(time_series))])
-    coeffs, _, _, _ = np.linalg.lstsq(X, time_series, rcond=None)
-
-    A, B, C = coeffs
-
-    # Calculate fitted rhythm
-    fitted_rhythm = A * cos_component + B * sin_component + C
-
-    # Calculate amplitude and phase
-    amplitude = np.sqrt(A**2 + B**2)
-    phase_offset = np.arctan2(B, A)
-
-    # Normalize fitted rhythm to [0, 1] for phase detection
-    rhythm_normalized = (fitted_rhythm - fitted_rhythm.min()) / (
-        fitted_rhythm.max() - fitted_rhythm.min() + 1e-10
-    )
-
-    # Detect phases (wake = high activity, sleep = low activity)
-    wake_mask = rhythm_normalized > phase_threshold
-    sleep_mask = ~wake_mask
-
-    # Find phase transitions
-    transitions = np.diff(wake_mask.astype(int))
-    wake_onsets = np.where(transitions == 1)[0] + 1
-    sleep_onsets = np.where(transitions == -1)[0] + 1
-
-    # Convert to time in hours
-    time_hours = t * sampling_hours
-
-    # Create phase list with timing
-    wake_phases = []
-    for onset_idx in wake_onsets:
-        # Find corresponding offset
-        next_sleep = sleep_onsets[sleep_onsets > onset_idx]
-        if len(next_sleep) > 0:
-            offset_idx = next_sleep[0]
-            wake_phases.append(
-                {
-                    "start_hours": time_hours[onset_idx],
-                    "end_hours": time_hours[offset_idx],
-                    "duration_hours": time_hours[offset_idx] - time_hours[onset_idx],
-                    "start_idx": onset_idx,
-                    "end_idx": offset_idx,
-                }
-            )
-
-    sleep_phases = []
-    for onset_idx in sleep_onsets:
-        # Find corresponding offset
-        next_wake = wake_onsets[wake_onsets > onset_idx]
-        if len(next_wake) > 0:
-            offset_idx = next_wake[0]
-            sleep_phases.append(
-                {
-                    "start_hours": time_hours[onset_idx],
-                    "end_hours": time_hours[offset_idx],
-                    "duration_hours": time_hours[offset_idx] - time_hours[onset_idx],
-                    "start_idx": onset_idx,
-                    "end_idx": offset_idx,
-                }
-            )
-
-    return {
-        "fitted_rhythm": fitted_rhythm,
-        "rhythm_normalized": rhythm_normalized,
-        "amplitude": amplitude,
-        "phase_offset": phase_offset,
-        "wake_phases": wake_phases,
-        "sleep_phases": sleep_phases,
-        "n_wake_phases": len(wake_phases),
-        "n_sleep_phases": len(sleep_phases),
-        "wake_fraction": np.sum(wake_mask) / len(wake_mask),
-        "sleep_fraction": np.sum(sleep_mask) / len(sleep_mask),
-    }
-
-
 def analyze_roi_circadian_patterns(
     movement_data: Dict[int, List[Tuple[float, float]]],
     sampling_interval: float = 5.0,
@@ -254,7 +145,7 @@ def analyze_roi_circadian_patterns(
         min_period_hours: Minimum period to test (hours)
         max_period_hours: Maximum period to test (hours)
         significance_level: Statistical significance threshold
-        phase_threshold: Threshold for sleep/wake classification
+        phase_threshold: Threshold for sleep/wake classification (unused, kept for compatibility)
         bin_size_seconds: Optional bin size for averaging data (e.g., 60 for 1-minute bins)
                          If None, data is used as-is. Useful for high-resolution raw data.
 
@@ -290,25 +181,9 @@ def analyze_roi_circadian_patterns(
             significance_level=significance_level,
         )
 
-        # If significant rhythm detected, analyze sleep/wake phases
-        if periodogram.get("is_significant", False):
-            phase_analysis = detect_sleep_wake_phases(
-                values,
-                periodogram["dominant_period"],
-                sampling_interval=effective_interval,
-                phase_threshold=phase_threshold,
-            )
-        else:
-            phase_analysis = {
-                "error": "No significant circadian rhythm detected",
-                "wake_phases": [],
-                "sleep_phases": [],
-            }
-
         # Combine results
         results[roi_id] = {
             "periodogram": periodogram,
-            "phase_analysis": phase_analysis,
             "n_samples": len(values),
             "mean_activity": np.mean(values),
             "std_activity": np.std(values),
@@ -375,7 +250,7 @@ def generate_circadian_summary(results: Dict[int, Dict[str, Any]]) -> str:
     Returns:
         Formatted summary string
     """
-    summary_lines = ["=" * 60, "CIRCADIAN PATTERN ANALYSIS SUMMARY", "=" * 60, ""]
+    summary_lines = ["=" * 60, "RHYTHMIC PATTERN ANALYSIS SUMMARY", "=" * 60, ""]
 
     n_rois = len(results)
     n_significant = sum(
@@ -386,9 +261,83 @@ def generate_circadian_summary(results: Dict[int, Dict[str, Any]]) -> str:
 
     summary_lines.append(f"Total ROIs analyzed: {n_rois}")
     summary_lines.append(
-        f"ROIs with significant circadian rhythms: {n_significant} ({n_significant/n_rois*100:.1f}%)"
+        f"ROIs with significant rhythms: {n_significant} ({n_significant/n_rois*100:.1f}%)"
     )
     summary_lines.append("")
+
+    # Diagnostic checks for period range issues
+    warnings = []
+    boundary_count = 0
+    detected_periods = []
+
+    for roi_id, result in sorted(results.items()):
+        if "error" in result:
+            continue
+
+        periodogram = result.get("periodogram", {})
+        if not periodogram.get("is_significant", False):
+            continue
+
+        dominant_period = periodogram.get("dominant_period", 0)
+        if dominant_period > 0:
+            detected_periods.append(dominant_period)
+
+        # Check if period is at boundary
+        test_periods = periodogram.get("test_periods", [])
+        if len(test_periods) > 0:
+            min_period = min(test_periods)
+            max_period = max(test_periods)
+            period_range = max_period - min_period
+
+            # Check if dominant period is at boundary (within 5%)
+            boundary_threshold = period_range * 0.05
+            if (
+                abs(dominant_period - max_period) < boundary_threshold
+                or abs(dominant_period - min_period) < boundary_threshold
+            ):
+                boundary_count += 1
+
+    # Add warnings if issues detected
+    if boundary_count > n_significant * 0.3:  # More than 30% at boundaries
+        warnings.append(
+            f"⚠️  WARNING: {boundary_count}/{n_significant} ROIs have dominant periods at range boundaries.\n"
+            f"   This suggests the period range may be too narrow.\n"
+            f"   Consider expanding the period range to capture true rhythms."
+        )
+
+    # Check if detected periods cluster at extremes
+    if len(detected_periods) >= 3:
+        detected_periods_array = np.array(detected_periods)
+        min_detected = detected_periods_array.min()
+        max_detected = detected_periods_array.max()
+
+        # Get the analysis period range from first valid result
+        for result in results.values():
+            if "error" not in result:
+                periodogram = result.get("periodogram", {})
+                test_periods = periodogram.get("test_periods", [])
+                if len(test_periods) > 0:
+                    analysis_min = min(test_periods)
+                    analysis_max = max(test_periods)
+
+                    # Check if many periods are beyond typical ranges
+                    if max_detected > 12.0 and analysis_max < 24.0:
+                        warnings.append(
+                            f"ℹ️  INFO: Some detected periods exceed 12h (max: {max_detected:.1f}h).\n"
+                            f"   Consider extending max period to 24-36h for circadian analysis."
+                        )
+                    elif min_detected < 2.0 and analysis_min > 1.0:
+                        warnings.append(
+                            f"ℹ️  INFO: Some detected periods below 2h (min: {min_detected:.1f}h).\n"
+                            f"   Consider reducing min period to 0.5-1h for ultradian analysis."
+                        )
+                    break
+
+    if warnings:
+        summary_lines.extend(warnings)
+        summary_lines.append("")
+        summary_lines.append("=" * 60)
+        summary_lines.append("")
 
     for roi_id, result in sorted(results.items()):
         summary_lines.append(f"ROI {roi_id}:")
@@ -399,28 +348,30 @@ def generate_circadian_summary(results: Dict[int, Dict[str, Any]]) -> str:
             continue
 
         periodogram = result.get("periodogram", {})
-        phase_analysis = result.get("phase_analysis", {})
 
         if periodogram.get("is_significant", False):
+            dominant_period = periodogram.get("dominant_period", 0)
+
+            # Check for boundary warning for this specific ROI
+            boundary_marker = ""
+            test_periods = periodogram.get("test_periods", [])
+            if len(test_periods) > 0:
+                min_p = min(test_periods)
+                max_p = max(test_periods)
+                boundary_threshold = (max_p - min_p) * 0.05
+
+                if abs(dominant_period - max_p) < boundary_threshold:
+                    boundary_marker = f" ⚠️ (at upper boundary {max_p:.2f}h)"
+                elif abs(dominant_period - min_p) < boundary_threshold:
+                    boundary_marker = f" ⚠️ (at lower boundary {min_p:.2f}h)"
+
             summary_lines.append(
-                f"  ✓ Significant circadian rhythm detected (p={periodogram['p_value']:.4f})"
+                f"  ✓ Significant rhythm detected (p={periodogram['p_value']:.4f})"
             )
             summary_lines.append(
-                f"    Dominant period: {periodogram['dominant_period']:.2f} hours"
+                f"    Dominant period: {dominant_period:.2f} hours{boundary_marker}"
             )
             summary_lines.append(f"    Z-score: {periodogram['dominant_z_score']:.2f}")
-
-            if "wake_phases" in phase_analysis:
-                n_wake = len(phase_analysis["wake_phases"])
-                n_sleep = len(phase_analysis["sleep_phases"])
-                wake_frac = phase_analysis.get("wake_fraction", 0) * 100
-                sleep_frac = phase_analysis.get("sleep_fraction", 0) * 100
-
-                summary_lines.append(f"    Wake phases detected: {n_wake}")
-                summary_lines.append(f"    Sleep phases detected: {n_sleep}")
-                summary_lines.append(
-                    f"    Wake fraction: {wake_frac:.1f}% | Sleep fraction: {sleep_frac:.1f}%"
-                )
         else:
             summary_lines.append(
                 f"  ✗ No significant rhythm (p={periodogram.get('p_value', 1.0):.4f})"
