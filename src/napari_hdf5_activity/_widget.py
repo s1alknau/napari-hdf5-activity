@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QSlider,
     QSplitter,
+    QScrollArea,
 )
 
 try:
@@ -468,8 +469,20 @@ class HDF5AnalysisWidget(QWidget):
 
     def setup_ui(self):
         """Setup the user interface with all tabs."""
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+        # Create main layout
+        main_layout = QVBoxLayout()
+        self.setLayout(main_layout)
+
+        # Create scroll area to ensure GUI fits in window
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        # Create container widget for tab widget
+        container = QWidget()
+        container_layout = QVBoxLayout()
+        container.setLayout(container_layout)
 
         # Create tab widget
         self.tab_widget = QTabWidget()
@@ -485,7 +498,13 @@ class HDF5AnalysisWidget(QWidget):
         self.tab_widget.addTab(self.tab_extended, "Extended Analysis")
         self.tab_widget.addTab(self.tab_viewer, "Frame Viewer")
 
-        layout.addWidget(self.tab_widget)
+        container_layout.addWidget(self.tab_widget)
+
+        # Add container to scroll area
+        scroll_area.setWidget(container)
+
+        # Add scroll area to main layout
+        main_layout.addWidget(scroll_area)
 
         # Setup individual tabs
         self.setup_input_tab()
@@ -842,7 +861,12 @@ class HDF5AnalysisWidget(QWidget):
         self.quiescence_threshold.setRange(0.0, 1.0)
         self.quiescence_threshold.setValue(0.5)
         self.quiescence_threshold.setSingleStep(0.1)
-        self.quiescence_threshold.setToolTip("Quiescence threshold (0.5 recommended)")
+        self.quiescence_threshold.setToolTip(
+            "Quiescence threshold for fraction movement:\n"
+            "• fraction_movement < threshold → Quiescence = YES (resting)\n"
+            "• fraction_movement ≥ threshold → Quiescence = NO (active)\n"
+            "Default: 0.5 (less than 50% movement = quiescent)"
+        )
         behavior_layout.addRow("Quiescence Threshold:", self.quiescence_threshold)
 
         self.sleep_threshold_minutes = QSpinBox()
@@ -1187,6 +1211,60 @@ class HDF5AnalysisWidget(QWidget):
         time_range_layout.addWidget(self.btn_apply_time_range)
 
         layout.addWidget(time_range_group)
+
+        # Plot binning configuration (separate from analysis binning)
+        plot_binning_group = QGroupBox("Plot Binning (Visualization Only)")
+        plot_binning_layout = QHBoxLayout()
+        plot_binning_group.setLayout(plot_binning_layout)
+
+        self.plot_bin_minutes = QSpinBox()
+        self.plot_bin_minutes.setRange(0, 240)  # 0 = no rebinning, 1-240 minutes
+        self.plot_bin_minutes.setValue(10)  # Default 10 minutes
+        self.plot_bin_minutes.setSuffix(" min")
+        self.plot_bin_minutes.setSpecialValueText("Original (1 min)")
+        self.plot_bin_minutes.setToolTip(
+            "Re-bin data for visualization purposes.\n"
+            "0 = Use original binning from analysis (typically 1 min bins)\n"
+            "This does NOT affect analysis calculations.\n"
+            "Useful for publications (e.g., 60 min for circadian plots).\n"
+            "Original analysis uses 'Bin Size' from Behavior Analysis section."
+        )
+
+        # Preset buttons for common binning intervals
+        self.btn_plot_bin_original = QPushButton("Original")
+        self.btn_plot_bin_original.setToolTip("Use original binning (no re-binning)")
+        self.btn_plot_bin_10min = QPushButton("10 min")
+        self.btn_plot_bin_10min.setToolTip("Set plot binning to 10 minutes")
+        self.btn_plot_bin_30min = QPushButton("30 min")
+        self.btn_plot_bin_30min.setToolTip("Set plot binning to 30 minutes")
+        self.btn_plot_bin_60min = QPushButton("60 min")
+        self.btn_plot_bin_60min.setToolTip("Set plot binning to 60 minutes (1 hour)")
+
+        # Connect preset buttons
+        self.btn_plot_bin_original.clicked.connect(
+            lambda: self.plot_bin_minutes.setValue(0)
+        )
+        self.btn_plot_bin_10min.clicked.connect(
+            lambda: self.plot_bin_minutes.setValue(10)
+        )
+        self.btn_plot_bin_30min.clicked.connect(
+            lambda: self.plot_bin_minutes.setValue(30)
+        )
+        self.btn_plot_bin_60min.clicked.connect(
+            lambda: self.plot_bin_minutes.setValue(60)
+        )
+
+        plot_binning_layout.addWidget(QLabel("Plot Bin Size:"))
+        plot_binning_layout.addWidget(self.plot_bin_minutes)
+        plot_binning_layout.addWidget(QLabel("Presets:"))
+        plot_binning_layout.addWidget(self.btn_plot_bin_original)
+        plot_binning_layout.addWidget(self.btn_plot_bin_10min)
+        plot_binning_layout.addWidget(self.btn_plot_bin_30min)
+        plot_binning_layout.addWidget(self.btn_plot_bin_60min)
+        plot_binning_layout.addStretch()
+
+        layout.addWidget(time_range_group)
+        layout.addWidget(plot_binning_group)
         layout.addWidget(plot_config_group)
 
         # ===== SIMPLIFIED PLOT CONTROLS =====
@@ -1265,9 +1343,10 @@ class HDF5AnalysisWidget(QWidget):
         self.fisher_min_period.setSuffix(" hours")
         self.fisher_min_period.setToolTip(
             "Minimum period to test:\n"
-            "• 0.5-6h: Short activity cycles, ultradian rhythms\n"
-            "• 12-20h: Semi-circadian patterns\n"
-            "• 20-28h: Circadian rhythms (day/night cycles)"
+            "• 0.5-2h: Very fast ultradian rhythms\n"
+            "• 2-8h: Standard ultradian rhythms\n"
+            "• 8-12h: Extended ultradian/tidal rhythms\n"
+            "• 20-22h: Circadian rhythms (24h cycles)"
         )
         fisher_params_layout.addRow("Minimum Period:", self.fisher_min_period)
 
@@ -1279,9 +1358,10 @@ class HDF5AnalysisWidget(QWidget):
         self.fisher_max_period.setSuffix(" hours")
         self.fisher_max_period.setToolTip(
             "Maximum period to test:\n"
-            "• 6-8h: For short recordings\n"
-            "• 28-36h: For circadian analysis\n"
-            "• >48h: For longer cycles (needs multi-day recordings)"
+            "• 2-8h: Fast ultradian rhythms only\n"
+            "• 8-20h: Include infradian/extended rhythms\n"
+            "• 20-28h: Include circadian (24h) rhythms\n"
+            "• >28h: Longer multi-day cycles (requires 72h+ data)"
         )
         fisher_params_layout.addRow("Maximum Period:", self.fisher_max_period)
 
@@ -1295,16 +1375,6 @@ class HDF5AnalysisWidget(QWidget):
         )
         fisher_params_layout.addRow("Significance Level (α):", self.fisher_significance)
 
-        self.fisher_phase_threshold = QDoubleSpinBox()
-        self.fisher_phase_threshold.setRange(0.0, 1.0)
-        self.fisher_phase_threshold.setValue(0.5)
-        self.fisher_phase_threshold.setSingleStep(0.05)
-        self.fisher_phase_threshold.setDecimals(2)
-        self.fisher_phase_threshold.setToolTip(
-            "Threshold for classifying sleep vs wake phases (0-1)"
-        )
-        fisher_params_layout.addRow("Phase Threshold:", self.fisher_phase_threshold)
-
         layout.addWidget(fisher_params_group)
 
         # Quick preset buttons
@@ -1314,26 +1384,32 @@ class HDF5AnalysisWidget(QWidget):
 
         from qtpy.QtWidgets import QPushButton
 
-        btn_preset_short = QPushButton("Short Cycles\n(0.5-6h)")
+        btn_preset_short = QPushButton("Ultradian\n(0.5-8h)")
         btn_preset_short.setToolTip(
-            "For recordings <12 hours: detect ultradian rhythms and activity cycles"
+            "Ultradian rhythms: Periods shorter than ~12 hours\n"
+            "Good for: Fast oscillations, feeding cycles, short activity bouts\n"
+            "Requires: Any recording length"
         )
-        btn_preset_short.clicked.connect(lambda: self._set_period_preset(0.5, 6.0))
+        btn_preset_short.clicked.connect(lambda: self._set_period_preset(0.5, 8.0))
         preset_layout.addWidget(btn_preset_short)
 
-        btn_preset_medium = QPushButton("Semi-Daily\n(6-18h)")
+        btn_preset_medium = QPushButton("Infradian\n(8-20h)")
         btn_preset_medium.setToolTip(
-            "For recordings 12-24 hours: detect semi-circadian patterns"
+            "Infradian rhythms: Periods between ultradian and circadian\n"
+            "Good for: Extended activity/rest cycles, tidal rhythms\n"
+            "Requires: 24+ hour recordings"
         )
-        btn_preset_medium.clicked.connect(lambda: self._set_period_preset(6.0, 18.0))
+        btn_preset_medium.clicked.connect(lambda: self._set_period_preset(8.0, 20.0))
         preset_layout.addWidget(btn_preset_medium)
 
-        btn_preset_circadian = QPushButton("Circadian\n(12-36h)")
+        btn_preset_circadian = QPushButton("Circadian\n(20-28h)")
         btn_preset_circadian.setToolTip(
-            "For recordings >48 hours: detect day/night circadian rhythms"
+            "Circadian rhythms: ~24-hour day/night cycles\n"
+            "Good for: Daily activity patterns, sleep/wake cycles\n"
+            "Requires: 48+ hour recordings for reliable detection"
         )
         btn_preset_circadian.clicked.connect(
-            lambda: self._set_period_preset(12.0, 36.0)
+            lambda: self._set_period_preset(20.0, 28.0)
         )
         preset_layout.addWidget(btn_preset_circadian)
 
@@ -1358,15 +1434,17 @@ class HDF5AnalysisWidget(QWidget):
             [
                 "Fisher Z-Transformation",
                 "FFT Power Spectrum",
+                "Cosinor Analysis",
                 "ROI Similarity Matrix",
                 "Coherence Analysis",
                 "Phase Clustering",
             ]
         )
         self.fisher_method_combo.setToolTip(
-            "Select the circadian analysis method:\n"
-            "• Fisher Z: Statistical periodogram (default)\n"
-            "• FFT: Fast Fourier Transform spectrum\n"
+            "Select the rhythmic pattern analysis method:\n"
+            "• Fisher Z: Statistical periodogram (default, most robust)\n"
+            "• FFT: Fast Fourier Transform spectrum (good for noisy data)\n"
+            "• Cosinor: Cosine curve fitting (MESOR, Amplitude, Acrophase)\n"
             "• Similarity: Cross-correlation between ROIs\n"
             "• Coherence: Frequency-specific synchronization\n"
             "• Phase Clustering: Group ROIs by activity phase"
@@ -1377,6 +1455,201 @@ class HDF5AnalysisWidget(QWidget):
         method_layout.addRow("Method:", self.fisher_method_combo)
 
         layout.addWidget(method_group)
+
+        # Re-Binning Options for Extended Analysis
+        rebinning_group = QGroupBox("Analysis Binning (Optional)")
+        rebinning_layout = QVBoxLayout()
+        rebinning_group.setLayout(rebinning_layout)
+
+        # Info label
+        rebinning_info = QLabel(
+            "Re-bin fraction data for extended analysis. "
+            "Larger bins = smoother data, better for long periods. "
+            "Smaller bins = more detail, better for short periods."
+        )
+        rebinning_info.setWordWrap(True)
+        rebinning_info.setStyleSheet("color: #7f8c8d; font-size: 10px;")
+        rebinning_layout.addWidget(rebinning_info)
+
+        # Binning controls layout
+        binning_controls = QHBoxLayout()
+
+        binning_controls.addWidget(QLabel("Analysis Bin Size:"))
+
+        # Decrease button
+        self.btn_decrease_bin = QPushButton("−")
+        self.btn_decrease_bin.setMaximumWidth(30)
+        self.btn_decrease_bin.setToolTip("Decrease bin size")
+        self.btn_decrease_bin.clicked.connect(
+            lambda: self._adjust_analysis_bin_size(-1)
+        )
+        binning_controls.addWidget(self.btn_decrease_bin)
+
+        # Bin size spinbox
+        self.analysis_bin_size = QSpinBox()
+        self.analysis_bin_size.setRange(10, 600)
+        self.analysis_bin_size.setValue(
+            60
+        )  # Default: 60s (matches main analysis default)
+        self.analysis_bin_size.setSingleStep(10)
+        self.analysis_bin_size.setSuffix(" sec")
+        self.analysis_bin_size.setToolTip(
+            "Bin size for extended analysis.\n"
+            "Independent of main analysis bin size.\n"
+            "Data will be automatically re-binned if different from original."
+        )
+        self.analysis_bin_size.setMinimumWidth(100)
+        self.analysis_bin_size.valueChanged.connect(self._update_bin_size_info)
+        binning_controls.addWidget(self.analysis_bin_size)
+
+        # Increase button
+        self.btn_increase_bin = QPushButton("+")
+        self.btn_increase_bin.setMaximumWidth(30)
+        self.btn_increase_bin.setToolTip("Increase bin size")
+        self.btn_increase_bin.clicked.connect(lambda: self._adjust_analysis_bin_size(1))
+        binning_controls.addWidget(self.btn_increase_bin)
+
+        binning_controls.addWidget(QLabel("Presets:"))
+
+        # Preset buttons
+        self.btn_bin_original = QPushButton("Original")
+        self.btn_bin_original.setToolTip(
+            "Use original bin size from main analysis (typically 60s)"
+        )
+        self.btn_bin_original.clicked.connect(
+            lambda: self._set_analysis_bin_preset("original")
+        )
+        binning_controls.addWidget(self.btn_bin_original)
+
+        self.btn_bin_30s = QPushButton("30 sec")
+        self.btn_bin_30s.setToolTip(
+            "30 second bins - high resolution for short periods"
+        )
+        self.btn_bin_30s.clicked.connect(lambda: self._set_analysis_bin_preset(30))
+        binning_controls.addWidget(self.btn_bin_30s)
+
+        self.btn_bin_1min = QPushButton("1 min")
+        self.btn_bin_1min.setToolTip("1 minute bins - standard resolution")
+        self.btn_bin_1min.clicked.connect(lambda: self._set_analysis_bin_preset(60))
+        binning_controls.addWidget(self.btn_bin_1min)
+
+        self.btn_bin_5min = QPushButton("5 min")
+        self.btn_bin_5min.setToolTip("5 minute bins - smooth data for long periods")
+        self.btn_bin_5min.clicked.connect(lambda: self._set_analysis_bin_preset(300))
+        binning_controls.addWidget(self.btn_bin_5min)
+
+        self.btn_bin_10min = QPushButton("10 min")
+        self.btn_bin_10min.setToolTip(
+            "10 minute bins - very smooth data for circadian analysis"
+        )
+        self.btn_bin_10min.clicked.connect(lambda: self._set_analysis_bin_preset(600))
+        binning_controls.addWidget(self.btn_bin_10min)
+
+        binning_controls.addStretch()
+
+        rebinning_layout.addLayout(binning_controls)
+
+        # Display current vs original bin size
+        self.bin_size_info_label = QLabel("")
+        self.bin_size_info_label.setStyleSheet(
+            "color: #27ae60; font-size: 10px; font-style: italic;"
+        )
+        rebinning_layout.addWidget(self.bin_size_info_label)
+
+        # Data source selection (fraction vs raw movement)
+        data_source_layout = QHBoxLayout()
+        data_source_layout.addWidget(QLabel("Data Source:"))
+
+        self.data_source_combo = QComboBox()
+        self.data_source_combo.addItems(
+            ["Fraction Movement (0-1)", "Raw Movement (pixel differences)"]
+        )
+        self.data_source_combo.setCurrentIndex(0)  # Default: fraction movement
+        self.data_source_combo.setToolTip(
+            "Choose data source for extended analysis:\n"
+            "• Fraction Movement: Normalized activity (0-1), recommended for most analyses\n"
+            "• Raw Movement: Absolute pixel differences, useful for amplitude comparisons"
+        )
+        self.data_source_combo.currentIndexChanged.connect(self._on_data_source_changed)
+        data_source_layout.addWidget(self.data_source_combo)
+        data_source_layout.addStretch()
+
+        rebinning_layout.addLayout(data_source_layout)
+
+        layout.addWidget(rebinning_group)
+
+        # Cycle/Period Selection for Post-Hoc Analysis
+        cycle_selection_group = QGroupBox("Time Range Selection (Optional)")
+        cycle_selection_layout = QFormLayout()
+        cycle_selection_group.setLayout(cycle_selection_layout)
+
+        # Enable cycle selection checkbox
+        self.enable_cycle_selection = QCheckBox("Analyze specific time range only")
+        self.enable_cycle_selection.setToolTip(
+            "Enable this to analyze only a specific portion of your recording.\n"
+            "Useful for cycle-specific analysis or comparing different time periods."
+        )
+        self.enable_cycle_selection.stateChanged.connect(
+            self._on_cycle_selection_toggled
+        )
+        cycle_selection_layout.addRow("", self.enable_cycle_selection)
+
+        # Start time selection
+        self.cycle_start_time = QDoubleSpinBox()
+        self.cycle_start_time.setRange(0.0, 10000.0)
+        self.cycle_start_time.setValue(0.0)
+        self.cycle_start_time.setSingleStep(1.0)
+        self.cycle_start_time.setDecimals(1)
+        self.cycle_start_time.setSuffix(" hours")
+        self.cycle_start_time.setEnabled(False)
+        self.cycle_start_time.setToolTip(
+            "Start time of the analysis window (hours from recording start)"
+        )
+        cycle_selection_layout.addRow("Start Time:", self.cycle_start_time)
+
+        # End time selection
+        self.cycle_end_time = QDoubleSpinBox()
+        self.cycle_end_time.setRange(0.0, 10000.0)
+        self.cycle_end_time.setValue(24.0)
+        self.cycle_end_time.setSingleStep(1.0)
+        self.cycle_end_time.setDecimals(1)
+        self.cycle_end_time.setSuffix(" hours")
+        self.cycle_end_time.setEnabled(False)
+        self.cycle_end_time.setToolTip(
+            "End time of the analysis window (hours from recording start)"
+        )
+        cycle_selection_layout.addRow("End Time:", self.cycle_end_time)
+
+        # Quick cycle selection buttons
+        cycle_buttons_layout = QHBoxLayout()
+
+        self.btn_cycle_first24 = QPushButton("First 24h")
+        self.btn_cycle_first24.setToolTip("Analyze first 24 hours of recording")
+        self.btn_cycle_first24.clicked.connect(lambda: self._set_cycle_range(0, 24))
+        self.btn_cycle_first24.setEnabled(False)
+        cycle_buttons_layout.addWidget(self.btn_cycle_first24)
+
+        self.btn_cycle_second24 = QPushButton("Second 24h")
+        self.btn_cycle_second24.setToolTip("Analyze hours 24-48 of recording")
+        self.btn_cycle_second24.clicked.connect(lambda: self._set_cycle_range(24, 48))
+        self.btn_cycle_second24.setEnabled(False)
+        cycle_buttons_layout.addWidget(self.btn_cycle_second24)
+
+        self.btn_cycle_last24 = QPushButton("Last 24h")
+        self.btn_cycle_last24.setToolTip("Analyze last 24 hours of recording")
+        self.btn_cycle_last24.clicked.connect(self._set_cycle_last_24h)
+        self.btn_cycle_last24.setEnabled(False)
+        cycle_buttons_layout.addWidget(self.btn_cycle_last24)
+
+        self.btn_cycle_reset = QPushButton("Full Recording")
+        self.btn_cycle_reset.setToolTip("Reset to analyze entire recording")
+        self.btn_cycle_reset.clicked.connect(self._reset_cycle_range)
+        self.btn_cycle_reset.setEnabled(False)
+        cycle_buttons_layout.addWidget(self.btn_cycle_reset)
+
+        cycle_selection_layout.addRow("", cycle_buttons_layout)
+
+        layout.addWidget(cycle_selection_group)
 
         # Buttons layout
         buttons_layout = QHBoxLayout()
@@ -1436,17 +1709,32 @@ class HDF5AnalysisWidget(QWidget):
         fisher_plot_layout = QVBoxLayout()
         self.fisher_plot_widget.setLayout(fisher_plot_layout)
 
+        # Plot header with title and pop-out button
+        plot_header_layout = QHBoxLayout()
         fisher_plot_label = QLabel("Periodogram Plot")
         fisher_plot_label.setStyleSheet("font-weight: bold;")
-        fisher_plot_layout.addWidget(fisher_plot_label)
+        plot_header_layout.addWidget(fisher_plot_label)
+
+        plot_header_layout.addStretch()
+
+        # Button to open plot in separate window
+        self.btn_popout_plot = QPushButton("🗖 Open in Separate Window")
+        self.btn_popout_plot.setToolTip("Open plot in a larger, resizable window")
+        self.btn_popout_plot.setMaximumWidth(200)
+        self.btn_popout_plot.clicked.connect(self._open_plot_window)
+        self.btn_popout_plot.setEnabled(False)  # Enable after first plot
+        plot_header_layout.addWidget(self.btn_popout_plot)
+
+        fisher_plot_layout.addLayout(plot_header_layout)
 
         self.fisher_plot_canvas = QLabel()
         self.fisher_plot_canvas.setMinimumSize(400, 300)
+        self.fisher_plot_canvas.setScaledContents(False)  # Maintain aspect ratio
         self.fisher_plot_canvas.setStyleSheet(
             "border: 1px solid #ccc; background-color: white;"
         )
         self.fisher_plot_canvas.setAlignment(Qt.AlignCenter)
-        fisher_plot_layout.addWidget(self.fisher_plot_canvas)
+        fisher_plot_layout.addWidget(self.fisher_plot_canvas, 1)  # Allow expansion
 
         splitter.addWidget(self.fisher_plot_widget)
 
@@ -3439,6 +3727,14 @@ class HDF5AnalysisWidget(QWidget):
 
     def run_analysis(self):
         """Start analysis using the separated calculation module."""
+        # Check if analysis is already running
+        if hasattr(self, "current_worker") and self.current_worker is not None:
+            self._log_message(
+                "⚠️ Analysis already running! Please wait or stop current analysis first."
+            )
+            self.status_label.setText("Analysis already running!")
+            return
+
         if not self.masks:
             self.status_label.setText(
                 "Error: No ROIs detected. Please run ROI detection first."
@@ -4078,6 +4374,19 @@ class HDF5AnalysisWidget(QWidget):
         # Stop performance monitoring
         self.performance_timer.stop()
 
+        # Try to gracefully stop the worker
+        if hasattr(self, "current_worker") and self.current_worker is not None:
+            try:
+                # Disconnect signals to prevent callbacks during shutdown
+                self.current_worker.returned.disconnect()
+                self.current_worker.errored.disconnect()
+                self.current_worker.finished.disconnect()
+            except Exception as e:
+                self._log_message(f"Warning during worker cleanup: {e}")
+
+            # Clear worker reference
+            self.current_worker = None
+
         # Reset UI state
         self.btn_analyze.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -4215,6 +4524,7 @@ class HDF5AnalysisWidget(QWidget):
         self.performance_timer.stop()
         self._cancel_requested = False
         self.analysis_start_time = None
+        self.current_worker = None  # Clear worker reference
 
         # Reset UI state
         self.btn_analyze.setEnabled(True)
@@ -4352,7 +4662,12 @@ class HDF5AnalysisWidget(QWidget):
                 kwargs = create_hysteresis_kwargs(
                     widget_instance=self
                 )  # Keep merged_results for lighting
-                kwargs.update({"bin_minutes": 10})  # Smaller bins for smoother curves
+
+                # Use plot_bin_minutes from GUI (default 10 if not set)
+                plot_bin_value = getattr(self, "plot_bin_minutes", None)
+                bin_minutes = plot_bin_value.value() if plot_bin_value else 10
+                kwargs.update({"bin_minutes": bin_minutes})
+                self._log_message(f"Using plot binning: {bin_minutes} minutes")
 
                 # Extract LED data from HDF5 if available
                 led_data = self._extract_led_data_from_hdf5()
@@ -4437,13 +4752,23 @@ class HDF5AnalysisWidget(QWidget):
                     "white_led_power",
                     "led_white_power",
                     "white_led_power_percent",
-                    "led_power_percent",
                 ]
                 for name in white_led_names:
                     if name in timeseries:
                         white_led = timeseries[name][:]
                         self._log_message(f"Found white LED data: {name}")
                         break
+
+                # Special case: "led_power_percent" without specific white/IR separation
+                # This is typically IR-only systems (old recordings) - don't use for lighting detection
+                if white_led is None and "led_power_percent" in timeseries:
+                    self._log_message(
+                        "Found generic 'led_power_percent' but no white LED channel - likely IR-only system"
+                    )
+                    self._log_message(
+                        "→ Using legacy 12h light/dark cycles for visualization"
+                    )
+                    return None  # Will trigger legacy 12h cycle visualization
 
                 # Try to find IR LED data (various possible names)
                 ir_led = None
@@ -7860,79 +8185,436 @@ class HDF5AnalysisWidget(QWidget):
         methods = [
             "Fisher Z-Transformation",
             "FFT Power Spectrum",
+            "Cosinor Analysis",
             "ROI Similarity Matrix",
             "Coherence Analysis",
             "Phase Clustering",
         ]
         self._log_message(f"Analysis method changed to: {methods[index]}")
 
-    def _load_results_from_hdf5(self):
-        """Load pre-computed results directly from HDF5 file."""
-        import h5py
+    def _on_cycle_selection_toggled(self, state):
+        """Handle toggling of cycle selection checkbox."""
+        enabled = state == 2  # Qt.Checked = 2
 
-        if not hasattr(self, "file_path") or not self.file_path:
-            self.fisher_results_text.setPlainText(
-                "ERROR: No HDF5 file loaded.\n\n"
-                "Please load an HDF5 file first (Input tab -> Load File)."
+        # Enable/disable cycle selection controls
+        self.cycle_start_time.setEnabled(enabled)
+        self.cycle_end_time.setEnabled(enabled)
+        self.btn_cycle_first24.setEnabled(enabled)
+        self.btn_cycle_second24.setEnabled(enabled)
+        self.btn_cycle_last24.setEnabled(enabled)
+        self.btn_cycle_reset.setEnabled(enabled)
+
+        if enabled:
+            self._log_message(
+                "Time range selection enabled - analysis will use specified window"
             )
-            self._log_message("⚠️ Cannot load results: No HDF5 file loaded")
+        else:
+            self._log_message(
+                "Time range selection disabled - analysis will use full recording"
+            )
+
+    def _set_cycle_range(self, start_hours, end_hours):
+        """Set the cycle selection range to specific hours."""
+        self.cycle_start_time.setValue(start_hours)
+        self.cycle_end_time.setValue(end_hours)
+        self._log_message(f"Time range set to {start_hours:.1f}h - {end_hours:.1f}h")
+
+    def _set_cycle_last_24h(self):
+        """Set the cycle selection to the last 24 hours of the recording."""
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("⚠️ No data loaded - cannot determine recording duration")
+            return
+
+        # Get recording duration from first ROI
+        first_roi = list(self.merged_results.keys())[0]
+        data = self.merged_results[first_roi]
+
+        if not data:
+            self._log_message("⚠️ No data available")
+            return
+
+        # Calculate duration in hours
+        duration_seconds = data[-1][0] - data[0][0]
+        duration_hours = duration_seconds / 3600.0
+
+        if duration_hours < 24:
+            self._log_message(
+                f"⚠️ Recording is only {duration_hours:.1f}h - using full recording"
+            )
+            self._set_cycle_range(0, duration_hours)
+        else:
+            start_hours = duration_hours - 24
+            self._set_cycle_range(start_hours, duration_hours)
+
+    def _reset_cycle_range(self):
+        """Reset cycle selection to full recording."""
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("⚠️ No data loaded")
+            return
+
+        # Get recording duration from first ROI
+        first_roi = list(self.merged_results.keys())[0]
+        data = self.merged_results[first_roi]
+
+        if not data:
+            self._log_message("⚠️ No data available")
+            return
+
+        # Calculate duration in hours
+        duration_seconds = data[-1][0] - data[0][0]
+        duration_hours = duration_seconds / 3600.0
+
+        self._set_cycle_range(0, duration_hours)
+
+    def _adjust_analysis_bin_size(self, direction):
+        """Adjust analysis bin size by one step in the given direction."""
+        current = self.analysis_bin_size.value()
+        step = self.analysis_bin_size.singleStep()
+        new_value = current + (direction * step)
+
+        # Clamp to valid range
+        new_value = max(
+            self.analysis_bin_size.minimum(),
+            min(self.analysis_bin_size.maximum(), new_value),
+        )
+        self.analysis_bin_size.setValue(new_value)
+
+    def _set_analysis_bin_preset(self, preset):
+        """Set analysis bin size to a preset value."""
+        if preset == "original":
+            # Use original bin size from main analysis
+            original_bin = (
+                self.bin_size_seconds.value()
+                if hasattr(self, "bin_size_seconds")
+                else 60
+            )
+            self.analysis_bin_size.setValue(original_bin)
+            self._log_message(f"Analysis bin size set to original: {original_bin}s")
+        else:
+            # Numeric preset
+            self.analysis_bin_size.setValue(preset)
+            self._log_message(f"Analysis bin size set to: {preset}s")
+
+    def _update_bin_size_info(self):
+        """Update the info label showing bin size comparison."""
+        analysis_bin = self.analysis_bin_size.value()
+        original_bin = (
+            self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+        )
+
+        if analysis_bin == original_bin:
+            self.bin_size_info_label.setText(
+                f"✓ Using original bin size ({original_bin}s) - no re-binning needed"
+            )
+            self.bin_size_info_label.setStyleSheet(
+                "color: #27ae60; font-size: 10px; font-style: italic;"
+            )
+        elif analysis_bin > original_bin:
+            factor = analysis_bin / original_bin
+            self.bin_size_info_label.setText(
+                f"⚠ Data will be re-binned: {original_bin}s → {analysis_bin}s ({factor:.1f}x larger bins)"
+            )
+            self.bin_size_info_label.setStyleSheet(
+                "color: #f39c12; font-size: 10px; font-style: italic;"
+            )
+        else:
+            self.bin_size_info_label.setText(
+                f"⚠ Cannot re-bin to smaller size: {analysis_bin}s < {original_bin}s (original). Using original."
+            )
+            self.bin_size_info_label.setStyleSheet(
+                "color: #e74c3c; font-size: 10px; font-style: italic;"
+            )
+
+    def _on_data_source_changed(self, index):
+        """Handle change in data source selection."""
+        source_names = ["Fraction Movement (0-1)", "Raw Movement (pixel differences)"]
+        self._log_message(f"Data source changed to: {source_names[index]}")
+
+    def _rebin_timeseries_data(
+        self,
+        data_dict: Dict[int, List[Tuple[float, float]]],
+        new_bin_size: int,
+        original_bin_size: int,
+    ) -> Dict[int, List[Tuple[float, float]]]:
+        """
+        Re-bin timeseries data to a larger bin size.
+
+        Args:
+            data_dict: Dictionary of {roi_id: [(time, value), ...]}
+            new_bin_size: New bin size in seconds
+            original_bin_size: Original bin size in seconds
+
+        Returns:
+            Dictionary with re-binned data
+        """
+        if new_bin_size <= original_bin_size:
+            # Cannot re-bin to smaller size, return original
+            return data_dict
+
+        # Calculate binning factor (must be integer for proper binning)
+        factor = int(round(new_bin_size / original_bin_size))
+
+        rebinned_data = {}
+
+        for roi_id, timeseries in data_dict.items():
+            if not timeseries:
+                rebinned_data[roi_id] = []
+                continue
+
+            # Group data points into larger bins
+            rebinned = []
+            for i in range(0, len(timeseries), factor):
+                bin_data = timeseries[i : i + factor]
+
+                if not bin_data:
+                    continue
+
+                # Use middle timepoint of the bin
+                times = [t for t, _ in bin_data]
+                values = [v for _, v in bin_data]
+
+                avg_time = sum(times) / len(times)
+                avg_value = sum(values) / len(values)
+
+                rebinned.append((avg_time, avg_value))
+
+            rebinned_data[roi_id] = rebinned
+
+        return rebinned_data
+
+    def _load_results_from_hdf5(self):
+        """Load ALL analysis results from HDF5 file (core + extended analysis)."""
+        from qtpy.QtWidgets import QFileDialog
+        from ._results_io import load_comprehensive_results
+
+        # Open file dialog to select results file
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Results from HDF5",
+            "",
+            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+        )
+
+        if not file_path:
+            self._log_message("Load cancelled by user")
             return
 
         try:
-            self._log_message(f"Loading results from HDF5: {self.file_path}")
+            self._log_message(f"Loading comprehensive results from: {file_path}")
 
-            with h5py.File(self.file_path, "r") as f:
-                # Check if results group exists
-                if "results" not in f:
-                    self.fisher_results_text.setPlainText(
-                        "ERROR: No 'results' group found in HDF5 file.\n\n"
-                        "This file does not contain pre-computed analysis results."
+            # Load all results using comprehensive load function
+            loaded_data = load_comprehensive_results(file_path)
+
+            # Restore core analysis results
+            if "core_analysis" in loaded_data:
+                core = loaded_data["core_analysis"]
+
+                # Restore movement data
+                if "movement_data" in core:
+                    self.merged_results = core["movement_data"]
+                    self._log_message(
+                        f"  ✓ Loaded movement data for {len(self.merged_results)} ROIs"
                     )
-                    self._log_message("⚠️ No 'results' group found in HDF5 file")
-                    return
 
-                results_group = f["results"]
-                roi_ids = [
-                    int(key.split("_")[1])
-                    for key in results_group.keys()
-                    if key.startswith("roi_")
-                ]
-
-                if not roi_ids:
-                    self.fisher_results_text.setPlainText(
-                        "ERROR: No ROI data found in results group."
+                # Restore fraction data
+                if "fraction_data" in core:
+                    self.fraction_data = core["fraction_data"]
+                    self._log_message(
+                        f"  ✓ Loaded fraction data for {len(self.fraction_data)} ROIs"
                     )
-                    self._log_message("⚠️ No ROI data found")
-                    return
 
-                # Load data for each ROI
-                self.merged_results = {}
-                self.fraction_data = {}
+                # Restore thresholds
+                if "thresholds" in core:
+                    self.roi_baseline_means = {}
+                    self.roi_upper_thresholds = {}
+                    self.roi_lower_thresholds = {}
 
-                for roi_id in roi_ids:
-                    roi_group = results_group[f"roi_{roi_id}"]
+                    for roi_id, thresh_data in core["thresholds"].items():
+                        self.roi_baseline_means[roi_id] = thresh_data.get(
+                            "baseline_mean", 0.0
+                        )
+                        self.roi_upper_thresholds[roi_id] = thresh_data.get(
+                            "upper_threshold", 0.0
+                        )
+                        self.roi_lower_thresholds[roi_id] = thresh_data.get(
+                            "lower_threshold", 0.0
+                        )
 
-                    # Load processed_data (preferred) or fraction_data
-                    if "processed_data" in roi_group:
-                        data = roi_group["processed_data"][:]
-                    elif "fraction_data" in roi_group:
-                        data = roi_group["fraction_data"][:]
+                    self._log_message(
+                        f"  ✓ Loaded thresholds for {len(self.roi_baseline_means)} ROIs"
+                    )
+
+            # Restore extended analysis results
+            if "extended_analysis" in loaded_data and loaded_data["extended_analysis"]:
+                extended = loaded_data["extended_analysis"]
+
+                # Restore fisher analysis results
+                if "results" in extended:
+                    self.fisher_analysis_results = extended["results"]
+                    self._log_message("  ✓ Loaded extended analysis results")
+
+                # Restore method selection
+                if "method_index" in extended:
+                    method_idx = extended["method_index"]
+                    self.current_fisher_method = method_idx
+                    if hasattr(self, "fisher_method_combo"):
+                        self.fisher_method_combo.setCurrentIndex(method_idx)
+                    self._log_message(
+                        f"  ✓ Restored analysis method: {extended.get('method_name', 'Unknown')}"
+                    )
+
+                    # Re-create plot for extended analysis
+                    if hasattr(self, "fisher_analysis_results"):
+                        self._create_circadian_plot(
+                            self.fisher_analysis_results, method_idx
+                        )
+
+                    # Generate and display summary
+                    if method_idx == 0:  # Fisher Z-Transformation
+                        from ._fisher_analysis import generate_circadian_summary
+
+                        summary = generate_circadian_summary(
+                            self.fisher_analysis_results
+                        )
+                    elif method_idx == 1:  # FFT Power Spectrum
+                        from ._circadian_fft import generate_fft_summary
+
+                        summary = generate_fft_summary(self.fisher_analysis_results)
+                    elif method_idx == 2:  # Cosinor Analysis
+                        summary = self._generate_cosinor_summary(
+                            self.fisher_analysis_results
+                        )
+                    elif method_idx == 3:  # ROI Similarity Matrix
+                        summary = self._generate_similarity_summary(
+                            self.fisher_analysis_results
+                        )
+                    elif method_idx == 4:  # Coherence Analysis
+                        summary = self._generate_coherence_summary(
+                            self.fisher_analysis_results
+                        )
+                    elif method_idx == 5:  # Phase Clustering
+                        summary = self._generate_phase_clustering_summary(
+                            self.fisher_analysis_results
+                        )
                     else:
-                        self._log_message(f"⚠️ ROI {roi_id}: No data found, skipping")
-                        continue
+                        summary = "Extended analysis results loaded successfully."
 
-                    # Convert to list of tuples
-                    data_list = [(float(t), float(v)) for t, v in data]
-                    self.merged_results[roi_id] = data_list
-                    self.fraction_data[roi_id] = data_list
+                    self.fisher_results_text.setPlainText(summary)
 
-                self._log_message(f"✓ Loaded data for {len(roi_ids)} ROIs from HDF5")
-                self.fisher_results_text.setPlainText(
-                    f"Successfully loaded results from HDF5!\n\n"
-                    f"ROIs loaded: {len(roi_ids)}\n"
-                    f"ROI IDs: {sorted(roi_ids)}\n\n"
-                    f"You can now run rhythmic pattern analysis."
+            # Restore analysis parameters
+            if "analysis_parameters" in loaded_data:
+                params = loaded_data["analysis_parameters"]
+
+                # Restore core parameters
+                if "core" in params:
+                    core_params = params["core"]
+                    if (
+                        "frame_interval" in core_params
+                        and core_params["frame_interval"] is not None
+                    ):
+                        if hasattr(self, "frame_interval"):
+                            self.frame_interval.setValue(core_params["frame_interval"])
+                    if (
+                        "bin_size_seconds" in core_params
+                        and core_params["bin_size_seconds"] is not None
+                    ):
+                        if hasattr(self, "bin_size_seconds"):
+                            self.bin_size_seconds.setValue(
+                                core_params["bin_size_seconds"]
+                            )
+
+                # Restore extended parameters
+                if "extended" in params:
+                    ext_params = params["extended"]
+                    if (
+                        "min_period_hours" in ext_params
+                        and ext_params["min_period_hours"] is not None
+                    ):
+                        if hasattr(self, "fisher_min_period"):
+                            self.fisher_min_period.setValue(
+                                ext_params["min_period_hours"]
+                            )
+                    if (
+                        "max_period_hours" in ext_params
+                        and ext_params["max_period_hours"] is not None
+                    ):
+                        if hasattr(self, "fisher_max_period"):
+                            self.fisher_max_period.setValue(
+                                ext_params["max_period_hours"]
+                            )
+                    if (
+                        "significance_level" in ext_params
+                        and ext_params["significance_level"] is not None
+                    ):
+                        if hasattr(self, "fisher_significance"):
+                            self.fisher_significance.setValue(
+                                ext_params["significance_level"]
+                            )
+
+                self._log_message("  ✓ Restored analysis parameters")
+
+            # Build summary message
+            summary_lines = [
+                "Successfully loaded comprehensive results from HDF5!",
+                "",
+                f"File: {file_path}",
+            ]
+
+            if hasattr(self, "merged_results") and self.merged_results:
+                summary_lines.append(f"ROIs loaded: {len(self.merged_results)}")
+                summary_lines.append(f"ROI IDs: {sorted(self.merged_results.keys())}")
+
+            summary_lines.append("")
+            summary_lines.append("Loaded Data:")
+
+            if hasattr(self, "merged_results") and self.merged_results:
+                summary_lines.append(
+                    f"  • Movement data: {len(self.merged_results)} ROIs"
                 )
+
+            if hasattr(self, "fraction_data") and self.fraction_data:
+                summary_lines.append(
+                    f"  • Fraction data: {len(self.fraction_data)} ROIs"
+                )
+
+            if hasattr(self, "roi_baseline_means") and self.roi_baseline_means:
+                summary_lines.append(
+                    f"  • Thresholds: {len(self.roi_baseline_means)} ROIs"
+                )
+
+            if (
+                hasattr(self, "fisher_analysis_results")
+                and self.fisher_analysis_results
+            ):
+                method_name = loaded_data.get("extended_analysis", {}).get(
+                    "method_name", "Unknown"
+                )
+                summary_lines.append(f"  • Extended analysis: {method_name}")
+
+            summary_lines.extend(
+                [
+                    "",
+                    "All analysis results have been restored.",
+                    "You can now perform post-hoc cycle/period analysis or export results.",
+                ]
+            )
+
+            self._log_message("✓ Successfully loaded comprehensive results")
+
+            # Only show summary in text widget if no extended analysis was loaded
+            # (if extended analysis was loaded, its summary is already shown above)
+            if not (
+                "extended_analysis" in loaded_data and loaded_data["extended_analysis"]
+            ):
+                self.fisher_results_text.setPlainText("\n".join(summary_lines))
+
+            # Enable export button if we have extended results
+            if (
+                hasattr(self, "fisher_analysis_results")
+                and self.fisher_analysis_results
+            ):
+                if hasattr(self, "btn_export_fisher"):
+                    self.btn_export_fisher.setEnabled(True)
 
         except Exception as e:
             self.fisher_results_text.setPlainText(
@@ -7944,10 +8626,10 @@ class HDF5AnalysisWidget(QWidget):
             traceback.print_exc()
 
     def _save_results_to_hdf5(self):
-        """Save current analysis results to HDF5 file."""
-        import h5py
+        """Save ALL analysis results to HDF5 file (core + extended analysis)."""
         from qtpy.QtWidgets import QFileDialog
         import os
+        from ._results_io import save_comprehensive_results
 
         # Check if we have results to save
         if not hasattr(self, "merged_results") or not self.merged_results:
@@ -7959,11 +8641,11 @@ class HDF5AnalysisWidget(QWidget):
             return
 
         # Open file dialog to select save location
-        default_name = "rhythmic_analysis_results.h5"
+        default_name = "comprehensive_analysis_results.h5"
         if hasattr(self, "file_path") and self.file_path:
             # Suggest name based on current file
             base_name = os.path.splitext(os.path.basename(self.file_path))[0]
-            default_name = f"{base_name}_rhythmic_results.h5"
+            default_name = f"{base_name}_comprehensive_results.h5"
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -7977,74 +8659,142 @@ class HDF5AnalysisWidget(QWidget):
             return
 
         try:
-            self._log_message(f"Saving results to: {file_path}")
+            self._log_message(f"Saving comprehensive results to: {file_path}")
 
-            with h5py.File(file_path, "w") as f:
-                # Create results group
-                results_group = f.create_group("results")
+            # Collect core analysis results
+            core_results = {
+                "movement_data": self.merged_results,
+                "fraction_data": getattr(self, "fraction_data", {}),
+                "roi_summary": {},
+                "thresholds": {},
+            }
 
-                # Save each ROI's data
-                for roi_id, data in self.merged_results.items():
-                    roi_group = results_group.create_group(f"roi_{roi_id}")
+            # Add threshold information if available
+            if hasattr(self, "roi_baseline_means"):
+                for roi_id in self.roi_baseline_means:
+                    core_results["thresholds"][roi_id] = {
+                        "baseline_mean": self.roi_baseline_means.get(roi_id, 0.0),
+                        "upper_threshold": self.roi_upper_thresholds.get(roi_id, 0.0),
+                        "lower_threshold": self.roi_lower_thresholds.get(roi_id, 0.0),
+                    }
 
-                    # Convert data to numpy array
-                    processed_data = [(float(t), float(v)) for t, v in data]
-                    processed_dtype = np.dtype([("time", "f8"), ("value", "f8")])
-                    processed_array = np.array(processed_data, dtype=processed_dtype)
+            # Collect extended analysis results if available
+            extended_results = None
+            if (
+                hasattr(self, "fisher_analysis_results")
+                and self.fisher_analysis_results
+            ):
+                extended_results = {
+                    "method_index": getattr(self, "current_fisher_method", 0),
+                    "method_name": (
+                        self.fisher_method_combo.currentText()
+                        if hasattr(self, "fisher_method_combo")
+                        else "Unknown"
+                    ),
+                    "results": self.fisher_analysis_results,
+                }
 
-                    # Save as processed_data
-                    roi_group.create_dataset("processed_data", data=processed_array)
+            # Collect analysis parameters
+            analysis_params = {
+                "core": {
+                    "frame_interval": (
+                        self.frame_interval.value()
+                        if hasattr(self, "frame_interval")
+                        else None
+                    ),
+                    "bin_size_seconds": (
+                        self.bin_size_seconds.value()
+                        if hasattr(self, "bin_size_seconds")
+                        else None
+                    ),
+                },
+                "extended": {
+                    "min_period_hours": (
+                        self.fisher_min_period.value()
+                        if hasattr(self, "fisher_min_period")
+                        else None
+                    ),
+                    "max_period_hours": (
+                        self.fisher_max_period.value()
+                        if hasattr(self, "fisher_max_period")
+                        else None
+                    ),
+                    "significance_level": (
+                        self.fisher_significance.value()
+                        if hasattr(self, "fisher_significance")
+                        else None
+                    ),
+                    "analysis_method": (
+                        self.fisher_method_combo.currentText()
+                        if hasattr(self, "fisher_method_combo")
+                        else None
+                    ),
+                },
+            }
 
-                    # Also save as fraction_data if available
-                    if hasattr(self, "fraction_data") and roi_id in self.fraction_data:
-                        fraction_array = np.array(
-                            self.fraction_data[roi_id], dtype=processed_dtype
-                        )
-                        roi_group.create_dataset("fraction_data", data=fraction_array)
-                    else:
-                        roi_group.create_dataset("fraction_data", data=processed_array)
+            # Collect metadata
+            metadata = {
+                "saved_from": "napari-hdf5-activity comprehensive analysis",
+                "save_timestamp": datetime.now().isoformat(),
+                "n_rois": len(self.merged_results),
+                "source_file": (
+                    os.path.basename(self.file_path)
+                    if hasattr(self, "file_path") and self.file_path
+                    else None
+                ),
+            }
 
-                    # Save metadata
-                    roi_group.attrs["roi_id"] = roi_id
-                    roi_group.attrs["n_samples"] = len(data)
-                    if data:
-                        times = [t for t, _ in data]
-                        roi_group.attrs["duration_seconds"] = max(times) - min(times)
-
-                # Save global metadata
-                meta_group = f.create_group("metadata")
-                meta_group.attrs["n_rois"] = len(self.merged_results)
-                meta_group.attrs["saved_from"] = (
-                    "napari-hdf5-activity rhythmic pattern analysis"
-                )
-
-                if hasattr(self, "frame_interval"):
-                    meta_group.attrs["frame_interval"] = self.frame_interval.value()
-
-                # Save analysis parameters if available
-                params_group = f.create_group("analysis_parameters")
-                params_group.attrs["min_period_hours"] = self.fisher_min_period.value()
-                params_group.attrs["max_period_hours"] = self.fisher_max_period.value()
-                params_group.attrs["significance_level"] = (
-                    self.fisher_significance.value()
-                )
-                params_group.attrs["phase_threshold"] = (
-                    self.fisher_phase_threshold.value()
-                )
-                params_group.attrs["analysis_method"] = (
-                    self.fisher_method_combo.currentText()
-                )
-
-            self._log_message(
-                f"✓ Successfully saved results for {len(self.merged_results)} ROIs"
+            # Save using comprehensive save function
+            success = save_comprehensive_results(
+                file_path=file_path,
+                core_results=core_results,
+                extended_results=extended_results,
+                analysis_params=analysis_params,
+                metadata=metadata,
             )
-            self.fisher_results_text.setPlainText(
-                f"Successfully saved results to HDF5!\n\n"
-                f"File: {file_path}\n"
-                f"ROIs saved: {len(self.merged_results)}\n"
-                f"ROI IDs: {sorted(self.merged_results.keys())}\n\n"
-                f"You can reload these results anytime using 'Load Results from HDF5'."
-            )
+
+            if success:
+                # Build summary message
+                summary_lines = [
+                    "Successfully saved comprehensive results to HDF5!",
+                    "",
+                    f"File: {file_path}",
+                    f"ROIs saved: {len(self.merged_results)}",
+                    f"ROI IDs: {sorted(self.merged_results.keys())}",
+                    "",
+                    "Saved Data:",
+                    f"  • Movement data: {len(self.merged_results)} ROIs",
+                ]
+
+                if hasattr(self, "fraction_data") and self.fraction_data:
+                    summary_lines.append(
+                        f"  • Fraction data: {len(self.fraction_data)} ROIs"
+                    )
+
+                if hasattr(self, "roi_baseline_means") and self.roi_baseline_means:
+                    summary_lines.append(
+                        f"  • Thresholds: {len(self.roi_baseline_means)} ROIs"
+                    )
+
+                if extended_results:
+                    summary_lines.append(
+                        f"  • Extended analysis: {extended_results['method_name']}"
+                    )
+
+                summary_lines.extend(
+                    [
+                        "",
+                        "You can reload these results anytime using 'Load Results from HDF5'.",
+                        "All data is available for post-hoc cycle/period analysis.",
+                    ]
+                )
+
+                self._log_message(
+                    f"✓ Successfully saved comprehensive results for {len(self.merged_results)} ROIs"
+                )
+                self.fisher_results_text.setPlainText("\n".join(summary_lines))
+            else:
+                raise Exception("Save operation returned failure status")
 
         except Exception as e:
             self.fisher_results_text.setPlainText(
@@ -8081,27 +8831,97 @@ class HDF5AnalysisWidget(QWidget):
             min_period = self.fisher_min_period.value()
             max_period = self.fisher_max_period.value()
             significance = self.fisher_significance.value()
-            phase_threshold = self.fisher_phase_threshold.value()
             sampling_interval = self.frame_interval.value()
 
-            # Use processed_data (raw signal) instead of fraction_data
-            if not hasattr(self, "merged_results") or not self.merged_results:
-                self.fisher_results_text.setPlainText(
-                    "ERROR: No processed data available.\n\n"
-                    "Please run the main analysis first."
-                )
-                self._log_message(
-                    "⚠️ No processed data available for rhythmic pattern analysis"
-                )
-                return
+            # Select data source based on user choice
+            data_source_index = self.data_source_combo.currentIndex()
+            if data_source_index == 0:
+                # Fraction movement (0-1)
+                if not hasattr(self, "fraction_data") or not self.fraction_data:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No fraction movement data available.\n\n"
+                        "Please run the main analysis first."
+                    )
+                    self._log_message(
+                        "⚠️ No fraction movement data available for rhythmic pattern analysis"
+                    )
+                    return
+                source_data = self.fraction_data
+                data_type_name = "Fraction Movement (0-1)"
+            else:
+                # Raw movement data
+                if not hasattr(self, "merged_results") or not self.merged_results:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No movement data available.\n\n"
+                        "Please run the main analysis first."
+                    )
+                    self._log_message(
+                        "⚠️ No movement data available for rhythmic pattern analysis"
+                    )
+                    return
+                source_data = self.merged_results
+                data_type_name = "Raw Movement (pixel differences)"
 
-            bin_size = 60  # Average raw data into 60-second bins
-            self._log_message(
-                f"  Analyzing processed signal data (binned to {bin_size}s)"
-            )
+            # Get bin sizes
+            original_bin_size = self.bin_size_seconds.value()
+            analysis_bin_size = self.analysis_bin_size.value()
+
+            self._log_message(f"  Data source: {data_type_name}")
+            self._log_message(f"  Original bin size: {original_bin_size}s")
+            self._log_message(f"  Analysis bin size: {analysis_bin_size}s")
             self._log_message(
                 f"  Detecting periods: {min_period:.1f} - {max_period:.1f} hours"
             )
+
+            # Apply re-binning if needed
+            if analysis_bin_size > original_bin_size:
+                self._log_message(
+                    f"  Re-binning data: {original_bin_size}s → {analysis_bin_size}s"
+                )
+                source_data = self._rebin_timeseries_data(
+                    source_data, analysis_bin_size, original_bin_size
+                )
+                bin_size = analysis_bin_size
+            else:
+                bin_size = original_bin_size
+
+            # Check if cycle/time range selection is enabled
+            analysis_data = source_data
+            if (
+                hasattr(self, "enable_cycle_selection")
+                and self.enable_cycle_selection.isChecked()
+            ):
+                # Apply time range filtering
+                from ._results_io import extract_subset_by_time_range
+
+                start_hours = self.cycle_start_time.value()
+                end_hours = self.cycle_end_time.value()
+
+                # Convert hours to seconds for filtering
+                start_time = start_hours * 3600.0
+                end_time = end_hours * 3600.0
+
+                # Create a temporary results dict with the data we need to filter
+                # Use appropriate key based on data source
+                data_key = (
+                    "fraction_data" if data_source_index == 0 else "movement_data"
+                )
+                temp_results = {"core_analysis": {data_key: source_data}}
+
+                # Extract subset
+                filtered_results = extract_subset_by_time_range(
+                    temp_results, start_time, end_time
+                )
+                analysis_data = filtered_results["core_analysis"][data_key]
+
+                self._log_message(
+                    f"  ✓ Time range filter applied: {start_hours:.1f}h - {end_hours:.1f}h"
+                )
+                self._log_message(
+                    f"  Analyzing {len(analysis_data)} ROIs in selected time window"
+                )
+            else:
+                self._log_message("  Using full recording for analysis")
 
             # Route to appropriate analysis method
             if method_index == 0:  # Fisher Z-Transformation
@@ -8109,25 +8929,39 @@ class HDF5AnalysisWidget(QWidget):
                     min_period,
                     max_period,
                     significance,
-                    phase_threshold,
                     sampling_interval,
                     bin_size,
+                    analysis_data,
                 )
             elif method_index == 1:  # FFT Power Spectrum
                 results, summary = self._run_fft_method(
-                    min_period, max_period, sampling_interval, bin_size
+                    min_period,
+                    max_period,
+                    significance,
+                    sampling_interval,
+                    bin_size,
+                    analysis_data,
                 )
-            elif method_index == 2:  # ROI Similarity Matrix
+            elif method_index == 2:  # Cosinor Analysis
+                results, summary = self._run_cosinor_method(
+                    min_period,
+                    max_period,
+                    significance,
+                    sampling_interval,
+                    bin_size,
+                    analysis_data,
+                )
+            elif method_index == 3:  # ROI Similarity Matrix
                 results, summary = self._run_similarity_method(
-                    sampling_interval, bin_size
+                    sampling_interval, bin_size, analysis_data
                 )
-            elif method_index == 3:  # Coherence Analysis
+            elif method_index == 4:  # Coherence Analysis
                 results, summary = self._run_coherence_method(
-                    sampling_interval, bin_size
+                    sampling_interval, bin_size, analysis_data
                 )
-            elif method_index == 4:  # Phase Clustering
+            elif method_index == 5:  # Phase Clustering
                 results, summary = self._run_phase_clustering_method(
-                    sampling_interval, bin_size
+                    sampling_interval, bin_size, analysis_data
                 )
             else:
                 raise ValueError(f"Unknown method index: {method_index}")
@@ -8160,9 +8994,9 @@ class HDF5AnalysisWidget(QWidget):
         min_period,
         max_period,
         significance,
-        phase_threshold,
         sampling_interval,
         bin_size,
+        fraction_data=None,
     ):
         """Run Fisher Z-Transformation analysis."""
         from ._fisher_analysis import (
@@ -8170,36 +9004,356 @@ class HDF5AnalysisWidget(QWidget):
             generate_circadian_summary,
         )
 
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
+        )
+
         results = analyze_roi_circadian_patterns(
-            self.merged_results,
+            data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             min_period_hours=min_period,
             max_period_hours=max_period,
             significance_level=significance,
-            phase_threshold=phase_threshold,
+            phase_threshold=0.5,  # Keep for backward compatibility, unused
             bin_size_seconds=bin_size,
         )
 
         summary = generate_circadian_summary(results)
         return results, summary
 
-    def _run_fft_method(self, min_period, max_period, sampling_interval, bin_size):
-        """Run FFT Power Spectrum analysis."""
+    def _run_fft_method(
+        self,
+        min_period,
+        max_period,
+        significance,
+        sampling_interval,
+        bin_size,
+        fraction_data=None,
+    ):
+        """Run FFT Power Spectrum analysis with significance testing."""
         from ._circadian_fft import analyze_roi_fft_patterns, generate_fft_summary
 
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
+        )
+
         results = analyze_roi_fft_patterns(
-            self.merged_results,
+            data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             min_period_hours=min_period,
             max_period_hours=max_period,
             bin_size_seconds=bin_size,
             window="hann",
+            significance_level=significance,
+            n_permutations=1000,  # Use 1000 permutations for good statistical power
         )
 
         summary = generate_fft_summary(results)
         return results, summary
 
-    def _run_similarity_method(self, sampling_interval, bin_size):
+    def _run_cosinor_method(
+        self,
+        min_period,
+        max_period,
+        significance,
+        sampling_interval,
+        bin_size,
+        fraction_data=None,
+    ):
+        """Run Cosinor analysis."""
+        from ._cosinor_analysis import (
+            multi_period_cosinor,
+            population_cosinor,
+        )
+
+        # Prepare test periods - test common periods in the specified range
+        test_periods = []
+        if min_period <= 12 and max_period >= 12:
+            test_periods.append(12.0)  # 12h ultradian
+        if min_period <= 24 and max_period >= 24:
+            test_periods.append(24.0)  # 24h circadian
+        if min_period <= 30 and max_period >= 30:
+            test_periods.append(30.0)  # 30h infradian
+
+        # Also add min, max, and midpoint
+        midpoint = (min_period + max_period) / 2
+        for p in [min_period, midpoint, max_period]:
+            if p not in test_periods:
+                test_periods.append(p)
+
+        test_periods = sorted(test_periods)
+
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
+        )
+
+        # Analyze each ROI with cosinor
+        roi_results = {}
+        population_time_series = []
+
+        for roi_id, data_list in data_to_analyze.items():
+            if not data_list:
+                continue
+
+            # Extract values only (consistent with Fisher Z and FFT approach)
+            # Both Fisher and FFT assume uniform sampling with sampling_interval
+            values = np.array([v for _, v in data_list])
+
+            # Multi-period cosinor for each ROI
+            # Pass timestamps=None to use uniform sampling (same as Fisher Z and FFT)
+            multi_result = multi_period_cosinor(
+                time_series=values,
+                timestamps=None,  # Use uniform sampling like Fisher Z and FFT
+                test_periods=test_periods,
+                sampling_interval=sampling_interval,
+                alpha=significance,
+            )
+
+            roi_results[roi_id] = multi_result
+            population_time_series.append(values)
+
+        # Population-level cosinor for best period across all ROIs
+        if population_time_series:
+            # Find the most common best period
+            best_periods = [
+                r["best_period"] for r in roi_results.values() if "best_period" in r
+            ]
+            if best_periods:
+                # Use median of best periods as population period
+                population_period = float(np.median(best_periods))
+
+                pop_result = population_cosinor(
+                    time_series_list=population_time_series,
+                    period_hours=population_period,
+                    sampling_interval=sampling_interval,
+                    alpha=significance,
+                )
+            else:
+                pop_result = {"error": "No valid ROI results"}
+        else:
+            pop_result = {"error": "No time series data"}
+
+        # Combine results
+        results = {
+            "roi_results": roi_results,
+            "population_result": pop_result,
+            "test_periods": test_periods,
+            "sampling_interval": sampling_interval,
+        }
+
+        # Generate summary
+        summary = self._generate_cosinor_summary(results)
+
+        return results, summary
+
+    def _generate_cosinor_summary(self, results):
+        """Generate text summary for cosinor analysis results."""
+        lines = [
+            "=" * 70,
+            "COSINOR ANALYSIS - Circadian Rhythm Quantification",
+            "=" * 70,
+            "",
+            "Cosinor analysis fits a cosine curve to activity data:",
+            "  y(t) = MESOR + Amplitude × cos(2πt/τ + Acrophase)",
+            "",
+            "Parameters:",
+            "  • MESOR: Midline Estimating Statistic of Rhythm (mean level)",
+            "  • Amplitude: Half the difference between peak and trough",
+            "  • Acrophase: Time of peak activity (phase angle)",
+            "  • Period (τ): Duration of one complete cycle",
+            "",
+        ]
+
+        roi_results = results.get("roi_results", {})
+        test_periods = results.get("test_periods", [])
+
+        # Diagnostic checks for period range issues
+        warnings = []
+        boundary_count = 0
+        best_periods = []
+
+        for roi_id, roi_data in roi_results.items():
+            best_result = roi_data.get("best_result", {})
+            if "error" in best_result or not best_result.get("significant", False):
+                continue
+
+            best_period = best_result.get("period", 0)
+            if best_period > 0:
+                best_periods.append(best_period)
+
+            # Check if best period is at boundary of test_periods
+            if len(test_periods) > 0:
+                min_test = min(test_periods)
+                max_test = max(test_periods)
+
+                # Check if best period matches boundary (exactly or very close)
+                if best_period == min_test or best_period == max_test:
+                    boundary_count += 1
+
+        # Generate warnings
+        n_significant = len(best_periods)
+        if (
+            boundary_count > n_significant * 0.3 and n_significant > 0
+        ):  # More than 30% at boundaries
+            warnings.append(
+                f"⚠️  WARNING: {boundary_count}/{n_significant} ROIs have best-fit periods at test range boundaries.\n"
+                f"   This suggests the period range may be too narrow.\n"
+                f"   Consider expanding the test period range to capture true rhythms."
+            )
+
+        # Check if best periods cluster at extremes
+        if len(best_periods) >= 3:
+            best_periods_array = np.array(best_periods)
+            min_best = best_periods_array.min()
+            max_best = best_periods_array.max()
+
+            if len(test_periods) > 0:
+                test_min = min(test_periods)
+                test_max = max(test_periods)
+
+                # Suggest expanding range if periods cluster near boundaries
+                if max_best > 12.0 and test_max < 24.0:
+                    warnings.append(
+                        f"ℹ️  INFO: Some best-fit periods exceed 12h (max: {max_best:.1f}h).\n"
+                        f"   Consider testing 24h period for circadian analysis."
+                    )
+                elif min_best < 2.0 and test_min > 1.0:
+                    warnings.append(
+                        f"ℹ️  INFO: Some best-fit periods below 2h (min: {min_best:.1f}h).\n"
+                        f"   Consider testing shorter periods (0.5-1h) for ultradian analysis."
+                    )
+
+        if warnings:
+            lines.extend(warnings)
+            lines.append("")
+
+        lines.extend(
+            [
+                "=" * 70,
+                "INDIVIDUAL ROI RESULTS",
+                "=" * 70,
+                "",
+            ]
+        )
+
+        for roi_id in sorted(roi_results.keys()):
+            roi_data = roi_results[roi_id]
+            best_result = roi_data.get("best_result", {})
+
+            if "error" in best_result:
+                lines.extend([f"ROI {roi_id}:", f"  Error: {best_result['error']}", ""])
+                continue
+
+            # Check if period is at boundary
+            best_period = best_result.get("period", 0)
+            boundary_marker = ""
+            if len(test_periods) > 0:
+                min_test = min(test_periods)
+                max_test = max(test_periods)
+                if best_period == max_test:
+                    boundary_marker = f" ⚠️ (at upper test boundary {max_test:.2f}h)"
+                elif best_period == min_test:
+                    boundary_marker = f" ⚠️ (at lower test boundary {min_test:.2f}h)"
+
+            lines.extend(
+                [
+                    f"ROI {roi_id}:",
+                    f"  Best-fit period: {best_period:.2f} hours{boundary_marker}",
+                    f"  MESOR (mean level): {best_result.get('mesor', 0):.4f}",
+                    f"  Amplitude: {best_result.get('amplitude', 0):.4f}",
+                    f"  Acrophase (peak time): {best_result.get('acrophase', 0):.2f} hours",
+                    f"  R²: {best_result.get('r_squared', 0):.3f}",
+                    f"  p-value: {best_result.get('p_value', 1):.4f} {'***' if best_result.get('p_value', 1) < 0.001 else '**' if best_result.get('p_value', 1) < 0.01 else '*' if best_result.get('p_value', 1) < 0.05 else 'ns'}",
+                    f"  Significant: {'YES' if best_result.get('significant', False) else 'NO'}",
+                ]
+            )
+
+            # Add confidence intervals if available
+            if "ci_amplitude" in best_result:
+                ci_amp = best_result["ci_amplitude"]
+                ci_acro = best_result["ci_acrophase"]
+                lines.extend(
+                    [
+                        f"  95% CI Amplitude: [{ci_amp[0]:.4f}, {ci_amp[1]:.4f}]",
+                        f"  95% CI Acrophase: [{ci_acro[0]:.2f}h, {ci_acro[1]:.2f}h]",
+                    ]
+                )
+
+            lines.append("")
+
+            # Show all tested periods
+            all_results = roi_data.get("all_results", [])
+            if all_results:
+                lines.append("  Tested periods:")
+                for res in all_results:
+                    sig_marker = "✓" if res.get("significant", False) else " "
+                    lines.append(
+                        f"    [{sig_marker}] {res.get('test_period', 0):.1f}h: "
+                        f"R²={res.get('r_squared', 0):.3f}, "
+                        f"Amp={res.get('amplitude', 0):.4f}, "
+                        f"p={res.get('p_value', 1):.4f}"
+                    )
+                lines.append("")
+
+        # Population-level results
+        pop_result = results.get("population_result", {})
+        if "error" not in pop_result:
+            lines.extend(
+                [
+                    "=" * 70,
+                    "POPULATION-LEVEL COSINOR",
+                    "=" * 70,
+                    "",
+                    f"Population MESOR: {pop_result.get('population_mesor', 0):.4f}",
+                    f"Population Amplitude: {pop_result.get('population_amplitude', 0):.4f}",
+                    f"Population Acrophase: {pop_result.get('population_acrophase', 0):.2f} hours",
+                    f"Test period: {pop_result.get('period', 0):.2f} hours",
+                    f"p-value: {pop_result.get('p_value', 1):.4f}",
+                    f"Significant rhythm: {'YES' if pop_result.get('significant', False) else 'NO'}",
+                    "",
+                    f"Individual ROIs analyzed: {pop_result.get('n_individuals', 0)}",
+                    f"ROIs with significant rhythm: {pop_result.get('n_significant', 0)} "
+                    f"({pop_result.get('proportion_significant', 0)*100:.1f}%)",
+                    "",
+                ]
+            )
+
+        lines.extend(
+            [
+                "=" * 70,
+                "INTERPRETATION GUIDE",
+                "=" * 70,
+                "",
+                "MESOR:",
+                "  The rhythm-adjusted mean activity level (baseline activity)",
+                "",
+                "Amplitude:",
+                "  Larger amplitude = stronger rhythm (higher variation from mean)",
+                "  Small amplitude suggests weak or no rhythmic pattern",
+                "",
+                "Acrophase:",
+                "  Time of peak activity in the cycle",
+                "  For 24h rhythm: 0h=start of recording, 12h=halfway through",
+                "",
+                "Significance (p-value):",
+                "  p < 0.05: Significant rhythm detected",
+                "  p < 0.01: Highly significant rhythm (**)",
+                "  p < 0.001: Very highly significant rhythm (***)",
+                "",
+                "R² (goodness of fit):",
+                "  >0.3: Strong rhythmic pattern",
+                "  0.1-0.3: Moderate rhythm",
+                "  <0.1: Weak or no rhythm",
+                "",
+            ]
+        )
+
+        return "\n".join(lines)
+
+    def _run_similarity_method(self, sampling_interval, bin_size, fraction_data=None):
         """Run ROI Similarity analysis."""
         from ._circadian_similarity import (
             calculate_roi_correlation_matrix,
@@ -8207,11 +9361,16 @@ class HDF5AnalysisWidget(QWidget):
             generate_similarity_summary,
         )
 
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
+        )
+
         # Use half of max period as max lag (adaptive to period range)
         max_lag = self.fisher_max_period.value() / 2
 
         correlation_results = calculate_roi_correlation_matrix(
-            self.merged_results,
+            data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             bin_size_seconds=bin_size,
             max_lag_hours=max_lag,
@@ -8228,11 +9387,16 @@ class HDF5AnalysisWidget(QWidget):
 
         return correlation_results, summary
 
-    def _run_coherence_method(self, sampling_interval, bin_size):
+    def _run_coherence_method(self, sampling_interval, bin_size, fraction_data=None):
         """Run Coherence analysis."""
         from ._circadian_coherence import (
             calculate_coherence_matrix,
             generate_coherence_summary,
+        )
+
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
         )
 
         # Use midpoint of period range from GUI instead of hardcoded 24h
@@ -8241,7 +9405,7 @@ class HDF5AnalysisWidget(QWidget):
         ) / 2
 
         results = calculate_coherence_matrix(
-            self.merged_results,
+            data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             bin_size_seconds=bin_size,
             target_period_hours=midpoint_period,
@@ -8250,9 +9414,16 @@ class HDF5AnalysisWidget(QWidget):
         summary = generate_coherence_summary(results)
         return results, summary
 
-    def _run_phase_clustering_method(self, sampling_interval, bin_size):
+    def _run_phase_clustering_method(
+        self, sampling_interval, bin_size, fraction_data=None
+    ):
         """Run Phase Clustering analysis."""
         from ._circadian_coherence import detect_phase_clusters
+
+        # Use provided fraction_data or default to self.fraction_data
+        data_to_analyze = (
+            fraction_data if fraction_data is not None else self.fraction_data
+        )
 
         # Use midpoint of period range from GUI instead of hardcoded 24h
         midpoint_period = (
@@ -8260,7 +9431,7 @@ class HDF5AnalysisWidget(QWidget):
         ) / 2
 
         results = detect_phase_clusters(
-            self.merged_results,
+            data_to_analyze,  # Use fraction_data (proportion 0-1)
             dominant_period_hours=midpoint_period,
             sampling_interval=sampling_interval,
             bin_size_seconds=bin_size,
@@ -8309,11 +9480,13 @@ class HDF5AnalysisWidget(QWidget):
             self._create_fisher_plot(results)
         elif method_index == 1:  # FFT Power Spectrum
             self._create_fft_plot(results)
-        elif method_index == 2:  # ROI Similarity Matrix
+        elif method_index == 2:  # Cosinor Analysis
+            self._create_cosinor_plot(results)
+        elif method_index == 3:  # ROI Similarity Matrix
             self._create_similarity_plot(results)
-        elif method_index == 3:  # Coherence Analysis
+        elif method_index == 4:  # Coherence Analysis
             self._create_coherence_plot(results)
-        elif method_index == 4:  # Phase Clustering
+        elif method_index == 5:  # Phase Clustering
             self._create_phase_cluster_plot(results)
 
     def _create_fft_plot(self, fft_results: Dict[int, Dict]):
@@ -8330,10 +9503,26 @@ class HDF5AnalysisWidget(QWidget):
             n_cols = min(3, n_rois)
             n_rows = (n_rois + n_cols - 1) // n_cols
 
+            # Calculate appropriate figure size
+            fig_width = 4 * n_cols
+            fig_height = 3 * n_rows
+
             fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+                n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
             )
             fig.suptitle("FFT Power Spectrum", fontsize=14, fontweight="bold")
+
+            # Find global Y-axis limits for consistent scaling
+            all_power = []
+            for result in fft_results.values():
+                if "relevant_power" in result and "error" not in result:
+                    all_power.extend(result["relevant_power"])
+
+            if all_power:
+                global_y_min = 0  # Power starts at 0
+                global_y_max = max(all_power) * 1.1  # Add 10% padding
+            else:
+                global_y_min, global_y_max = 0, 1
 
             for idx, (roi_id, result) in enumerate(sorted(fft_results.items())):
                 row, col = idx // n_cols, idx % n_cols
@@ -8363,10 +9552,16 @@ class HDF5AnalysisWidget(QWidget):
 
                     # Plot with ROI-specific color
                     ax.plot(periods, power, color=roi_color, linewidth=1.5)
-                    ax.set_xlabel("Period (hours)")
-                    ax.set_ylabel("Power")
-                    ax.set_title(f"ROI {roi_id}")
+                    ax.set_xlabel("Period (hours)", fontsize=9)
+                    ax.set_ylabel("Power", fontsize=9)
+                    # Use ROI color for title
+                    ax.set_title(
+                        f"ROI {roi_id}", fontsize=10, color=roi_color, fontweight="bold"
+                    )
                     ax.grid(True, alpha=0.3)
+
+                    # Apply global Y-axis scaling for consistency
+                    ax.set_ylim(global_y_min, global_y_max)
 
                     # Mark dominant period with vertical line and point
                     if "dominant_period" in result:
@@ -8399,7 +9594,191 @@ class HDF5AnalysisWidget(QWidget):
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+
+            # Scale pixmap to fit canvas while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                self.fisher_plot_canvas.size(),
+                1,  # Qt.KeepAspectRatio
+                1,  # Qt.SmoothTransformation
+            )
+            self.fisher_plot_canvas.setPixmap(scaled_pixmap)
+
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create FFT plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _create_cosinor_plot(self, cosinor_results: Dict):
+        """Create cosinor analysis plots showing data and fitted curves."""
+        try:
+            import matplotlib.pyplot as plt
+            from qtpy.QtGui import QPixmap
+            import io
+
+            if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
+                plt.close(self.fisher_plot_figure)
+
+            roi_results = cosinor_results.get("roi_results", {})
+            n_rois = len(roi_results)
+            n_cols = min(3, n_rois)
+            n_rows = (n_rois + n_cols - 1) // n_cols
+
+            fig, axes = plt.subplots(
+                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+            )
+            fig.suptitle(
+                "Cosinor Analysis - Activity and Fitted Curves",
+                fontsize=14,
+                fontweight="bold",
+            )
+
+            for idx, (roi_id, roi_data) in enumerate(sorted(roi_results.items())):
+                row, col = idx // n_cols, idx % n_cols
+                ax = axes[row, col]
+
+                # Get ROI-specific color
+                roi_color = (
+                    self.roi_colors.get(roi_id, f"C{idx}")
+                    if hasattr(self, "roi_colors")
+                    else f"C{idx}"
+                )
+
+                best_result = roi_data.get("best_result", {})
+
+                if "error" in best_result:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        f"ROI {roi_id}\n{best_result['error']}",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    continue
+
+                # Get activity data
+                if roi_id in self.fraction_data:
+                    times_hours = np.array(
+                        [t / 3600 for t, _ in self.fraction_data[roi_id]]
+                    )
+                    activity = np.array([v for _, v in self.fraction_data[roi_id]])
+
+                    # Plot actual data
+                    ax.scatter(
+                        times_hours,
+                        activity,
+                        alpha=0.3,
+                        s=10,
+                        color=roi_color,
+                        label="Activity data",
+                    )
+
+                    # Plot fitted curve
+                    fitted_curve = best_result.get("fitted_curve", [])
+                    if len(fitted_curve) > 0:
+                        ax.plot(
+                            times_hours,
+                            fitted_curve,
+                            color=roi_color,
+                            linewidth=2,
+                            label=f"Fitted curve ({best_result.get('period', 0):.1f}h)",
+                        )
+
+                        # Plot MESOR line
+                        mesor = best_result.get("mesor", 0)
+                        ax.axhline(
+                            y=mesor,
+                            color="gray",
+                            linestyle="--",
+                            linewidth=1,
+                            alpha=0.5,
+                            label=f"MESOR={mesor:.3f}",
+                        )
+
+                        # Mark acrophase
+                        acrophase = best_result.get("acrophase", 0)
+                        amplitude = best_result.get("amplitude", 0)
+                        peak_value = mesor + amplitude
+
+                        # Find x position for acrophase marker
+                        period = best_result.get("period", 24)
+                        # Show acrophase for first complete period
+                        if acrophase < times_hours[-1]:
+                            ax.plot(
+                                acrophase,
+                                peak_value,
+                                "^",
+                                color="red",
+                                markersize=10,
+                                markeredgecolor="black",
+                                markeredgewidth=0.5,
+                                label=f"Acrophase={acrophase:.1f}h",
+                            )
+
+                    # Add text box with parameters
+                    textstr = f"MESOR: {best_result.get('mesor', 0):.3f}\n"
+                    textstr += f"Amplitude: {best_result.get('amplitude', 0):.3f}\n"
+                    textstr += f"R²: {best_result.get('r_squared', 0):.3f}\n"
+                    textstr += f"p: {best_result.get('p_value', 1):.4f}"
+                    if best_result.get("significant", False):
+                        textstr += " *"
+
+                    ax.text(
+                        0.95,
+                        0.05,
+                        textstr,
+                        transform=ax.transAxes,
+                        fontsize=8,
+                        verticalalignment="bottom",
+                        horizontalalignment="right",
+                        bbox=dict(
+                            boxstyle="round", facecolor="wheat", alpha=0.5, pad=0.5
+                        ),
+                    )
+
+                ax.set_xlabel("Time (hours)")
+                ax.set_ylabel("Activity (fraction)")
+                # Use ROI color for title, bold if significant
+                is_significant = best_result.get("significant", False)
+                title_weight = "bold" if is_significant else "normal"
+                ax.set_title(f"ROI {roi_id}", color=roi_color, fontweight=title_weight)
+                ax.legend(fontsize=7, loc="upper left")
+                ax.grid(True, alpha=0.3)
+
+            # Hide unused subplots
+            for idx in range(n_rois, n_rows * n_cols):
+                axes[idx // n_cols, idx % n_cols].axis("off")
+
+            plt.tight_layout()
+            self.fisher_plot_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
@@ -8407,8 +9786,12 @@ class HDF5AnalysisWidget(QWidget):
                 pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
             )
 
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
+
         except Exception as e:
-            self._log_message(f"⚠️ Could not create FFT plot: {e}")
+            self._log_message(f"⚠️ Could not create Cosinor plot: {e}")
             import traceback
 
             traceback.print_exc()
@@ -8480,13 +9863,24 @@ class HDF5AnalysisWidget(QWidget):
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
             self.fisher_plot_canvas.setPixmap(
                 pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
             )
+
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create similarity plot: {e}")
@@ -8523,13 +9917,24 @@ class HDF5AnalysisWidget(QWidget):
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
             self.fisher_plot_canvas.setPixmap(
                 pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
             )
+
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create coherence plot: {e}")
@@ -8590,13 +9995,24 @@ class HDF5AnalysisWidget(QWidget):
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
             self.fisher_plot_canvas.setPixmap(
                 pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
             )
+
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create phase plot: {e}")
@@ -9111,14 +10527,12 @@ class HDF5AnalysisWidget(QWidget):
                         "Minimum Period",
                         "Maximum Period",
                         "Significance Level",
-                        "Phase Threshold",
                         "Sampling Interval",
                     ],
                     "Value": [
                         f"{self.fisher_min_period.value():.1f} hours",
                         f"{self.fisher_max_period.value():.1f} hours",
                         f"{self.fisher_significance.value():.3f}",
-                        f"{self.fisher_phase_threshold.value():.2f}",
                         f"{self.frame_interval.value():.1f} seconds",
                     ],
                 }
@@ -9322,14 +10736,31 @@ class HDF5AnalysisWidget(QWidget):
             n_cols = min(3, n_rois)
             n_rows = (n_rois + n_cols - 1) // n_cols
 
+            # Calculate appropriate figure size
+            fig_width = 4 * n_cols
+            fig_height = 3 * n_rows
+
             fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+                n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
             )
             fig.suptitle(
-                f"Fischer Z-Transformation Periodogram\n{n_significant}/{n_rois} ROIs with Significant Rhythms",
+                "Fischer Z-Transformation Periodogram",
                 fontsize=14,
                 fontweight="bold",
             )
+
+            # Find global Y-axis limits for consistent scaling
+            all_z_scores = []
+            for result in fisher_results.values():
+                periodogram = result.get("periodogram", {})
+                if "z_scores" in periodogram and "error" not in result:
+                    all_z_scores.extend(periodogram["z_scores"])
+
+            if all_z_scores:
+                global_y_min = 0  # Z-scores start at 0
+                global_y_max = max(all_z_scores) * 1.1  # Add 10% padding
+            else:
+                global_y_min, global_y_max = 0, 10
 
             # Plot each ROI
             for idx, (roi_id, result) in enumerate(sorted(fisher_results.items())):
@@ -9406,13 +10837,22 @@ class HDF5AnalysisWidget(QWidget):
                             label=f"Peak: {dominant_period:.1f}h",
                         )
 
-                    # Styling
+                    # Styling with ROI-specific color for title
                     ax.set_xlabel("Period (hours)", fontsize=9)
                     ax.set_ylabel("Z-score", fontsize=9)
-                    title_color = "green" if is_significant else "black"
-                    ax.set_title(f"ROI {roi_id}", fontsize=10, color=title_color)
+                    # Use ROI color for title, with bold for significant
+                    title_weight = "bold" if is_significant else "normal"
+                    ax.set_title(
+                        f"ROI {roi_id}",
+                        fontsize=10,
+                        color=roi_color,
+                        fontweight=title_weight,
+                    )
                     ax.legend(fontsize=7, loc="best")
                     ax.grid(True, alpha=0.3)
+
+                    # Apply global Y-axis scaling for consistency
+                    ax.set_ylim(global_y_min, global_y_max)
 
             # Hide unused subplots
             for idx in range(n_rois, n_rows * n_cols):
@@ -9425,24 +10865,155 @@ class HDF5AnalysisWidget(QWidget):
             # Store figure for later export
             self.fisher_plot_figure = fig
 
-            # Convert to QPixmap and display
+            # Convert to QPixmap and display with higher DPI
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+            fig.savefig(
+                buf,
+                format="png",
+                dpi=150,
+                bbox_inches="tight",
+                facecolor="white",
+                edgecolor="none",
+            )
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
-            self.fisher_plot_canvas.setPixmap(
-                pixmap.scaled(
-                    self.fisher_plot_canvas.size(),
-                    1,  # KeepAspectRatio
-                    1,  # SmoothTransformation
-                )
+
+            # Scale pixmap to fit canvas while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                self.fisher_plot_canvas.size(),
+                1,  # Qt.KeepAspectRatio
+                1,  # Qt.SmoothTransformation
             )
+            self.fisher_plot_canvas.setPixmap(scaled_pixmap)
+
+            # Enable pop-out button after successful plot creation
+            if hasattr(self, "btn_popout_plot"):
+                self.btn_popout_plot.setEnabled(True)
 
             # Note: Don't close fig - we need it for export
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create Fisher plot: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _open_plot_window(self):
+        """Open the current plot in a separate, resizable window."""
+        if not hasattr(self, "fisher_plot_figure") or self.fisher_plot_figure is None:
+            self._log_message("⚠️ No plot available to display")
+            return
+
+        try:
+            from qtpy.QtWidgets import (
+                QDialog,
+                QVBoxLayout,
+                QHBoxLayout,
+                QPushButton,
+                QScrollArea,
+            )
+            from matplotlib.backends.backend_qt5agg import (
+                FigureCanvasQTAgg as FigureCanvas,
+            )
+            from matplotlib.backends.backend_qt5agg import (
+                NavigationToolbar2QT as NavigationToolbar,
+            )
+
+            # Create dialog window
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Rhythmic Pattern Analysis - Plot View")
+            dialog.resize(1400, 900)  # Larger default size
+
+            layout = QVBoxLayout()
+            dialog.setLayout(layout)
+
+            # Create matplotlib canvas
+            canvas = FigureCanvas(self.fisher_plot_figure)
+            canvas.setMinimumSize(800, 600)
+
+            # Add navigation toolbar for zoom/pan
+            toolbar = NavigationToolbar(canvas, dialog)
+            layout.addWidget(toolbar)
+
+            # Add canvas in scroll area for very large plots
+            scroll_area = QScrollArea()
+            scroll_area.setWidget(canvas)
+            scroll_area.setWidgetResizable(True)
+            layout.addWidget(scroll_area)
+
+            # Add close button
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+
+            btn_save = QPushButton("Save Plot...")
+            btn_save.clicked.connect(lambda: self._save_plot_from_dialog(canvas))
+            button_layout.addWidget(btn_save)
+
+            btn_close = QPushButton("Close")
+            btn_close.clicked.connect(dialog.close)
+            button_layout.addWidget(btn_close)
+
+            layout.addLayout(button_layout)
+
+            # Show dialog
+            dialog.exec_()
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not open plot window: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _save_plot_from_dialog(self, canvas):
+        """Save plot from dialog window."""
+        try:
+            from qtpy.QtWidgets import QFileDialog
+            import os
+
+            # Get save location
+            default_name = "rhythmic_pattern_plot.png"
+            if hasattr(self, "current_fisher_method"):
+                method_names = [
+                    "fisher",
+                    "fft",
+                    "cosinor",
+                    "similarity",
+                    "coherence",
+                    "phase",
+                ]
+                method_name = (
+                    method_names[self.current_fisher_method]
+                    if self.current_fisher_method < len(method_names)
+                    else "plot"
+                )
+                default_name = f"rhythmic_pattern_{method_name}.png"
+
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Plot",
+                default_name,
+                "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+            )
+
+            if file_path:
+                # Determine format from extension
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == ".pdf":
+                    canvas.figure.savefig(
+                        file_path, format="pdf", dpi=300, bbox_inches="tight"
+                    )
+                elif ext == ".svg":
+                    canvas.figure.savefig(file_path, format="svg", bbox_inches="tight")
+                else:
+                    canvas.figure.savefig(
+                        file_path, format="png", dpi=300, bbox_inches="tight"
+                    )
+
+                self._log_message(f"✓ Plot saved to: {file_path}")
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not save plot: {e}")
             import traceback
 
             traceback.print_exc()
@@ -9584,6 +11155,9 @@ class HDF5AnalysisWidget(QWidget):
             f"✓ Frame viewer: Loaded {self.viewer_n_frames} frames from HDF5 (interval: {self.viewer_frame_interval}s)"
         )
 
+        # Pre-load frames into cache for smooth playback
+        self._viewer_preload_frames()
+
         # Display first frame
         self._viewer_show_frame(0)
 
@@ -9645,6 +11219,9 @@ class HDF5AnalysisWidget(QWidget):
                     f"✓ Frame viewer: Loaded {self.viewer_n_frames} frames from AVI batch (interval: {self.viewer_frame_interval}s)"
                 )
 
+                # Pre-load frames into cache for smooth playback
+                self._viewer_preload_frames()
+
                 # Display first frame
                 self._viewer_show_frame(0)
             else:
@@ -9652,61 +11229,195 @@ class HDF5AnalysisWidget(QWidget):
         else:
             raise ValueError("No layers in viewer. Please load AVI batch first.")
 
+    def _viewer_preload_frames(self):
+        """Pre-load all frames into memory cache for smooth playback."""
+        from qtpy.QtWidgets import QProgressDialog
+        from qtpy.QtCore import Qt
+        import psutil
+
+        # Get available system memory
+        available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+
+        # Estimate memory usage
+        # Get first frame to check size
+        if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+            if hasattr(self, "viewer_frame_names"):
+                frame_name = self.viewer_frame_names[0]
+                sample_frame = self.viewer_file_handle[
+                    f"{self.viewer_dataset_name}/{frame_name}"
+                ][()]
+            else:
+                sample_frame = self.viewer_file_handle[self.viewer_dataset_name][0]
+        else:
+            sample_frame = self.viewer_frames[0]
+
+        # Calculate memory (3 channels for BGR, uint8)
+        frame_size_mb = (sample_frame.shape[0] * sample_frame.shape[1] * 3) / (
+            1024 * 1024
+        )
+        total_size_mb = frame_size_mb * self.viewer_n_frames
+
+        # Safety limits:
+        # 1. Don't use more than 50% of available RAM
+        # 2. Don't use more than 4GB total
+        # 3. Don't cache more than 10000 frames
+        max_ram_mb = min(available_ram_mb * 0.5, 4096)  # 50% of available or 4GB max
+        max_frames = min(10000, int(max_ram_mb / frame_size_mb))
+
+        self._log_message(
+            f"System RAM: {available_ram_mb:.0f} MB available, "
+            f"Frame size: {frame_size_mb:.2f} MB, "
+            f"Total needed: {total_size_mb:.1f} MB"
+        )
+
+        # Check if caching is feasible
+        if total_size_mb > max_ram_mb:
+            self._log_message(
+                f"⚠ Skipping frame cache: {total_size_mb:.0f} MB needed exceeds "
+                f"safe limit ({max_ram_mb:.0f} MB). Playback may be slower."
+            )
+            self.viewer_frame_cache = None
+            return
+
+        if self.viewer_n_frames > max_frames:
+            self._log_message(
+                f"⚠ Skipping frame cache: {self.viewer_n_frames} frames exceeds "
+                f"limit ({max_frames}). Playback may be slower."
+            )
+            self.viewer_frame_cache = None
+            return
+
+        self._log_message(
+            f"Pre-loading {self.viewer_n_frames} frames into cache "
+            f"(~{total_size_mb:.1f} MB)..."
+        )
+
+        # Show progress dialog
+        progress = QProgressDialog(
+            f"Loading {self.viewer_n_frames} frames into memory...",
+            "Cancel",
+            0,
+            self.viewer_n_frames,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(500)  # Show after 500ms
+
+        # Pre-load and pre-process all frames
+        self.viewer_frame_cache = []
+
+        try:
+            for i in range(self.viewer_n_frames):
+                # Update progress
+                if i % 10 == 0:  # Update every 10 frames
+                    progress.setValue(i)
+                    if progress.wasCanceled():
+                        self._log_message("Frame cache loading canceled by user")
+                        self.viewer_frame_cache = None
+                        return
+
+                # Load frame
+                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                    if hasattr(self, "viewer_frame_names"):
+                        frame_name = self.viewer_frame_names[i]
+                        frame_data = self.viewer_file_handle[
+                            f"{self.viewer_dataset_name}/{frame_name}"
+                        ][()]
+                    else:
+                        frame_data = self.viewer_file_handle[self.viewer_dataset_name][
+                            i
+                        ]
+                else:
+                    frame_data = self.viewer_frames[i]
+
+                # Pre-process frame to display format
+                frame_processed = self._prepare_frame_for_display(frame_data)
+                self.viewer_frame_cache.append(frame_processed)
+
+            progress.setValue(self.viewer_n_frames)
+            self._log_message(
+                f"✓ Frame cache ready: {self.viewer_n_frames} frames "
+                f"({total_size_mb:.1f} MB in RAM)"
+            )
+
+        except Exception as e:
+            self._log_message(f"❌ Frame cache loading failed: {e}")
+            self.viewer_frame_cache = None
+            import traceback
+
+            traceback.print_exc()
+
+    def _prepare_frame_for_display(self, frame_data):
+        """Pre-process a frame to display format (BGR uint8)."""
+        import numpy as np
+        import cv2
+
+        # Make a writable copy
+        frame = np.array(frame_data, copy=True)
+
+        # Ensure it's uint8
+        if frame.dtype != np.uint8:
+            # Normalize to 0-255 range
+            frame_min = frame.min()
+            frame_max = frame.max()
+            if frame_max > frame_min:
+                frame = ((frame - frame_min) / (frame_max - frame_min) * 255).astype(
+                    np.uint8
+                )
+            else:
+                frame = np.zeros_like(frame, dtype=np.uint8)
+
+        # Ensure 2D shape
+        if frame.ndim == 3 and frame.shape[2] == 1:
+            frame = frame[:, :, 0]
+
+        # Convert to 3-channel BGR for colored text overlay
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+        return frame
+
     def _viewer_show_frame(self, frame_idx):
         """Display a specific frame in the napari viewer."""
         try:
             if frame_idx < 0 or frame_idx >= self.viewer_n_frames:
                 return
 
-            # Get frame data
-            if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                # HDF5 file
-                if hasattr(self, "viewer_frame_names"):
-                    # Individual frame datasets
-                    frame_name = self.viewer_frame_names[frame_idx]
-                    frame_data = self.viewer_file_handle[
-                        f"{self.viewer_dataset_name}/{frame_name}"
-                    ][()]
-                else:
-                    # Single dataset
-                    frame_data = self.viewer_file_handle[self.viewer_dataset_name][
-                        frame_idx
-                    ]
-            else:
-                # From napari layer (AVI or pre-loaded)
-                frame_data = self.viewer_frames[frame_idx]
-
             # Calculate time from frame index
             frame_time_seconds = frame_idx * self.viewer_frame_interval
             frame_time_minutes = frame_time_seconds / 60.0
             frame_time_hours = frame_time_minutes / 60.0
 
-            # Copy frame data and draw time text on it
             import numpy as np
             import cv2
 
-            # Make a writable copy
-            frame_with_text = np.array(frame_data, copy=True)
-
-            # Ensure it's uint8 for cv2.putText
-            if frame_with_text.dtype != np.uint8:
-                # Normalize to 0-255 range
-                frame_min = frame_with_text.min()
-                frame_max = frame_with_text.max()
-                if frame_max > frame_min:
-                    frame_with_text = (
-                        (frame_with_text - frame_min) / (frame_max - frame_min) * 255
-                    ).astype(np.uint8)
+            # Use cached frame if available (FAST!)
+            if hasattr(self, "viewer_frame_cache") and self.viewer_frame_cache:
+                # Get pre-processed frame from cache (already BGR uint8)
+                frame_with_text = self.viewer_frame_cache[frame_idx].copy()
+                frame_data = frame_with_text  # For info display
+            else:
+                # Fallback: Load and process frame on-the-fly (SLOWER)
+                # Get frame data
+                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                    # HDF5 file
+                    if hasattr(self, "viewer_frame_names"):
+                        # Individual frame datasets
+                        frame_name = self.viewer_frame_names[frame_idx]
+                        frame_data = self.viewer_file_handle[
+                            f"{self.viewer_dataset_name}/{frame_name}"
+                        ][()]
+                    else:
+                        # Single dataset
+                        frame_data = self.viewer_file_handle[self.viewer_dataset_name][
+                            frame_idx
+                        ]
                 else:
-                    frame_with_text = np.zeros_like(frame_with_text, dtype=np.uint8)
+                    # From napari layer (AVI or pre-loaded)
+                    frame_data = self.viewer_frames[frame_idx]
 
-            # Ensure 2D shape for text overlay
-            if frame_with_text.ndim == 3 and frame_with_text.shape[2] == 1:
-                frame_with_text = frame_with_text[:, :, 0]
-
-            # Convert to 3-channel BGR for colored text
-            if len(frame_with_text.shape) == 2:
-                frame_with_text = cv2.cvtColor(frame_with_text, cv2.COLOR_GRAY2BGR)
+                # Process frame
+                frame_with_text = self._prepare_frame_for_display(frame_data)
 
             # Prepare time text
             time_text = f"t = {frame_time_seconds:.1f}s ({frame_time_minutes:.2f}min)"
