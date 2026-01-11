@@ -31,6 +31,19 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - [Scientific Background](#scientific-background)
   - [Fischer Z-Transformation](#fischer-z-transformation-for-circadian-rhythm-detection)
   - [Frame Viewer](#frame-viewer)
+- [📐 Mathematical Documentation](#-mathematical-documentation)
+  - [Movement Analysis Pipeline](#movement-analysis-pipeline-mathematics)
+    - [ROI Detection (Hough Transform)](#roi-detection-hough-circle-transform)
+    - [Movement Quantification](#movement-quantification-pixel-differences)
+    - [Baseline Thresholds](#baseline-threshold-calculation)
+    - [Preprocessing (Detrending, Jump Correction)](#preprocessing-methods)
+    - [Hysteresis State Detection](#movement-state-detection-hysteresis)
+    - [Activity Fraction & Sleep Bouts](#activity-fraction-and-sleep-detection)
+  - [Rhythmic Pattern Analysis](#rhythmic-pattern-analysis-mathematics)
+    - [Fisher Z-Transformation](#fisher-z-transformation-mathematical-details)
+    - [FFT Power Spectrum](#fft-power-spectrum-mathematical-details)
+    - [Cosinor Analysis](#cosinor-analysis-mathematical-details)
+    - [Method Comparison](#comparison-of-rhythmic-analysis-methods)
 - [Citation](#citation)
 - [Contributing](#contributing)
 - [License](#license)
@@ -1667,6 +1680,519 @@ The Frame Viewer provides interactive exploration of raw video data with tempora
 - **Metadata integration**: Time calculated from HDF5 metadata or AVI frame rate
 - **Memory efficient**: Loads frames on-demand during playback
 - **Analysis verification**: Visual confirmation of ROI detection and movement events
+
+---
+
+## 📐 Mathematical Documentation
+
+This section provides comprehensive mathematical foundations for all analysis methods implemented in napari-hdf5-activity, including complete formulas, derivations, and statistical foundations for both movement analysis and rhythmic pattern detection.
+
+### Movement Analysis Pipeline (Mathematics)
+
+#### ROI Detection (Hough Circle Transform)
+
+**Circle Equation:**
+```
+(x - a)² + (y - b)² = r²
+```
+Where (a, b) = circle center, r = radius
+
+**Hough Transform:**
+
+For each edge point (x, y), map to parameter space:
+```
+a = x + r · cos(θ)
+b = y + r · sin(θ)  for θ ∈ [0, 2π]
+```
+
+**Accumulator Array:**
+```
+A[a, b, r] = Σ_{(x,y) ∈ Edges} δ[(x-a)² + (y-b)² - r²]
+```
+
+Detected circles = local maxima in A[a,b,r] above threshold.
+
+**OpenCV Parameters:**
+- **dp**: Accumulator resolution = image_resolution / dp
+- **minDist**: Minimum center-to-center distance
+- **param1**: Canny edge detector threshold
+- **param2**: Accumulator threshold for circle detection
+- **minRadius, maxRadius**: Radius constraints
+
+**ROI Mask Generation:**
+```
+M_i[x, y] = {1  if (x - a_i)² + (y - b_i)² ≤ r_i²
+            {0  otherwise
+
+N_i = Σ_{x,y} M_i[x, y] ≈ π · r_i²  (pixel count)
+```
+
+#### Movement Quantification (Pixel Differences)
+
+**Frame-to-Frame Difference:**
+```
+D_i,t[x, y] = |I_t[x, y] - I_{t-1}[x, y]|  for pixels where M_i[x,y] = 1
+```
+
+**Total Change in ROI:**
+```
+C_i,t = Σ_{x,y ∈ ROI_i} |I_t[x,y] - I_{t-1}[x,y]|
+```
+
+**Normalized Movement Value:**
+```
+m_i,t = C_i,t / N_i
+```
+- **m_i,t** = average pixel intensity change per pixel
+- Units: 0-255 (8-bit) or 0-65535 (16-bit)
+- Physical meaning: Magnitude of brightness changes due to organism movement
+
+**MATLAB Compatibility:**
+```
+m̃_i,t = m_i,t  (no minimum subtraction)
+```
+
+#### Baseline Threshold Calculation
+
+**Statistical Estimators (from baseline period t ∈ [0, T_baseline]):**
+```
+μ̂_i = (1/T_baseline) · Σ_{t=0}^{T_baseline-1} m̃_i,t  (sample mean)
+
+σ̂_i = √[(1/(T_baseline-1)) · Σ_{t=0}^{T_baseline-1} (m̃_i,t - μ̂_i)²]  (sample std)
+```
+
+**Threshold Calculation:**
+```
+θ_upper,i = μ̂_i + λ · σ̂_i
+θ_lower,i = μ̂_i - λ · σ̂_i
+```
+Where **λ** = threshold multiplier (default: 0.1)
+
+**Interpretation:**
+- **θ_upper**: Movement above this → ACTIVE state
+- **θ_lower**: Movement below this → QUIESCENT state
+- **Hysteresis gap**: H = 2λσ̂_i (prevents flickering)
+
+**Three Threshold Methods:**
+
+1. **Baseline Method:**
+   ```
+   Use first N minutes of recording
+   → Calculate μ̂_i, σ̂_i from baseline window
+   → Apply same thresholds to entire recording
+   ```
+
+2. **Calibration Method:**
+   ```
+   Process separate calibration recording
+   → Transfer thresholds to main dataset
+   → Standardizes across experiments
+   ```
+
+3. **Adaptive Method:**
+   ```
+   Sliding window: θ_i(t) adapts over time
+   μ̂_i(t) = mean(m̃_i,τ) for τ ∈ [t - W/2, t + W/2]
+   → Handles non-stationary baselines
+   ```
+
+**Important:** Thresholds calculated from **normalized data BEFORE detrending** (preserves true baseline statistics).
+
+#### Preprocessing Methods
+
+**Detrending (Polynomial Regression):**
+```
+Trend(t) = β_0 + β_1·t + β_2·t² + ... + β_p·t^p
+
+Least squares:  β̂ = (X'X)⁻¹X'y
+
+Detrended:  m'_i,t = m̃_i,t - Trend(t)
+```
+- Removes slow drift (photobleaching, LED changes)
+- Typical degree: p = 1 (linear) or p = 2 (quadratic)
+
+**Jump Correction (Outlier Detection):**
+```
+Rolling Std:  σ_rolling(t) = std(m̃_i,τ) for τ ∈ [t - W/2, t + W/2]
+
+Frame difference:  Δ_t = m̃_i,t - m̃_i,t-1
+
+Jump detected if:  |Δ_t| > κ · median(σ_rolling)  (κ = 3.0 default)
+
+Correction:  m̃_i,t ← m̃_i,t - jump_magnitude  for all t ≥ t_jump
+```
+- Removes sudden signal shifts (vibrations, bumps)
+
+#### Movement State Detection (Hysteresis)
+
+**State Machine:**
+```
+States:  𝒮 = {QUIESCENT, MOVEMENT}
+
+Transitions:
+  QUIESCENT → MOVEMENT:  if m'_i,t > θ_upper,i
+  MOVEMENT → QUIESCENT:  if m'_i,t < θ_lower,i
+```
+
+**Binary Output:**
+```
+b_i,t = {1  if state = MOVEMENT
+        {0  if state = QUIESCENT
+```
+
+**Schmitt Trigger Analogy:**
+```
+       ┌───────┐
+  θ_u ─┤       ├─ HIGH (MOVEMENT)
+       │  Gap  │
+  θ_l ─┤       ├─ LOW (QUIESCENT)
+       └───────┘
+```
+
+**Algorithm:**
+```python
+s ← QUIESCENT  # Initial state
+
+for t = 1 to T:
+    if s == QUIESCENT:
+        if m'[t] > θ_upper:
+            s ← MOVEMENT
+            b[t] ← 1
+        else:
+            b[t] ← 0
+    elif s == MOVEMENT:
+        if m'[t] < θ_lower:
+            s ← QUIESCENT
+            b[t] ← 0
+        else:
+            b[t] ← 1
+```
+
+**Noise Immunity:**
+- Hysteresis gap H = θ_upper - θ_lower = 2λσ̂_i
+- Signal fluctuations < H do not cause state changes
+
+#### Activity Fraction and Sleep Detection
+
+**Time Binning:**
+```
+Bin k = [t_k, t_{k+1})  where  t_k = k · B
+
+B = bin_size_seconds / frame_interval
+
+Activity fraction:  α_i,k = (1/|Bin_k|) · Σ_{t ∈ Bin_k} b_i,t
+```
+- **α_i,k** ∈ [0, 1] = fraction of time active in bin k
+- Typical bin size: 60 seconds
+
+**Statistical Properties:**
+```
+Mean activity:  ᾱ_i = (1/K) · Σ_{k=0}^{K-1} α_i,k
+
+Standard error:  SE(α_i,k) = √[α_i,k(1 - α_i,k) / |Bin_k|]
+
+95% CI:  α̂ ± 1.96 · SE(α̂)
+```
+
+**Quiescence Detection:**
+```
+q_i,k = {1  (QUIESCENT)  if α_i,k < ψ
+        {0  (ACTIVE)      if α_i,k ≥ ψ
+
+where ψ = quiescence threshold (default: 0.5)
+```
+
+**Sleep Bout Identification:**
+```
+Sleep Bout = consecutive quiescent bins with duration ≥ D_min
+
+Duration = (number of consecutive q_i,k = 1) · bin_size
+
+Default:  D_min = 8 minutes
+```
+
+**Sleep Statistics:**
+```
+Total Sleep Time (TST):  Σ_{bout ∈ 𝒮_i} duration(bout)
+
+Number of Bouts:  N_bouts,i = |𝒮_i|
+
+Average Bout Duration:  <duration>_i = TST_i / N_bouts,i
+
+Sleep Efficiency:  SE_i = TST_i / Total_Recording_Duration
+```
+
+---
+
+### Rhythmic Pattern Analysis (Mathematics)
+
+#### Fisher Z-Transformation (Mathematical Details)
+
+**Core Principle:**
+
+Tests for sinusoidal rhythms by correlating data with cosine/sine waves at different periods.
+
+**For test period τ:**
+```
+Angular frequency:  ω = 2π / τ
+
+Reference waves:
+  C(t) = cos(ω · t)
+  S(t) = sin(ω · t)
+
+Correlations:
+  r_cos = corr(y, C)
+  r_sin = corr(y, S)
+
+Squared coherence:  R² = r_cos² + r_sin²
+
+Fisher Z-score:  Z(τ) = n · R²
+```
+
+**Statistical Significance:**
+```
+Under H₀ (no rhythm):  Z ~ χ²(df=2)
+
+Critical values:
+  α = 0.10:  critical_Z = 4.605
+  α = 0.05:  critical_Z = 5.991
+  α = 0.01:  critical_Z = 9.210
+
+p-value:  p = 1 - CDF_χ²(Z_max, df=2)
+
+Significant if:  Z > critical_Z  (or p < α)
+```
+
+**Dominant Period:**
+```
+τ_dom = argmax_τ Z(τ)
+
+Test range:  τ ∈ [τ_min, τ_max]  (100 evenly-spaced periods)
+```
+
+**Nyquist Constraint:**
+```
+Maximum testable period:  τ_max ≤ recording_duration / 2
+
+Example: 24-hour recording → can test up to 12-hour periods
+```
+
+**Interpretation:**
+- **Z > 20**: Very strong, highly consistent rhythm (p < 0.001)
+- **10 < Z < 20**: Strong rhythm (0.001 < p < 0.01)
+- **6 < Z < 10**: Significant rhythm (0.01 < p < 0.05)
+- **Z < 6**: No significant rhythm (p > 0.05)
+
+#### FFT Power Spectrum (Mathematical Details)
+
+**Discrete Fourier Transform:**
+```
+Y[k] = Σ_{n=0}^{N-1} y[n] · e^(-2πikn/N)
+
+Power spectrum:  P[k] = |Y[k]|²
+
+Frequency bins:  f[k] = k / (N · Δt)
+
+Period conversion:  τ[k] = 1 / f[k]
+```
+
+**Window Functions (reduce spectral leakage):**
+
+Hann (default):
+```
+w[n] = 0.5 - 0.5 · cos(2πn / (N-1))
+```
+
+Hamming:
+```
+w[n] = 0.54 - 0.46 · cos(2πn / (N-1))
+```
+
+Blackman:
+```
+w[n] = 0.42 - 0.5 · cos(2πn / (N-1)) + 0.08 · cos(4πn / (N-1))
+```
+
+**Windowed Data:**
+```
+y_windowed[n] = y[n] · w[n]
+```
+
+**Permutation Test for Significance:**
+
+Unlike Fisher Z (which has analytical chi-square distribution), FFT requires empirical significance testing.
+
+**Algorithm:**
+```
+1. Compute observed power at dominant period:  P_obs
+
+2. Generate null distribution (n_perm = 1000 permutations):
+     For i = 1 to n_perm:
+       a. Randomly shuffle data:  y_perm = random_permutation(y)
+       b. Apply same preprocessing (detrending, windowing)
+       c. Compute FFT:  P_perm[i] = power at target period
+
+3. Calculate p-value:
+     p = (count of P_perm[i] ≥ P_obs) / n_perm
+
+4. Significant if:  p < α
+```
+
+**Rationale:**
+
+Permutation test:
+- **Non-parametric** (no distribution assumptions)
+- **Exact** (given enough permutations)
+- **Controls for data properties** (preserves amplitude distribution, variance)
+
+**Interpretation:**
+- p < 0.05: Dominant period is significantly stronger than expected by chance
+- p ≥ 0.05: No significant periodic pattern
+
+#### Cosinor Analysis (Mathematical Details)
+
+**Cosine Model:**
+```
+y(t) = M + A · cos(ω·t + φ) + ε(t)
+```
+Where:
+- **M** = MESOR (mean level)
+- **A** = Amplitude (half peak-to-trough distance)
+- **φ** = Acrophase (phase at peak)
+- **ω** = 2π/τ (angular frequency, τ = assumed period)
+
+**Linear Regression Form:**
+
+Using trigonometric identity:
+```
+y(t) = M + β·cos(ω·t) + γ·sin(ω·t) + ε(t)
+
+where:
+  β = A · cos(φ)
+  γ = -A · sin(φ)
+```
+
+**Least Squares Estimation:**
+```
+Design matrix X:
+  [1   cos(ω·t₁)  sin(ω·t₁)]
+  [1   cos(ω·t₂)  sin(ω·t₂)]
+  [⋮   ⋮          ⋮        ]
+  [1   cos(ω·t_n)  sin(ω·t_n)]
+
+Parameter estimates:  θ̂ = (X'X)⁻¹X'y = [M̂, β̂, γ̂]'
+```
+
+**Rhythm Parameters:**
+```
+MESOR:  M̂ = M̂  (directly from regression)
+
+Amplitude:  Â = √(β̂² + γ̂²)
+
+Acrophase:  φ̂ = arctan2(-γ̂, β̂)
+
+Peak time:  t_peak = -φ̂ / ω  (mod τ)
+```
+
+**F-Test for Significance:**
+```
+Null hypothesis:  H₀: β = 0 and γ = 0  (no rhythm)
+
+F-statistic:  F = (RegSS / 2) / (RSS / (n - 3))
+
+Under H₀:  F ~ F(df₁=2, df₂=n-3)
+
+p-value:  p = P(F_{2, n-3} ≥ F_obs)
+
+Significant if:  p < α
+```
+
+**Goodness of Fit:**
+```
+R² = RegSS / TSS = 1 - (RSS / TSS)
+
+Interpretation:
+  R² = proportion of variance explained by cosine model
+  R² > 0.30: Strong rhythm
+  0.10 < R² < 0.30: Moderate rhythm
+  R² < 0.10: Weak or no rhythm
+```
+
+**Confidence Intervals:**
+```
+Standard errors from covariance matrix:
+  Cov(θ̂) = σ̂² · (X'X)⁻¹
+
+95% CI:
+  M̂ ± t_{n-3, 0.025} · SE(M̂)
+  Â ± t_{n-3, 0.025} · SE(Â)  (delta method)
+  φ̂ ± t_{n-3, 0.025} · SE(φ̂)  (delta method)
+```
+
+#### Comparison of Rhythmic Analysis Methods
+
+| Method | Best For | Significance Test | Period Detection |
+|--------|----------|-------------------|------------------|
+| **Fisher Z** | Testing for circadian rhythms | Chi-square (df=2) | Scans 100 test periods |
+| **FFT** | Exploratory analysis, harmonics | Permutation (1000x) | Full frequency spectrum |
+| **Cosinor** | Quantifying rhythm parameters | F-test (df=2, n-3) | Assumes known period |
+
+**When to Use Each:**
+
+1. **Fisher Z-Transformation:**
+   - ✓ Hypothesis testing (analytical p-values)
+   - ✓ Standard circadian analysis
+   - ✓ Fast computation
+   - ✗ Limited frequency resolution (100 points)
+
+2. **FFT Power Spectrum:**
+   - ✓ Discovering unexpected periods
+   - ✓ Harmonic analysis
+   - ✓ Continuous frequency spectrum
+   - ✗ Requires permutation test (slow)
+   - ✗ Sensitive to noise/leakage
+
+3. **Cosinor Analysis:**
+   - ✓ MESOR, Amplitude, Acrophase estimation
+   - ✓ Confidence intervals
+   - ✓ Standard F-test
+   - ✗ Requires known period
+   - ✗ Cannot detect period
+
+**Integrated Workflow:**
+```
+Step 1: Run Fisher Z and FFT
+  → Detect if rhythm exists
+  → Estimate dominant period τ_dom
+
+Step 2: Verify concordance
+  → If Fisher and FFT agree → proceed
+  → If disagree → investigate data quality
+
+Step 3: Run Cosinor with period = τ_dom
+  → Quantify MESOR, Amplitude, Acrophase
+  → Report with confidence intervals
+
+Step 4: Biological interpretation
+  → Relate parameters to experimental conditions
+```
+
+**Expected Concordance:**
+```
+Strong 24h rhythm:
+  Fisher Z: Peak at 24h, Z = 18.5, p < 0.001 ✓
+  FFT: Peak at 24h, p = 0.002 ✓
+  Cosinor (24h): A = 0.28, F = 45.3, p < 0.001 ✓
+
+  → All methods agree: strong circadian rhythm
+```
+
+**Key Differences:**
+- **Fisher Z**: Tests specific periods, analytical p-value (chi-square)
+- **FFT**: Tests all frequencies, empirical p-value (permutation)
+- **Cosinor**: Assumes period, parametric p-value (F-test)
+
+---
 
 ## Citation
 
