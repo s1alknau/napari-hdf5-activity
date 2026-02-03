@@ -1086,6 +1086,79 @@ def bin_quiescence(
     return quiescence_data
 
 
+def rebin_fraction_movement(
+    fraction_data: Dict[int, List[Tuple[float, float]]],
+    plot_bin_minutes: int,
+    original_bin_seconds: int = 60,
+) -> Dict[int, List[Tuple[float, float]]]:
+    """
+    Re-bin fraction movement data for visualization purposes.
+
+    Takes already-binned fraction movement data (e.g., 60s bins) and
+    aggregates it into larger bins (e.g., 60 minutes) for clearer visualization.
+
+    Args:
+        fraction_data: Dict mapping ROI ID to list of (time, fraction_movement) tuples
+        plot_bin_minutes: New bin size in minutes for visualization
+        original_bin_seconds: Original bin size in seconds (default: 60s)
+
+    Returns:
+        Dict mapping ROI ID to list of (bin_center_time, mean_fraction_movement) tuples
+
+    Example:
+        # Original data: 60s bins with fraction values 0-1
+        # Re-binned: 60 minute bins with averaged fraction values
+        rebinned = rebin_fraction_movement(fraction_data, plot_bin_minutes=60)
+    """
+    rebinned_data = {}
+    plot_bin_seconds = plot_bin_minutes * 60
+
+    for roi, data in fraction_data.items():
+        if not data:
+            rebinned_data[roi] = []
+            continue
+
+        sorted_data = sorted(data, key=lambda x: x[0])
+
+        if len(sorted_data) < 2:
+            rebinned_data[roi] = sorted_data
+            continue
+
+        start_time = sorted_data[0][0]
+        end_time = sorted_data[-1][0]
+
+        # Create new time bins
+        first_bin_start = (start_time // plot_bin_seconds) * plot_bin_seconds
+        bin_edges = []
+        current_bin_start = first_bin_start
+        while current_bin_start < end_time:
+            bin_edges.append(current_bin_start)
+            current_bin_start += plot_bin_seconds
+        bin_edges.append(current_bin_start)
+
+        roi_rebinned = []
+
+        for i in range(len(bin_edges) - 1):
+            bin_start = bin_edges[i]
+            bin_end = bin_edges[i + 1]
+            bin_center = (bin_start + bin_end) / 2
+
+            # Collect all fraction values in this bin
+            bin_fractions = []
+            for time_point, fraction_value in sorted_data:
+                if bin_start <= time_point < bin_end:
+                    bin_fractions.append(fraction_value)
+
+            # Calculate mean fraction for this bin
+            if bin_fractions:
+                mean_fraction = np.mean(bin_fractions)
+                roi_rebinned.append((bin_center, mean_fraction))
+
+        rebinned_data[roi] = roi_rebinned
+
+    return rebinned_data
+
+
 def define_sleep_periods(
     quiescence_data: Dict[int, List[Tuple[float, int]]],
     sleep_threshold_minutes: int = 8,

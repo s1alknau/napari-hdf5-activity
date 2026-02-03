@@ -18,8 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import ticker
 from matplotlib.figure import Figure
-from typing import Dict, List, Tuple, Optional, Any
-import matplotlib.colors as mcolors
+from typing import Dict, List, Tuple, Optional
 
 try:
     from ._calc import bin_activity_data_for_lighting
@@ -256,8 +255,8 @@ class PlotGenerator:
 
                     # Update labels
                     baseline_label = f"Baseline Mean (Range: {start_t_minutes:.0f}-{end_t_minutes:.0f}min)"
-                    threshold_label = f"Detection Thresholds (Range-specific)"
-                    band_label = f"Hysteresis Band (Range-specific)"
+                    threshold_label = "Detection Thresholds (Range-specific)"
+                    band_label = "Hysteresis Band (Range-specific)"
 
                 # Check if baseline is visible in current range
                 if len(changes) > 0:
@@ -463,21 +462,17 @@ class PlotGenerator:
         try:
             # Get parameters
             bin_minutes = kwargs.get("bin_minutes", 30)
-            use_raw_amplitude = kwargs.get("use_raw_amplitude", True)
 
-            # Choose data source based on amplitude setting
-            if use_raw_amplitude and "merged_results" in kwargs:
-                # Use raw intensity data (preserves full amplitude)
-                binned_data = self._bin_raw_intensity_for_lighting(
-                    kwargs["merged_results"], bin_minutes
-                )
-                y_label = "Activity Intensity"
-                plot_title = f"Activity Intensity - Lighting Conditions (dark IR) ({bin_minutes}min bins)"
-                print(
-                    f"Using raw intensity data for lighting plot - amplitude preserved"
-                )
+            # Always use fraction_data (0-1 range) for lighting conditions plot
+            # This is consistent with Extended Analysis methods and publications
+            if bin_minutes == 0:
+                # Use original fraction_data without re-binning
+                binned_data = fraction_data
+                y_label = "Fraction Movement"
+                plot_title = "Activity Pattern - Lighting Conditions (dark IR) (Original binning)"
+                print("Using original binning (no re-binning)")
             else:
-                # Use fraction data (0-1 bounded) - fallback
+                # Use fraction data with re-binning
                 if CALC_AVAILABLE:
                     from ._calc import bin_activity_data_for_lighting
 
@@ -488,8 +483,9 @@ class PlotGenerator:
                     # Fallback: use fraction_data directly
                     print("Using fraction_data directly for lighting plot")
                     binned_data = fraction_data
-                y_label = "Activity Level"
+                y_label = "Fraction Movement"
                 plot_title = f"Activity Pattern - Lighting Conditions (dark IR) ({bin_minutes}min bins)"
+                print(f"Using fraction movement data with {bin_minutes}min binning")
 
             if not binned_data:
                 print("No binned data available for lighting plot")

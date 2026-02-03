@@ -556,52 +556,77 @@ class HDF5AnalysisWidget(QWidget):
         roi_layout = QFormLayout()
         roi_group.setLayout(roi_layout)
 
-        # Radius parameters
+        # Radius parameters (defaults for 6-well plate)
         self.min_radius = QSpinBox()
         self.min_radius.setRange(10, 1000)
-        self.min_radius.setValue(380)
-        self.min_radius.setToolTip("Minimum radius for circle detection")
+        self.min_radius.setValue(100)
+        self.min_radius.setToolTip("Minimum radius for circle detection (pixels)")
         roi_layout.addRow("Min Radius:", self.min_radius)
 
         self.max_radius = QSpinBox()
         self.max_radius.setRange(10, 1000)
-        self.max_radius.setValue(420)
-        self.max_radius.setToolTip("Maximum radius for circle detection")
+        self.max_radius.setValue(145)
+        self.max_radius.setToolTip("Maximum radius for circle detection (pixels)")
         roi_layout.addRow("Max Radius:", self.max_radius)
 
         # HoughCircles parameters
         self.dp_param = QDoubleSpinBox()
         self.dp_param.setRange(0.1, 5.0)
-        self.dp_param.setValue(0.5)
+        self.dp_param.setValue(1.0)
         self.dp_param.setSingleStep(0.1)
         self.dp_param.setDecimals(1)
         self.dp_param.setToolTip(
-            "Inverse ratio of accumulator resolution to image resolution"
+            "Inverse ratio of accumulator resolution (1.0 recommended)"
         )
         roi_layout.addRow("DP Parameter:", self.dp_param)
 
         self.min_dist = QSpinBox()
         self.min_dist.setRange(10, 1000)
-        self.min_dist.setValue(150)
-        self.min_dist.setToolTip("Minimum distance between circle centers")
+        self.min_dist.setValue(300)
+        self.min_dist.setToolTip("Minimum distance between circle centers (pixels)")
         roi_layout.addRow("Min Distance:", self.min_dist)
 
         self.param1 = QSpinBox()
-        self.param1.setRange(10, 200)
-        self.param1.setValue(40)
-        self.param1.setToolTip("Upper threshold for edge detection in Canny")
+        self.param1.setRange(10, 300)
+        self.param1.setValue(30)
+        self.param1.setToolTip("Canny edge detection threshold (higher = fewer edges)")
         roi_layout.addRow("Param1 (Edge):", self.param1)
 
         self.param2 = QSpinBox()
-        self.param2.setRange(10, 200)
-        self.param2.setValue(40)
-        self.param2.setToolTip("Accumulator threshold for center detection")
+        self.param2.setRange(5, 200)
+        self.param2.setValue(60)
+        self.param2.setToolTip("Circle detection sensitivity (lower = more circles)")
         roi_layout.addRow("Param2 (Center):", self.param2)
 
-        # 12-Well plate preset
+        # Plate presets
+        self.chk_6well = QCheckBox("6-Well Plate Preset")
+        self.chk_6well.setToolTip(
+            "Use preset values for 6-well plates (radius 100-145)"
+        )
+        self.chk_6well.setChecked(True)
+        roi_layout.addRow("", self.chk_6well)
+
         self.chk_12well = QCheckBox("12-Well Plate Preset")
-        self.chk_12well.setToolTip("Use preset values for 12-well plates")
+        self.chk_12well.setToolTip(
+            "Use preset values for 12-well plates (radius 70-120)"
+        )
         roi_layout.addRow("", self.chk_12well)
+
+        # ROI Scale slider - scale detected ROIs from center
+        self.roi_scale = QDoubleSpinBox()
+        self.roi_scale.setRange(0.1, 2.0)
+        self.roi_scale.setValue(1.0)
+        self.roi_scale.setSingleStep(0.05)
+        self.roi_scale.setToolTip(
+            "Scale ROIs from center (1.0 = original size, 0.8 = 80%)"
+        )
+        roi_layout.addRow("ROI Scale:", self.roi_scale)
+
+        # Apply scale button
+        self.btn_apply_scale = QPushButton("Apply Scale")
+        self.btn_apply_scale.setToolTip("Re-scale detected ROIs without re-detecting")
+        self.btn_apply_scale.setEnabled(False)
+        roi_layout.addRow("", self.btn_apply_scale)
 
         layout.addWidget(roi_group)
         layout.addStretch()
@@ -1487,15 +1512,16 @@ class HDF5AnalysisWidget(QWidget):
 
         # Bin size spinbox
         self.analysis_bin_size = QSpinBox()
-        self.analysis_bin_size.setRange(10, 600)
+        self.analysis_bin_size.setRange(10, 3600)  # 10 sec to 60 min
         self.analysis_bin_size.setValue(
             60
         )  # Default: 60s (matches main analysis default)
         self.analysis_bin_size.setSingleStep(10)
         self.analysis_bin_size.setSuffix(" sec")
         self.analysis_bin_size.setToolTip(
-            "Bin size for extended analysis.\n"
-            "Independent of main analysis bin size.\n"
+            "Bin size for extended analysis (10 sec - 60 min).\n"
+            "Larger bins reduce noise but lose temporal resolution.\n"
+            "For Cosinor: larger bins (5-10 min) reduce saturation at 1.0.\n"
             "Data will be automatically re-binned if different from original."
         )
         self.analysis_bin_size.setMinimumWidth(100)
@@ -1545,6 +1571,13 @@ class HDF5AnalysisWidget(QWidget):
         self.btn_bin_10min.clicked.connect(lambda: self._set_analysis_bin_preset(600))
         binning_controls.addWidget(self.btn_bin_10min)
 
+        self.btn_bin_30min = QPushButton("30 min")
+        self.btn_bin_30min.setToolTip(
+            "30 minute bins - reduces saturation for Cosinor analysis"
+        )
+        self.btn_bin_30min.clicked.connect(lambda: self._set_analysis_bin_preset(1800))
+        binning_controls.addWidget(self.btn_bin_30min)
+
         binning_controls.addStretch()
 
         rebinning_layout.addLayout(binning_controls)
@@ -1562,16 +1595,28 @@ class HDF5AnalysisWidget(QWidget):
 
         self.data_source_combo = QComboBox()
         self.data_source_combo.addItems(
-            ["Fraction Movement (0-1)", "Raw Movement (pixel differences)"]
+            ["Fraction Movement (0-1)", "Raw Movement (binary)"]
         )
         self.data_source_combo.setCurrentIndex(0)  # Default: fraction movement
         self.data_source_combo.setToolTip(
             "Choose data source for extended analysis:\n"
-            "• Fraction Movement: Normalized activity (0-1), recommended for most analyses\n"
-            "• Raw Movement: Absolute pixel differences, useful for amplitude comparisons"
+            "• Fraction Movement: Binned activity ratio (0-1), smoother\n"
+            "• Raw Movement: Binary movement detection, more detail"
         )
         self.data_source_combo.currentIndexChanged.connect(self._on_data_source_changed)
         data_source_layout.addWidget(self.data_source_combo)
+
+        # Checkbox to calculate both activity and sleep phases
+        self.chk_calculate_sleep_phase = QCheckBox("Also calculate Sleep Phase")
+        self.chk_calculate_sleep_phase.setChecked(True)
+        self.chk_calculate_sleep_phase.setToolTip(
+            "Calculate both Acrophase (peak activity) and Sleep Phase (peak sleep):\n"
+            "• Acrophase: Time of maximum activity (from movement data)\n"
+            "• Sleep Phase: Time of maximum sleep (from sleep_data)\n\n"
+            "Sleep = continuous quiescence ≥ sleep threshold (default 8 min)\n"
+            "Requires main analysis to be run first."
+        )
+        data_source_layout.addWidget(self.chk_calculate_sleep_phase)
         data_source_layout.addStretch()
 
         rebinning_layout.addLayout(data_source_layout)
@@ -2035,6 +2080,13 @@ class HDF5AnalysisWidget(QWidget):
         self.btn_load_dir.clicked.connect(self.load_directory)
         self.btn_detect_rois.clicked.connect(self.enhanced_detect_rois)
         self.btn_clear_rois.clicked.connect(self.clear_roi_detection)
+
+        # Plate preset checkboxes - make mutually exclusive
+        self.chk_6well.stateChanged.connect(self._on_6well_preset_changed)
+        self.chk_12well.stateChanged.connect(self._on_12well_preset_changed)
+
+        # ROI scale button
+        self.btn_apply_scale.clicked.connect(self._apply_roi_scale)
 
         # NEW: Calibration workflow connections
         self.btn_load_calibration.clicked.connect(self.load_calibration_file)
@@ -2684,25 +2736,29 @@ class HDF5AnalysisWidget(QWidget):
             self.lbl_file_info.setText("Error: No HDF5 file loaded for ROI detection")
             return
 
-        # Get ROI detection parameters
-        if self.chk_12well.isChecked():
-            params = {
-                "min_radius": 100,
-                "max_radius": 150,
-                "dp": 1.0,
-                "min_dist": 200,
-                "param1": 50,
-                "param2": 30,
-            }
-        else:
-            params = {
-                "min_radius": self.min_radius.value(),
-                "max_radius": self.max_radius.value(),
-                "dp": self.dp_param.value(),
-                "min_dist": self.min_dist.value(),
-                "param1": self.param1.value(),
-                "param2": self.param2.value(),
-            }
+        # Get ROI detection parameters based on preset or manual values
+        # Always use current spinbox values (presets just set the spinbox values)
+        params = {
+            "min_radius": self.min_radius.value(),
+            "max_radius": self.max_radius.value(),
+            "dp": self.dp_param.value(),
+            "min_dist": self.min_dist.value(),
+            "param1": self.param1.value(),
+            "param2": self.param2.value(),
+        }
+
+        # Log which preset is active (if any)
+        if self.chk_6well.isChecked():
+            self._log_message("6-well preset active (values can be adjusted)")
+        elif self.chk_12well.isChecked():
+            self._log_message("12-well preset active (values can be adjusted)")
+
+        # Log the actual parameters being used
+        self._log_message(
+            f"ROI Detection: radius={params['min_radius']}-{params['max_radius']}px, "
+            f"dp={params['dp']}, minDist={params['min_dist']}, "
+            f"param1={params['param1']}, param2={params['param2']}"
+        )
 
         try:
             # ROI detection - get first frame from viewer layer or file
@@ -2748,6 +2804,20 @@ class HDF5AnalysisWidget(QWidget):
                 gray_frame = cv2.cvtColor(first_frame, cv2.COLOR_RGB2GRAY)
             else:
                 gray_frame = first_frame.copy()
+
+            # Ensure uint8 for CLAHE (required by OpenCV)
+            if gray_frame.dtype != np.uint8:
+                # Normalize to 0-255 range and convert to uint8
+                gray_float = gray_frame.astype(np.float32)
+                gray_min, gray_max = gray_float.min(), gray_float.max()
+                if gray_max > gray_min:
+                    gray_norm = (gray_float - gray_min) / (gray_max - gray_min)
+                else:
+                    gray_norm = gray_float
+                gray_frame = (gray_norm * 255).astype(np.uint8)
+                self._log_message(
+                    f"Converted frame from {first_frame.dtype} to uint8 for CLAHE"
+                )
 
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             enhanced_frame = clahe.apply(gray_frame)
@@ -2816,20 +2886,32 @@ class HDF5AnalysisWidget(QWidget):
 
                 sorted_circles = np.array(sorted_circles, dtype=np.uint16)
 
-                for idx, circle in enumerate(sorted_circles):
+                # Store original circles for later scaling
+                self._original_circles = sorted_circles.copy()
+                self._original_frame_shape = gray_frame.shape
+                self._original_first_frame = first_frame.copy()
+                self.btn_apply_scale.setEnabled(True)
+
+                # Apply current scale factor
+                scale = self.roi_scale.value()
+                scaled_circles = sorted_circles.copy().astype(np.float32)
+                scaled_circles[:, 2] = scaled_circles[:, 2] * scale  # Scale radius only
+                scaled_circles = np.round(scaled_circles).astype(np.uint16)
+
+                for idx, circle in enumerate(scaled_circles):
                     mask = np.zeros(gray_frame.shape, dtype=np.uint8)
                     cv2.circle(
                         mask, (circle[0], circle[1]), circle[2], 255, thickness=-1
                     )
                     masks.append(mask)
 
-                # Create labeled frame
+                # Create labeled frame with scaled circles
                 if len(first_frame.shape) == 3:
                     labeled_frame = first_frame.copy()
                 else:
                     labeled_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2RGB)
 
-                for idx, circle in enumerate(sorted_circles):
+                for idx, circle in enumerate(scaled_circles):
                     color = (
                         (255, 165, 0) if dataset_type == "CALIBRATION" else (0, 255, 0)
                     )
@@ -3593,6 +3675,109 @@ class HDF5AnalysisWidget(QWidget):
 
             except Exception as e:
                 self._log_message(f"Error switching to main dataset: {e}")
+
+    def _on_6well_preset_changed(self, state):
+        """Handle 6-well preset checkbox change - make mutually exclusive."""
+        if state == 2:  # Checked
+            self.chk_12well.blockSignals(True)
+            self.chk_12well.setChecked(False)
+            self.chk_12well.blockSignals(False)
+            # Update spinbox values to show preset (tested optimal for 6-well)
+            self.min_radius.setValue(100)
+            self.max_radius.setValue(145)
+            self.dp_param.setValue(1.0)
+            self.min_dist.setValue(300)
+            self.param1.setValue(30)
+            self.param2.setValue(60)
+
+    def _on_12well_preset_changed(self, state):
+        """Handle 12-well preset checkbox change - make mutually exclusive."""
+        if state == 2:  # Checked
+            self.chk_6well.blockSignals(True)
+            self.chk_6well.setChecked(False)
+            self.chk_6well.blockSignals(False)
+            # Update spinbox values to show preset
+            self.min_radius.setValue(70)
+            self.max_radius.setValue(120)
+            self.dp_param.setValue(1.0)
+            self.min_dist.setValue(150)
+            self.param1.setValue(50)
+            self.param2.setValue(25)
+
+    def _apply_roi_scale(self):
+        """Apply scale factor to detected ROIs without re-detecting."""
+        if not hasattr(self, "_original_circles") or self._original_circles is None:
+            self._log_message("ERROR: No ROIs detected yet. Run detection first.")
+            return
+
+        try:
+            scale = self.roi_scale.value()
+            self._log_message(f"Applying ROI scale: {scale:.2f}")
+
+            # Get original data
+            original_circles = self._original_circles
+            frame_shape = self._original_frame_shape
+            first_frame = self._original_first_frame
+
+            # Scale the radii (keep centers unchanged)
+            scaled_circles = original_circles.copy().astype(np.float32)
+            scaled_circles[:, 2] = scaled_circles[:, 2] * scale
+            scaled_circles = np.round(scaled_circles).astype(np.uint16)
+
+            # Recreate masks with scaled radii
+            masks = []
+            for circle in scaled_circles:
+                mask = np.zeros(frame_shape, dtype=np.uint8)
+                cv2.circle(mask, (circle[0], circle[1]), circle[2], 255, thickness=-1)
+                masks.append(mask)
+
+            # Recreate labeled frame
+            if len(first_frame.shape) == 3:
+                labeled_frame = first_frame.copy()
+            else:
+                labeled_frame = cv2.cvtColor(first_frame, cv2.COLOR_GRAY2RGB)
+
+            current_type = getattr(self, "current_dataset_type", "main")
+            dataset_type = "CALIBRATION" if current_type == "calibration" else "MAIN"
+
+            for idx, circle in enumerate(scaled_circles):
+                color = (255, 165, 0) if dataset_type == "CALIBRATION" else (0, 255, 0)
+                cv2.circle(labeled_frame, (circle[0], circle[1]), circle[2], color, 2)
+                cv2.putText(
+                    labeled_frame,
+                    f"{idx + 1}",
+                    (circle[0] - 10, circle[1] + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    2.5,
+                    (255, 0, 0),
+                    3,
+                )
+
+            # Update stored masks
+            if dataset_type == "CALIBRATION":
+                self.calibration_masks = masks.copy()
+                self.calibration_labeled_frame = labeled_frame.copy()
+                self.masks = masks
+                self.labeled_frame = labeled_frame
+            else:
+                self.main_masks = masks.copy()
+                self.main_labeled_frame = labeled_frame.copy()
+                self.masks = masks
+                self.labeled_frame = labeled_frame
+
+            # Update viewer layer
+            self._add_roi_layers_to_viewer(labeled_frame, masks, dataset_type)
+
+            avg_radius = np.mean(scaled_circles[:, 2])
+            self._log_message(
+                f"Scaled {len(masks)} ROIs to {scale:.0%} (avg radius: {avg_radius:.0f}px)"
+            )
+            self.lbl_file_info.setText(
+                f"{dataset_type}: {len(masks)} ROIs (scale: {scale:.0%})"
+            )
+
+        except Exception as e:
+            self._log_message(f"ERROR applying ROI scale: {e}")
 
     def clear_roi_detection(self):
         """Enhanced ROI detection clearing with proper event disconnection."""
@@ -8192,6 +8377,55 @@ class HDF5AnalysisWidget(QWidget):
         ]
         self._log_message(f"Analysis method changed to: {methods[index]}")
 
+        # Update data source dropdown based on method
+        self._update_data_source_for_method(index)
+
+    def _update_data_source_for_method(self, method_index):
+        """Update data source dropdown based on selected analysis method.
+
+        Cosinor analysis requires Fraction Movement (0-1) data for sinusoidal fitting.
+        Other methods can use either Fraction Movement or Raw Movement data.
+        """
+        if not hasattr(self, "data_source_combo"):
+            return
+
+        # Block signals to prevent triggering _on_data_source_changed during update
+        self.data_source_combo.blockSignals(True)
+
+        # Store current selection if possible
+        current_index = self.data_source_combo.currentIndex()
+
+        # Clear and repopulate based on method
+        self.data_source_combo.clear()
+
+        if method_index == 2:  # Cosinor Analysis
+            # Only Fraction Movement is valid for Cosinor
+            self.data_source_combo.addItems(["Fraction Movement (0-1)"])
+            self.data_source_combo.setCurrentIndex(0)
+            self.data_source_combo.setEnabled(False)
+            self.data_source_combo.setToolTip(
+                "Cosinor analysis requires Fraction Movement data (0-1 range)\n"
+                "for sinusoidal curve fitting. Raw Movement data is not suitable."
+            )
+        else:
+            # All other methods can use either data source
+            self.data_source_combo.addItems(
+                ["Fraction Movement (0-1)", "Raw Movement (binary)"]
+            )
+            # Restore previous selection if valid
+            if current_index < self.data_source_combo.count():
+                self.data_source_combo.setCurrentIndex(current_index)
+            else:
+                self.data_source_combo.setCurrentIndex(0)
+            self.data_source_combo.setEnabled(True)
+            self.data_source_combo.setToolTip(
+                "Choose data source for extended analysis:\n"
+                "• Fraction Movement: Binned activity ratio (0-1), smoother\n"
+                "• Raw Movement: Binary movement detection, more detail"
+            )
+
+        self.data_source_combo.blockSignals(False)
+
     def _on_cycle_selection_toggled(self, state):
         """Handle toggling of cycle selection checkbox."""
         enabled = state == 2  # Qt.Checked = 2
@@ -8327,7 +8561,7 @@ class HDF5AnalysisWidget(QWidget):
 
     def _on_data_source_changed(self, index):
         """Handle change in data source selection."""
-        source_names = ["Fraction Movement (0-1)", "Raw Movement (pixel differences)"]
+        source_names = ["Fraction Movement (0-1)", "Raw Movement (binary)"]
         self._log_message(f"Data source changed to: {source_names[index]}")
 
     def _rebin_timeseries_data(
@@ -8684,15 +8918,111 @@ class HDF5AnalysisWidget(QWidget):
                 hasattr(self, "fisher_analysis_results")
                 and self.fisher_analysis_results
             ):
+                method_index = getattr(self, "current_fisher_method", 0)
+                method_name = (
+                    self.fisher_method_combo.currentText()
+                    if hasattr(self, "fisher_method_combo")
+                    else "Unknown"
+                )
+
+                # Format extended results to match expected structure
+                # The save function expects keys like 'fisher', 'fft', 'cosinor', etc.
                 extended_results = {
-                    "method_index": getattr(self, "current_fisher_method", 0),
-                    "method_name": (
-                        self.fisher_method_combo.currentText()
-                        if hasattr(self, "fisher_method_combo")
-                        else "Unknown"
-                    ),
-                    "results": self.fisher_analysis_results,
+                    "method_index": method_index,
+                    "method_name": method_name,
                 }
+
+                # Map method index to expected key names
+                results_data = self.fisher_analysis_results
+                if method_index == 0:  # Fisher Z-Transformation
+                    # Filter to ROI data only (integers), format for save
+                    fisher_data = {}
+                    for roi_id, roi_result in results_data.items():
+                        if isinstance(roi_id, int):
+                            periodogram = roi_result.get("periodogram", {})
+                            fisher_data[roi_id] = {
+                                "periods": periodogram.get("periods", []),
+                                "z_scores": periodogram.get("z_scores", []),
+                                "dominant_period": periodogram.get(
+                                    "dominant_period", 0
+                                ),
+                                "dominant_z_score": periodogram.get(
+                                    "dominant_z_score", 0
+                                ),
+                                "is_significant": periodogram.get(
+                                    "is_significant", False
+                                ),
+                            }
+                    extended_results["fisher"] = fisher_data
+                    # Save sleep phase results if available
+                    if "sleep_phase_results" in results_data:
+                        extended_results["sleep_phase_results"] = results_data[
+                            "sleep_phase_results"
+                        ]
+
+                elif method_index == 1:  # FFT Power Spectrum
+                    fft_data = {}
+                    for roi_id, roi_result in results_data.items():
+                        if isinstance(roi_id, int):
+                            fft_data[roi_id] = {
+                                "periods": roi_result.get("relevant_periods", []),
+                                "power": roi_result.get("relevant_power", []),
+                                "dominant_period": roi_result.get("dominant_period", 0),
+                                "dominant_power": roi_result.get("dominant_power", 0),
+                            }
+                    extended_results["fft"] = fft_data
+                    if "sleep_phase_results" in results_data:
+                        extended_results["sleep_phase_results"] = results_data[
+                            "sleep_phase_results"
+                        ]
+
+                elif method_index == 2:  # Cosinor Analysis
+                    cosinor_data = {}
+                    roi_results = results_data.get("roi_results", {})
+                    for roi_id, roi_result in roi_results.items():
+                        if isinstance(roi_id, int):
+                            best = roi_result.get("best_result", {})
+                            period = roi_result.get("best_period", 24)
+                            cosinor_data[roi_id] = {
+                                period: {
+                                    "mesor": best.get("mesor", 0),
+                                    "amplitude": best.get("amplitude", 0),
+                                    "acrophase": best.get("acrophase", 0),
+                                    "r_squared": best.get("r_squared", 0),
+                                    "p_value": best.get("p_value", 1),
+                                    "significant": best.get("significant", False),
+                                }
+                            }
+                    extended_results["cosinor"] = cosinor_data
+                    if "sleep_phase_results" in results_data:
+                        extended_results["sleep_phase_results"] = results_data[
+                            "sleep_phase_results"
+                        ]
+
+                elif method_index == 3:  # ROI Similarity
+                    extended_results["similarity"] = {
+                        "matrix": results_data.get("correlation_matrix", []),
+                        "roi_ids": results_data.get("roi_ids", []),
+                    }
+
+                elif method_index == 4:  # Coherence
+                    extended_results["coherence_matrix"] = results_data.get(
+                        "coherence_matrix", []
+                    )
+                    extended_results["coherence_roi_ids"] = results_data.get(
+                        "roi_ids", []
+                    )
+
+                elif method_index == 5:  # Phase Clustering
+                    phase_data = {}
+                    roi_phases = results_data.get("roi_phases", {})
+                    for roi_id, phase_info in roi_phases.items():
+                        if isinstance(roi_id, int):
+                            phase_data[roi_id] = {
+                                "phase": phase_info.get("phase_radians", 0),
+                                "amplitude": phase_info.get("amplitude", 0),
+                            }
+                    extended_results["phase"] = phase_data
 
             # Collect analysis parameters
             analysis_params = {
@@ -8860,7 +9190,7 @@ class HDF5AnalysisWidget(QWidget):
                     )
                     return
                 source_data = self.merged_results
-                data_type_name = "Raw Movement (pixel differences)"
+                data_type_name = "Raw Movement (binary)"
 
             # Get bin sizes
             original_bin_size = self.bin_size_seconds.value()
@@ -8943,13 +9273,38 @@ class HDF5AnalysisWidget(QWidget):
                     analysis_data,
                 )
             elif method_index == 2:  # Cosinor Analysis
+                # Cosinor requires fraction movement data (0-1 range) for sinusoidal fitting
+                if data_source_index != 0:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: Cosinor analysis requires Fraction Movement data.\n\n"
+                        "Please select 'Fraction Movement (0-1)' as data source.\n"
+                        "Raw Movement data is not suitable for sinusoidal curve fitting."
+                    )
+                    self._log_message(
+                        "⚠️ Cosinor requires Fraction Movement data source"
+                    )
+                    return
+                if not hasattr(self, "fraction_data") or not self.fraction_data:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No fraction movement data available for Cosinor.\n\n"
+                        "Cosinor analysis requires fraction movement data.\n"
+                        "Please run the main analysis first."
+                    )
+                    self._log_message(
+                        "⚠️ No fraction movement data for Cosinor analysis"
+                    )
+                    return
+                # Use analysis_data which has rebinning and time range applied
+                self._log_message(
+                    "  Using Fraction Movement data (with rebinning/time range if set)"
+                )
                 results, summary = self._run_cosinor_method(
                     min_period,
                     max_period,
                     significance,
                     sampling_interval,
                     bin_size,
-                    analysis_data,
+                    analysis_data,  # Now uses rebinned/filtered data instead of raw fraction_data
                 )
             elif method_index == 3:  # ROI Similarity Matrix
                 results, summary = self._run_similarity_method(
@@ -8965,6 +9320,115 @@ class HDF5AnalysisWidget(QWidget):
                 )
             else:
                 raise ValueError(f"Unknown method index: {method_index}")
+
+            # Calculate sleep phase if enabled (for methods that support it)
+            # Note: Cosinor (method_index=2) excluded because it requires continuous
+            # sinusoidal data, not binary sleep states
+            sleep_results = None
+            sleep_summary = ""
+            if self.chk_calculate_sleep_phase.isChecked() and method_index in [
+                0,
+                1,
+            ]:  # Fisher, FFT only (not Cosinor)
+                # Use actual sleep_data (requires 8 min continuous quiescence)
+                if hasattr(self, "sleep_data") and self.sleep_data:
+                    sleep_threshold = self.sleep_threshold_minutes.value()
+                    # Check if sleep_data has actual sleep events
+                    total_sleep_points = sum(
+                        sum(1 for t, v in data if v == 1)
+                        for data in self.sleep_data.values()
+                    )
+                    self._log_message(
+                        f"  Analyzing sleep rhythms (from sleep_data, "
+                        f"threshold: {sleep_threshold} min, {total_sleep_points} sleep points)..."
+                    )
+                    sleep_analysis_data = self.sleep_data
+                elif hasattr(self, "quiescence_data") and self.quiescence_data:
+                    # Fallback to quiescence data if sleep_data not available
+                    total_quiescence_points = sum(
+                        sum(1 for t, v in data if v == 1)
+                        for data in self.quiescence_data.values()
+                    )
+                    self._log_message(
+                        f"  Analyzing sleep rhythms (from quiescence_data, "
+                        f"{total_quiescence_points} quiescence points)..."
+                    )
+                    sleep_analysis_data = self.quiescence_data
+                else:
+                    self._log_message(
+                        "  WARNING: No sleep/quiescence data available. "
+                        "Run main analysis first."
+                    )
+                    sleep_analysis_data = None
+
+                if sleep_analysis_data:
+                    # Apply same time range filter if enabled
+                    if (
+                        hasattr(self, "enable_cycle_selection")
+                        and self.enable_cycle_selection.isChecked()
+                    ):
+                        from ._results_io import extract_subset_by_time_range
+
+                        start_hours = self.cycle_start_time.value()
+                        end_hours = self.cycle_end_time.value()
+                        start_time = start_hours * 3600.0
+                        end_time = end_hours * 3600.0
+                        temp_results = {
+                            "core_analysis": {"sleep_data": sleep_analysis_data}
+                        }
+                        filtered = extract_subset_by_time_range(
+                            temp_results, start_time, end_time
+                        )
+                        sleep_analysis_data = filtered["core_analysis"]["sleep_data"]
+
+                    # Run the same analysis on sleep data
+                    if method_index == 0:  # Fisher Z-Transformation
+                        sleep_results, sleep_summary = self._run_fisher_method(
+                            min_period,
+                            max_period,
+                            significance,
+                            sampling_interval,
+                            bin_size,
+                            sleep_analysis_data,
+                        )
+                    elif method_index == 1:  # FFT Power Spectrum
+                        sleep_results, sleep_summary = self._run_fft_method(
+                            min_period,
+                            max_period,
+                            significance,
+                            sampling_interval,
+                            bin_size,
+                            sleep_analysis_data,
+                        )
+
+                    # Log sleep analysis results
+                    if sleep_results:
+                        # Handle both structures: direct ROI keys (Fisher/FFT) or nested roi_results (Cosinor)
+                        if "roi_results" in sleep_results:
+                            sleep_roi_count = len(
+                                [
+                                    k
+                                    for k in sleep_results["roi_results"].keys()
+                                    if isinstance(k, int)
+                                ]
+                            )
+                        else:
+                            sleep_roi_count = len(
+                                [k for k in sleep_results.keys() if isinstance(k, int)]
+                            )
+                        self._log_message(
+                            f"  ✓ Sleep rhythm analysis complete: {sleep_roi_count} ROIs"
+                        )
+                    else:
+                        self._log_message(
+                            "  ⚠️ Sleep rhythm analysis returned no results"
+                        )
+
+                    # Combine results
+                    results["sleep_phase_results"] = sleep_results
+                    summary = self._combine_activity_sleep_summary(
+                        summary, sleep_summary, results, sleep_results
+                    )
 
             # Store results
             self.fisher_analysis_results = results
@@ -9021,6 +9485,259 @@ class HDF5AnalysisWidget(QWidget):
 
         summary = generate_circadian_summary(results)
         return results, summary
+
+    def _create_inverted_activity_data(self, activity_data):
+        """
+        Create inverted activity data for sleep phase analysis.
+        For fraction movement (0-1): inverted = 1 - value
+        For raw movement: inverted = max - value
+        """
+        inverted_data = {}
+
+        for roi, data_list in activity_data.items():
+            if not data_list:
+                inverted_data[roi] = []
+                continue
+
+            # Extract values to determine if this is fraction (0-1) or raw data
+            values = [v for t, v in data_list]
+            max_val = max(values) if values else 1.0
+
+            inverted_list = []
+            for timestamp, value in data_list:
+                if max_val <= 1.0:
+                    # Fraction movement (0-1): invert as 1 - value
+                    inverted_value = 1.0 - value
+                else:
+                    # Raw movement: invert as max - value
+                    inverted_value = max_val - value
+                inverted_list.append((timestamp, inverted_value))
+
+            inverted_data[roi] = inverted_list
+
+        return inverted_data
+
+    def _combine_activity_sleep_summary(
+        self, activity_summary, sleep_summary, activity_results, sleep_results
+    ):
+        """Combine activity and sleep phase summaries into one comprehensive report."""
+        combined = []
+
+        # Get data source name from combo box
+        data_source_index = self.data_source_combo.currentIndex()
+        if data_source_index == 0:
+            data_source_name = "Fraction Movement"
+        else:
+            data_source_name = "Raw Movement"
+
+        combined.append("=" * 60)
+        combined.append("ACTIVITY & SLEEP RHYTHM ANALYSIS RESULTS")
+        combined.append("=" * 60)
+        combined.append("")
+
+        # Activity Phase Section
+        combined.append("─" * 40)
+        combined.append(f"ACTIVITY RHYTHMS (from {data_source_name})")
+        combined.append("─" * 40)
+
+        # Extract key info from activity results
+        # Handle both structures: direct ROI keys (Fisher) or nested "roi_results" (Cosinor)
+        if "roi_results" in activity_results:
+            act_roi_data = activity_results["roi_results"]
+        else:
+            # Fisher results have ROI IDs as direct keys
+            act_roi_data = {
+                k: v for k, v in activity_results.items() if isinstance(k, int)
+            }
+
+        if act_roi_data:
+            roi_items = {k: v for k, v in act_roi_data.items() if isinstance(k, int)}
+            for roi_id, roi_data in sorted(roi_items.items()):
+                # Handle nested structure for different analysis methods
+                if "periodogram" in roi_data:
+                    # Fisher/FFT structure
+                    periodogram = roi_data.get("periodogram", {})
+                    period = periodogram.get("dominant_period", "N/A")
+                    significant = periodogram.get("is_significant", False)
+                    z_score = periodogram.get(
+                        "dominant_z_score", periodogram.get("max_power", "N/A")
+                    )
+                    acrophase = (
+                        "N/A (use Cosinor)"  # Fisher doesn't calculate acrophase
+                    )
+                elif "best_result" in roi_data:
+                    # Cosinor structure: best_period at top, details in best_result
+                    period = roi_data.get("best_period", "N/A")
+                    best_result = roi_data.get("best_result", {})
+                    acrophase = best_result.get("acrophase", "N/A")
+                    significant = best_result.get("significant", False)
+                    z_score = None
+                elif "dominant_period" in roi_data:
+                    # FFT direct structure
+                    period = roi_data.get("dominant_period", "N/A")
+                    acrophase = "N/A"
+                    significant = roi_data.get("is_significant", False)
+                    z_score = roi_data.get("dominant_power", None)
+                else:
+                    continue
+
+                sig_str = "✓" if significant else "✗"
+
+                if isinstance(period, (int, float)):
+                    period_str = f"{period:.1f}h"
+                else:
+                    period_str = str(period)
+
+                if isinstance(acrophase, (int, float)):
+                    acrophase_str = f"{acrophase:.1f}h"
+                else:
+                    acrophase_str = str(acrophase)
+
+                if z_score is not None and isinstance(z_score, (int, float)):
+                    combined.append(
+                        f"  ROI {roi_id}: Period={period_str}, Z={z_score:.1f} {sig_str}"
+                    )
+                else:
+                    combined.append(
+                        f"  ROI {roi_id}: Period={period_str}, Acrophase={acrophase_str} {sig_str}"
+                    )
+
+        combined.append("")
+
+        # Sleep Phase Section
+        sleep_threshold = (
+            self.sleep_threshold_minutes.value()
+            if hasattr(self, "sleep_threshold_minutes")
+            else 8
+        )
+        combined.append("─" * 40)
+        combined.append(
+            f"SLEEP RHYTHMS (from sleep_data, ≥{sleep_threshold}min quiescence)"
+        )
+        combined.append("─" * 40)
+
+        # Handle both structures for sleep results
+        if sleep_results:
+            if "roi_results" in sleep_results:
+                slp_roi_data = sleep_results["roi_results"]
+            else:
+                slp_roi_data = {
+                    k: v for k, v in sleep_results.items() if isinstance(k, int)
+                }
+
+            sleep_roi_items = {
+                k: v for k, v in slp_roi_data.items() if isinstance(k, int)
+            }
+            for roi_id, roi_data in sorted(sleep_roi_items.items()):
+                # Handle nested structure for different analysis methods
+                if "periodogram" in roi_data:
+                    # Fisher/FFT structure
+                    periodogram = roi_data.get("periodogram", {})
+                    period = periodogram.get("dominant_period", "N/A")
+                    significant = periodogram.get("is_significant", False)
+                    z_score = periodogram.get(
+                        "dominant_z_score", periodogram.get("max_power", "N/A")
+                    )
+                    sleep_phase = "N/A"
+                elif "best_result" in roi_data:
+                    # Cosinor structure: best_period at top, details in best_result
+                    period = roi_data.get("best_period", "N/A")
+                    best_result = roi_data.get("best_result", {})
+                    sleep_phase = best_result.get("acrophase", "N/A")
+                    significant = best_result.get("significant", False)
+                    z_score = None
+                elif "dominant_period" in roi_data:
+                    # FFT direct structure
+                    period = roi_data.get("dominant_period", "N/A")
+                    sleep_phase = "N/A"
+                    significant = roi_data.get("is_significant", False)
+                    z_score = roi_data.get("dominant_power", None)
+                else:
+                    continue
+
+                sig_str = "✓" if significant else "✗"
+
+                if isinstance(period, (int, float)):
+                    period_str = f"{period:.1f}h"
+                else:
+                    period_str = str(period)
+
+                if z_score is not None and isinstance(z_score, (int, float)):
+                    combined.append(
+                        f"  ROI {roi_id}: Period={period_str}, Z={z_score:.1f} {sig_str}"
+                    )
+                else:
+                    if isinstance(sleep_phase, (int, float)):
+                        sleep_str = f"{sleep_phase:.1f}h"
+                    else:
+                        sleep_str = str(sleep_phase)
+                    combined.append(
+                        f"  ROI {roi_id}: Period={period_str}, Sleep Phase={sleep_str} {sig_str}"
+                    )
+
+        combined.append("")
+
+        # Summary comparison
+        combined.append("─" * 40)
+        combined.append("PERIOD COMPARISON (Activity vs Sleep)")
+        combined.append("─" * 40)
+
+        # Use previously extracted ROI data
+        if act_roi_data and sleep_results:
+            # Get sleep ROI data (handle both structures)
+            if "roi_results" in sleep_results:
+                slp_compare_data = sleep_results["roi_results"]
+            else:
+                slp_compare_data = {
+                    k: v for k, v in sleep_results.items() if isinstance(k, int)
+                }
+
+            act_roi_keys = [k for k in act_roi_data.keys() if isinstance(k, int)]
+            for roi_id in sorted(act_roi_keys):
+                act_data = act_roi_data.get(roi_id, {})
+                slp_data = slp_compare_data.get(roi_id, {})
+
+                # Handle nested structure for Fisher/FFT
+                if "periodogram" in act_data:
+                    act_period = act_data.get("periodogram", {}).get("dominant_period")
+                else:
+                    act_period = act_data.get("dominant_period")
+
+                if "periodogram" in slp_data:
+                    slp_period = slp_data.get("periodogram", {}).get("dominant_period")
+                else:
+                    slp_period = slp_data.get("dominant_period")
+
+                # Also try to get acrophase for Cosinor
+                act_phase = act_data.get("acrophase_hours")
+                slp_phase = slp_data.get("acrophase_hours")
+
+                if act_period is not None and slp_period is not None:
+                    if act_phase is not None and slp_phase is not None:
+                        # Cosinor: show phase comparison
+                        diff = abs(act_phase - slp_phase)
+                        if diff > 12:
+                            diff = 24 - diff
+                        combined.append(
+                            f"  ROI {roi_id}: Act Phase={act_phase:.1f}h, "
+                            f"Sleep Phase={slp_phase:.1f}h, Δ={diff:.1f}h"
+                        )
+                    else:
+                        # Fisher/FFT: show period comparison
+                        combined.append(
+                            f"  ROI {roi_id}: Act Period={act_period:.1f}h, "
+                            f"Sleep Period={slp_period:.1f}h"
+                        )
+
+        combined.append("")
+        combined.append("=" * 60)
+        combined.append("Legend: ✓ = significant rhythm, ✗ = not significant")
+        combined.append(
+            "NOTE: For actual acrophase (time of peak), use Cosinor Analysis"
+        )
+        combined.append("=" * 60)
+
+        return "\n".join(combined)
 
     def _run_fft_method(
         self,
@@ -9155,6 +9872,10 @@ class HDF5AnalysisWidget(QWidget):
             "=" * 70,
             "COSINOR ANALYSIS - Circadian Rhythm Quantification",
             "=" * 70,
+            "",
+            "Data source: Fraction Movement (binned activity, 0-1 range)",
+            "Note: Fraction movement represents the proportion of time with",
+            "      detected movement per time bin - suitable for cosinor fitting.",
             "",
             "Cosinor analysis fits a cosine curve to activity data:",
             "  y(t) = MESOR + Amplitude × cos(2πt/τ + Acrophase)",
@@ -9369,11 +10090,15 @@ class HDF5AnalysisWidget(QWidget):
         # Use half of max period as max lag (adaptive to period range)
         max_lag = self.fisher_max_period.value() / 2
 
+        # Get significance level from UI
+        significance = self.fisher_significance.value()
+
         correlation_results = calculate_roi_correlation_matrix(
             data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             bin_size_seconds=bin_size,
             max_lag_hours=max_lag,
+            significance_level=significance,
         )
 
         clustering_results = hierarchical_clustering(
@@ -9404,11 +10129,15 @@ class HDF5AnalysisWidget(QWidget):
             self.fisher_min_period.value() + self.fisher_max_period.value()
         ) / 2
 
+        # Get significance level from UI
+        significance = self.fisher_significance.value()
+
         results = calculate_coherence_matrix(
             data_to_analyze,  # Use fraction_data (proportion 0-1)
             sampling_interval=sampling_interval,
             bin_size_seconds=bin_size,
             target_period_hours=midpoint_period,
+            significance_level=significance,
         )
 
         summary = generate_coherence_summary(results)
@@ -9499,98 +10228,140 @@ class HDF5AnalysisWidget(QWidget):
             if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
                 plt.close(self.fisher_plot_figure)
 
-            n_rois = len(fft_results)
-            n_cols = min(3, n_rois)
-            n_rows = (n_rois + n_cols - 1) // n_cols
-
-            # Calculate appropriate figure size
-            fig_width = 4 * n_cols
-            fig_height = 3 * n_rows
-
-            fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
+            # Get data source for plot title
+            data_source_index = self.data_source_combo.currentIndex()
+            data_source = (
+                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
             )
-            fig.suptitle("FFT Power Spectrum", fontsize=14, fontweight="bold")
 
-            # Find global Y-axis limits for consistent scaling
-            all_power = []
-            for result in fft_results.values():
-                if "relevant_power" in result and "error" not in result:
-                    all_power.extend(result["relevant_power"])
+            # Check if sleep phase results are available
+            sleep_results = fft_results.get("sleep_phase_results", None)
+            has_sleep = sleep_results is not None and len(sleep_results) > 0
 
-            if all_power:
-                global_y_min = 0  # Power starts at 0
-                global_y_max = max(all_power) * 1.1  # Add 10% padding
+            # Filter to only ROI keys (integers)
+            roi_only_results = {
+                k: v for k, v in fft_results.items() if isinstance(k, int)
+            }
+            n_rois = len(roi_only_results)
+            n_cols = min(3, n_rois)
+            n_rows_per_section = (n_rois + n_cols - 1) // n_cols
+
+            # If we have sleep data, double the rows
+            if has_sleep:
+                total_rows = n_rows_per_section * 2
+                fig_height = 3.5 * total_rows + 1.5
             else:
-                global_y_min, global_y_max = 0, 1
+                total_rows = n_rows_per_section
+                fig_height = 3.5 * total_rows + 0.5
 
-            for idx, (roi_id, result) in enumerate(sorted(fft_results.items())):
-                row, col = idx // n_cols, idx % n_cols
-                ax = axes[row, col]
+            fig_width = 4 * n_cols
+            fig, axes = plt.subplots(
+                total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
+            )
 
-                # Get ROI-specific color
-                roi_color = (
-                    self.roi_colors.get(roi_id, f"C{idx}")
-                    if hasattr(self, "roi_colors")
-                    else f"C{idx}"
+            if has_sleep:
+                fig.suptitle(
+                    f"FFT Power Spectrum  —  Data source: {data_source}",
+                    fontsize=13,
+                    fontweight="bold",
+                    y=0.99,
+                )
+            else:
+                fig.suptitle(
+                    f"FFT Power Spectrum  —  Activity from {data_source}",
+                    fontsize=13,
+                    fontweight="bold",
+                    y=0.99,
                 )
 
-                if "error" in result:
-                    ax.text(
-                        0.5,
-                        0.5,
-                        f"ROI {roi_id}\n{result['error']}",
-                        ha="center",
-                        va="center",
-                        transform=ax.transAxes,
+            # Helper function to plot a section
+            def plot_section(results_dict, start_row, section_label):
+                roi_items = {
+                    k: v for k, v in results_dict.items() if isinstance(k, int)
+                }
+
+                for idx, (roi_id, result) in enumerate(sorted(roi_items.items())):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    ax = axes[row, col]
+
+                    roi_color = (
+                        self.roi_colors.get(roi_id, f"C{idx}")
+                        if hasattr(self, "roi_colors")
+                        else f"C{idx}"
                     )
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-                else:
-                    periods = result.get("relevant_periods", [])
-                    power = result.get("relevant_power", [])
 
-                    # Plot with ROI-specific color
-                    ax.plot(periods, power, color=roi_color, linewidth=1.5)
-                    ax.set_xlabel("Period (hours)", fontsize=9)
-                    ax.set_ylabel("Power", fontsize=9)
-                    # Use ROI color for title
-                    ax.set_title(
-                        f"ROI {roi_id}", fontsize=10, color=roi_color, fontweight="bold"
-                    )
-                    ax.grid(True, alpha=0.3)
-
-                    # Apply global Y-axis scaling for consistency
-                    ax.set_ylim(global_y_min, global_y_max)
-
-                    # Mark dominant period with vertical line and point
-                    if "dominant_period" in result:
-                        dominant_period = result["dominant_period"]
-                        dominant_power = result.get("dominant_power", 0)
-                        ax.axvline(
-                            x=dominant_period,
-                            color=roi_color,
-                            linestyle="--",
-                            linewidth=1.5,
-                            alpha=0.5,
+                    if "error" in result:
+                        ax.text(
+                            0.5,
+                            0.5,
+                            f"ROI {roi_id}\n{result['error']}",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
                         )
-                        ax.plot(
-                            dominant_period,
-                            dominant_power,
-                            "o",
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+                    else:
+                        periods = result.get("relevant_periods", [])
+                        power = result.get("relevant_power", [])
+
+                        ax.plot(periods, power, color=roi_color, linewidth=1.5)
+                        ax.set_xlabel("Period (h)", fontsize=9)
+                        ax.set_ylabel("Power (a.u.)", fontsize=9)
+                        ax.set_title(
+                            f"ROI {roi_id} - {section_label}",
+                            fontsize=9,
                             color=roi_color,
-                            markersize=8,
-                            markeredgecolor="black",
-                            markeredgewidth=1,
-                            label=f"Peak: {dominant_period:.1f}h",
+                            fontweight="bold",
+                            pad=4,
+                            loc="left",
                         )
-                        ax.legend(fontsize=7)
+                        ax.tick_params(axis="both", labelsize=8)
+                        ax.grid(True, alpha=0.3)
 
-            # Hide unused subplots
-            for idx in range(n_rois, n_rows * n_cols):
-                axes[idx // n_cols, idx % n_cols].axis("off")
+                        # Per-ROI Y-axis scaling
+                        if len(power) > 0:
+                            roi_y_max = max(power) * 1.1
+                            ax.set_ylim(0, roi_y_max)
 
-            plt.tight_layout()
+                        if "dominant_period" in result:
+                            dominant_period = result["dominant_period"]
+                            dominant_power = result.get("dominant_power", 0)
+                            ax.axvline(
+                                x=dominant_period,
+                                color=roi_color,
+                                linestyle="--",
+                                linewidth=1.5,
+                                alpha=0.5,
+                            )
+                            ax.plot(
+                                dominant_period,
+                                dominant_power,
+                                "o",
+                                color=roi_color,
+                                markersize=8,
+                                markeredgecolor="black",
+                                markeredgewidth=1,
+                                label=f"Peak: {dominant_period:.1f}h",
+                            )
+                            ax.legend(fontsize=7)
+
+                # Hide unused subplots in this section
+                for idx in range(n_rois, n_rows_per_section * n_cols):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    if row < total_rows:
+                        axes[row, col].axis("off")
+
+            # Plot Activity section
+            plot_section(roi_only_results, 0, "Activity")
+
+            # Plot Sleep section if available
+            if has_sleep:
+                plot_section(sleep_results, n_rows_per_section, "Sleep")
+
+            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0, w_pad=1.0)
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
@@ -9625,7 +10396,11 @@ class HDF5AnalysisWidget(QWidget):
             traceback.print_exc()
 
     def _create_cosinor_plot(self, cosinor_results: Dict):
-        """Create cosinor analysis plots showing data and fitted curves."""
+        """Create cosinor analysis plots showing data and fitted curves.
+
+        Cosinor analysis only uses raw movement data (continuous values),
+        not fraction movement or binary sleep data.
+        """
         try:
             import matplotlib.pyplot as plt
             from qtpy.QtGui import QPixmap
@@ -9635,139 +10410,207 @@ class HDF5AnalysisWidget(QWidget):
                 plt.close(self.fisher_plot_figure)
 
             roi_results = cosinor_results.get("roi_results", {})
+            # Filter to only integer ROI keys
+            roi_results = {k: v for k, v in roi_results.items() if isinstance(k, int)}
             n_rois = len(roi_results)
+
+            # Handle case with no ROIs
+            if n_rois == 0:
+                self._log_message("⚠️ No ROI results found for Cosinor plot")
+                return
+
             n_cols = min(3, n_rois)
-            n_rows = (n_rois + n_cols - 1) // n_cols
+            n_rows_per_section = (n_rois + n_cols - 1) // n_cols
+            total_rows = n_rows_per_section
+            fig_height = 4.5 * total_rows + 1
 
             fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(12, 4 * n_rows), squeeze=False
+                total_rows, n_cols, figsize=(13, fig_height), squeeze=False
             )
+
             fig.suptitle(
-                "Cosinor Analysis - Activity and Fitted Curves",
-                fontsize=14,
+                "Cosinor Analysis  —  Fraction Movement Data",
+                fontsize=13,
                 fontweight="bold",
+                y=0.99,
             )
 
-            for idx, (roi_id, roi_data) in enumerate(sorted(roi_results.items())):
-                row, col = idx // n_cols, idx % n_cols
-                ax = axes[row, col]
+            # Cosinor uses fraction movement data (binned, 0-1 range)
+            activity_data_dict = (
+                self.fraction_data if hasattr(self, "fraction_data") else {}
+            )
+            activity_y_label = "Fraction Movement (0-1)"
 
-                # Get ROI-specific color
-                roi_color = (
-                    self.roi_colors.get(roi_id, f"C{idx}")
-                    if hasattr(self, "roi_colors")
-                    else f"C{idx}"
-                )
+            # Helper function to plot ROI results
+            def plot_section(
+                results_dict, raw_data_dict, start_row, section_label, y_label
+            ):
+                roi_items = {
+                    k: v for k, v in results_dict.items() if isinstance(k, int)
+                }
 
-                best_result = roi_data.get("best_result", {})
+                for idx, (roi_id, roi_data) in enumerate(sorted(roi_items.items())):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    ax = axes[row, col]
 
-                if "error" in best_result:
-                    ax.text(
-                        0.5,
-                        0.5,
-                        f"ROI {roi_id}\n{best_result['error']}",
-                        ha="center",
-                        va="center",
-                        transform=ax.transAxes,
-                    )
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-                    continue
-
-                # Get activity data
-                if roi_id in self.fraction_data:
-                    times_hours = np.array(
-                        [t / 3600 for t, _ in self.fraction_data[roi_id]]
-                    )
-                    activity = np.array([v for _, v in self.fraction_data[roi_id]])
-
-                    # Plot actual data
-                    ax.scatter(
-                        times_hours,
-                        activity,
-                        alpha=0.3,
-                        s=10,
-                        color=roi_color,
-                        label="Activity data",
+                    roi_color = (
+                        self.roi_colors.get(roi_id, f"C{idx}")
+                        if hasattr(self, "roi_colors")
+                        else f"C{idx}"
                     )
 
-                    # Plot fitted curve
-                    fitted_curve = best_result.get("fitted_curve", [])
-                    if len(fitted_curve) > 0:
-                        ax.plot(
+                    best_result = roi_data.get("best_result", {})
+
+                    if "error" in best_result:
+                        ax.text(
+                            0.5,
+                            0.5,
+                            f"ROI {roi_id}\n{best_result['error']}",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
+                        )
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+                        continue
+
+                    # Get data for this ROI
+                    if roi_id in raw_data_dict:
+                        times_hours = np.array(
+                            [t / 3600 for t, _ in raw_data_dict[roi_id]]
+                        )
+                        values = np.array([v for _, v in raw_data_dict[roi_id]])
+
+                        # Plot actual data
+                        ax.scatter(
                             times_hours,
-                            fitted_curve,
+                            values,
+                            alpha=0.3,
+                            s=10,
                             color=roi_color,
-                            linewidth=2,
-                            label=f"Fitted curve ({best_result.get('period', 0):.1f}h)",
+                            label=f"{section_label} data",
                         )
 
-                        # Plot MESOR line
-                        mesor = best_result.get("mesor", 0)
-                        ax.axhline(
-                            y=mesor,
-                            color="gray",
-                            linestyle="--",
-                            linewidth=1,
-                            alpha=0.5,
-                            label=f"MESOR={mesor:.3f}",
-                        )
-
-                        # Mark acrophase
-                        acrophase = best_result.get("acrophase", 0)
+                        # Reconstruct fitted curve at raw data time points
+                        # (avoids length mismatch when analysis used rebinned data)
+                        period = best_result.get("period", 0)
                         amplitude = best_result.get("amplitude", 0)
-                        peak_value = mesor + amplitude
+                        mesor = best_result.get("mesor", 0)
+                        acrophase = best_result.get("acrophase", 0)
 
-                        # Find x position for acrophase marker
-                        period = best_result.get("period", 24)
-                        # Show acrophase for first complete period
-                        if acrophase < times_hours[-1]:
+                        if period > 0 and not np.isnan(period):
+                            omega = 2 * np.pi / period
+                            fitted_curve = mesor + amplitude * np.cos(
+                                omega * (times_hours - acrophase)
+                            )
                             ax.plot(
-                                acrophase,
-                                peak_value,
-                                "^",
-                                color="red",
-                                markersize=10,
-                                markeredgecolor="black",
-                                markeredgewidth=0.5,
-                                label=f"Acrophase={acrophase:.1f}h",
+                                times_hours,
+                                fitted_curve,
+                                color="black",
+                                linewidth=2,
+                                label=f"Fitted curve ({period:.1f}h)",
                             )
 
-                    # Add text box with parameters
-                    textstr = f"MESOR: {best_result.get('mesor', 0):.3f}\n"
-                    textstr += f"Amplitude: {best_result.get('amplitude', 0):.3f}\n"
-                    textstr += f"R²: {best_result.get('r_squared', 0):.3f}\n"
-                    textstr += f"p: {best_result.get('p_value', 1):.4f}"
-                    if best_result.get("significant", False):
-                        textstr += " *"
+                            # MESOR line
+                            ax.axhline(
+                                y=mesor,
+                                color="gray",
+                                linestyle="--",
+                                linewidth=1,
+                                alpha=0.5,
+                                label=f"MESOR={mesor:.3f}",
+                            )
 
-                    ax.text(
-                        0.95,
-                        0.05,
-                        textstr,
-                        transform=ax.transAxes,
-                        fontsize=8,
-                        verticalalignment="bottom",
-                        horizontalalignment="right",
-                        bbox=dict(
-                            boxstyle="round", facecolor="wheat", alpha=0.5, pad=0.5
-                        ),
+                            # Acrophase marker
+                            peak_value = mesor + amplitude
+                            if (
+                                isinstance(acrophase, (int, float))
+                                and acrophase < times_hours[-1]
+                            ):
+                                ax.plot(
+                                    acrophase,
+                                    peak_value,
+                                    "^",
+                                    color="red",
+                                    markersize=10,
+                                    markeredgecolor="black",
+                                    markeredgewidth=0.5,
+                                    label=f"Acrophase={acrophase:.1f}h",
+                                )
+
+                        textstr = f"MESOR: {best_result.get('mesor', 0):.3f}\n"
+                        textstr += f"Amplitude: {best_result.get('amplitude', 0):.3f}\n"
+                        textstr += f"R²: {best_result.get('r_squared', 0):.3f}\n"
+                        textstr += f"p: {best_result.get('p_value', 1):.4f}"
+                        if best_result.get("significant", False):
+                            textstr += " *"
+
+                        ax.text(
+                            0.95,
+                            0.05,
+                            textstr,
+                            transform=ax.transAxes,
+                            fontsize=8,
+                            verticalalignment="bottom",
+                            horizontalalignment="right",
+                            bbox=dict(
+                                boxstyle="round", facecolor="wheat", alpha=0.5, pad=0.5
+                            ),
+                        )
+
+                    ax.set_xlabel("Time (h)", fontsize=9)
+                    ax.set_ylabel(y_label, fontsize=9)
+
+                    # Per-ROI Y-axis scaling - include fitted curve range
+                    if roi_id in raw_data_dict and len(values) > 0:
+                        data_max = max(values)
+                        data_min = min(values)
+                        # Also consider fitted curve range if it exists
+                        if period > 0 and not np.isnan(period):
+                            fitted_max = mesor + amplitude
+                            fitted_min = mesor - amplitude
+                            roi_y_max = max(data_max, fitted_max) * 1.1
+                            roi_y_min = (
+                                min(0, data_min, fitted_min) * 1.1
+                                if min(0, data_min, fitted_min) < 0
+                                else min(0, data_min)
+                            )
+                        else:
+                            roi_y_max = data_max * 1.1
+                            roi_y_min = min(0, data_min)
+                        ax.set_ylim(roi_y_min, roi_y_max)
+                    ax.tick_params(axis="both", labelsize=8)
+                    is_significant = best_result.get("significant", False)
+                    title_weight = "bold" if is_significant else "normal"
+                    ax.set_title(
+                        f"ROI {roi_id} - {section_label}",
+                        fontsize=9,
+                        color=roi_color,
+                        fontweight=title_weight,
+                        pad=4,
+                        loc="left",
                     )
+                    ax.legend(fontsize=7, loc="upper left")
+                    ax.grid(True, alpha=0.3)
 
-                ax.set_xlabel("Time (hours)")
-                ax.set_ylabel("Activity (fraction)")
-                # Use ROI color for title, bold if significant
-                is_significant = best_result.get("significant", False)
-                title_weight = "bold" if is_significant else "normal"
-                ax.set_title(f"ROI {roi_id}", color=roi_color, fontweight=title_weight)
-                ax.legend(fontsize=7, loc="upper left")
-                ax.grid(True, alpha=0.3)
+                # Hide unused subplots in this section
+                for idx in range(n_rois, n_rows_per_section * n_cols):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    if row < total_rows:
+                        axes[row, col].axis("off")
 
-            # Hide unused subplots
-            for idx in range(n_rois, n_rows * n_cols):
-                axes[idx // n_cols, idx % n_cols].axis("off")
+            # Plot Activity section (Cosinor uses fraction movement data)
+            plot_section(
+                roi_results,
+                activity_data_dict,
+                0,
+                "Fraction Movement",
+                activity_y_label,
+            )
 
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.5, w_pad=1.0)
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
@@ -9808,6 +10651,17 @@ class HDF5AnalysisWidget(QWidget):
                 plt.close(self.fisher_plot_figure)
 
             fig = plt.figure(figsize=(14, 6))
+
+            # Get data source for plot title
+            data_source_index = self.data_source_combo.currentIndex()
+            data_source = (
+                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+            )
+            fig.suptitle(
+                f"ROI Similarity Analysis\n(Activity from {data_source})",
+                fontsize=14,
+                fontweight="bold",
+            )
 
             # Correlation heatmap
             ax1 = plt.subplot(1, 2, 1)
@@ -9900,6 +10754,12 @@ class HDF5AnalysisWidget(QWidget):
 
             fig, ax = plt.subplots(figsize=(10, 8))
 
+            # Get data source for plot title
+            data_source_index = self.data_source_combo.currentIndex()
+            data_source = (
+                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+            )
+
             coherence_matrix = coherence_results["coherence_matrix"]
             roi_ids = coherence_results["roi_ids"]
 
@@ -9909,7 +10769,7 @@ class HDF5AnalysisWidget(QWidget):
             ax.set_xticklabels(roi_ids, rotation=45)
             ax.set_yticklabels(roi_ids)
             ax.set_title(
-                f"ROI Coherence at ~{coherence_results['target_period_hours']:.0f}h Period"
+                f"ROI Coherence at ~{coherence_results['target_period_hours']:.0f}h Period\n(Activity from {data_source})"
             )
             plt.colorbar(im, ax=ax, label="Coherence")
 
@@ -9956,8 +10816,14 @@ class HDF5AnalysisWidget(QWidget):
             ax = fig.add_subplot(111, projection="polar")
 
             roi_phases = phase_results["roi_phases"]
+            # Filter to only integer ROI keys
+            roi_phases_filtered = {
+                k: v for k, v in roi_phases.items() if isinstance(k, int)
+            }
 
-            for idx, (roi_id, phase_info) in enumerate(sorted(roi_phases.items())):
+            for idx, (roi_id, phase_info) in enumerate(
+                sorted(roi_phases_filtered.items())
+            ):
                 # Get ROI-specific color
                 roi_color = (
                     self.roi_colors.get(roi_id, f"C{idx}")
@@ -9988,7 +10854,17 @@ class HDF5AnalysisWidget(QWidget):
 
             ax.set_theta_zero_location("N")
             ax.set_theta_direction(-1)
-            ax.set_title("ROI Activity Phases", fontsize=14, fontweight="bold", pad=20)
+            # Get data source for plot title
+            data_source_index = self.data_source_combo.currentIndex()
+            data_source = (
+                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+            )
+            ax.set_title(
+                f"ROI Activity Phases\n(Activity from {data_source})",
+                fontsize=14,
+                fontweight="bold",
+                pad=20,
+            )
             ax.legend(loc="upper left", bbox_to_anchor=(1.1, 1.0), fontsize=8)
 
             plt.tight_layout()
@@ -10037,9 +10913,10 @@ class HDF5AnalysisWidget(QWidget):
         method_names = {
             0: "fisher_z",
             1: "fft_spectrum",
-            2: "roi_similarity",
-            3: "coherence_analysis",
-            4: "phase_clustering",
+            2: "cosinor",
+            3: "roi_similarity",
+            4: "coherence_analysis",
+            5: "phase_clustering",
         }
         method_name = method_names.get(self.current_fisher_method, "rhythmic_analysis")
 
@@ -10069,11 +10946,13 @@ class HDF5AnalysisWidget(QWidget):
                 self._export_fisher_method_results(base_path)
             elif self.current_fisher_method == 1:  # FFT Power Spectrum
                 self._export_fft_method_results(base_path)
-            elif self.current_fisher_method == 2:  # ROI Similarity Matrix
+            elif self.current_fisher_method == 2:  # Cosinor Analysis
+                self._export_cosinor_method_results(base_path)
+            elif self.current_fisher_method == 3:  # ROI Similarity Matrix
                 self._export_similarity_method_results(file_path)
-            elif self.current_fisher_method == 3:  # Coherence Analysis
+            elif self.current_fisher_method == 4:  # Coherence Analysis
                 self._export_coherence_method_results(file_path)
-            elif self.current_fisher_method == 4:  # Phase Clustering
+            elif self.current_fisher_method == 5:  # Phase Clustering
                 self._export_phase_clustering_method_results(file_path)
             else:
                 self._log_message(
@@ -10130,6 +11009,151 @@ class HDF5AnalysisWidget(QWidget):
             self._log_message(f"✓ Exported FFT results to Excel: {excel_path}")
         except ImportError:
             self._log_message("⚠️ Excel export not available (pandas not installed)")
+
+    def _export_cosinor_method_results(self, base_path):
+        """Export Cosinor Analysis results to CSV and Excel."""
+        try:
+            import pandas as pd
+
+            excel_path = f"{base_path}.xlsx"
+            self._export_cosinor_to_excel(excel_path)
+            self._log_message(f"✓ Exported Cosinor results to Excel: {excel_path}")
+        except ImportError:
+            self._log_message("⚠️ Excel export not available (pandas not installed)")
+        except Exception as e:
+            self._log_message(f"⚠️ Cosinor export error: {e}")
+
+    def _export_cosinor_to_excel(self, file_path: str):
+        """Export Cosinor analysis results to Excel format."""
+        import pandas as pd
+
+        results = self.fisher_analysis_results
+        roi_results = results.get("roi_results", {})
+        sleep_results = results.get("sleep_phase_results", {})
+        sleep_roi_results = (
+            sleep_results.get("roi_results", {}) if sleep_results else {}
+        )
+
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            # Sheet 1: Activity Summary
+            activity_data = []
+            for roi_id, roi_data in sorted(
+                {k: v for k, v in roi_results.items() if isinstance(k, int)}.items()
+            ):
+                best_result = roi_data.get("best_result", {})
+                if "error" in best_result:
+                    continue
+
+                activity_data.append(
+                    {
+                        "ROI": roi_id,
+                        "Best Period (hours)": roi_data.get("best_period", "N/A"),
+                        "Acrophase (hours)": best_result.get("acrophase", "N/A"),
+                        "MESOR": best_result.get("mesor", "N/A"),
+                        "Amplitude": best_result.get("amplitude", "N/A"),
+                        "R-squared": best_result.get("r_squared", "N/A"),
+                        "P-value": best_result.get("p_value", "N/A"),
+                        "Significant": best_result.get("significant", False),
+                    }
+                )
+
+            if activity_data:
+                activity_df = pd.DataFrame(activity_data)
+                activity_df.to_excel(writer, sheet_name="Activity_Summary", index=False)
+
+            # Sheet 2: Sleep Summary (if available)
+            if sleep_roi_results:
+                sleep_data = []
+                for roi_id, roi_data in sorted(
+                    {
+                        k: v for k, v in sleep_roi_results.items() if isinstance(k, int)
+                    }.items()
+                ):
+                    best_result = roi_data.get("best_result", {})
+                    if "error" in best_result:
+                        continue
+
+                    sleep_data.append(
+                        {
+                            "ROI": roi_id,
+                            "Best Period (hours)": roi_data.get("best_period", "N/A"),
+                            "Sleep Phase (hours)": best_result.get("acrophase", "N/A"),
+                            "MESOR": best_result.get("mesor", "N/A"),
+                            "Amplitude": best_result.get("amplitude", "N/A"),
+                            "R-squared": best_result.get("r_squared", "N/A"),
+                            "P-value": best_result.get("p_value", "N/A"),
+                            "Significant": best_result.get("significant", False),
+                        }
+                    )
+
+                if sleep_data:
+                    sleep_df = pd.DataFrame(sleep_data)
+                    sleep_df.to_excel(writer, sheet_name="Sleep_Summary", index=False)
+
+            # Sheet 3: Combined comparison (Activity vs Sleep)
+            if activity_data and sleep_roi_results:
+                comparison_data = []
+                for roi_id in sorted(
+                    set([d["ROI"] for d in activity_data]).intersection(
+                        [k for k in sleep_roi_results.keys() if isinstance(k, int)]
+                    )
+                ):
+                    act_row = next((d for d in activity_data if d["ROI"] == roi_id), {})
+                    slp_roi = sleep_roi_results.get(roi_id, {})
+                    slp_best = slp_roi.get("best_result", {})
+
+                    acrophase = act_row.get("Acrophase (hours)", 0)
+                    sleep_phase = slp_best.get("acrophase", 0)
+
+                    # Calculate phase difference
+                    if isinstance(acrophase, (int, float)) and isinstance(
+                        sleep_phase, (int, float)
+                    ):
+                        phase_diff = abs(acrophase - sleep_phase)
+                        if phase_diff > 12:
+                            phase_diff = 24 - phase_diff
+                    else:
+                        phase_diff = "N/A"
+
+                    comparison_data.append(
+                        {
+                            "ROI": roi_id,
+                            "Activity Acrophase (h)": acrophase,
+                            "Sleep Phase (h)": sleep_phase,
+                            "Phase Difference (h)": phase_diff,
+                            "Activity Period (h)": act_row.get(
+                                "Best Period (hours)", "N/A"
+                            ),
+                            "Sleep Period (h)": slp_roi.get("best_period", "N/A"),
+                        }
+                    )
+
+                if comparison_data:
+                    comparison_df = pd.DataFrame(comparison_data)
+                    comparison_df.to_excel(
+                        writer, sheet_name="Activity_vs_Sleep", index=False
+                    )
+
+            # Sheet 4: Parameters
+            params_df = pd.DataFrame(
+                {
+                    "Parameter": [
+                        "Minimum Period",
+                        "Maximum Period",
+                        "Significance Level",
+                        "Sampling Interval",
+                        "Sleep Phase Calculated",
+                    ],
+                    "Value": [
+                        f"{self.fisher_min_period.value():.1f} hours",
+                        f"{self.fisher_max_period.value():.1f} hours",
+                        f"{self.fisher_significance.value():.3f}",
+                        f"{self.frame_interval.value():.1f} seconds",
+                        "Yes" if sleep_roi_results else "No",
+                    ],
+                }
+            )
+            params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
     def _export_similarity_method_results(self, file_path):
         """Export ROI Similarity results using module function."""
@@ -10241,7 +11265,13 @@ class HDF5AnalysisWidget(QWidget):
                 ]
             )
 
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     writer.writerow([roi_id, "Error", result["error"], "", "", "", ""])
                     continue
@@ -10279,7 +11309,13 @@ class HDF5AnalysisWidget(QWidget):
                 ]
             )
 
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     continue
 
@@ -10303,7 +11339,13 @@ class HDF5AnalysisWidget(QWidget):
         with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
             # Sheet 1: Summary
             summary_data = []
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     summary_data.append(
                         {
@@ -10337,7 +11379,13 @@ class HDF5AnalysisWidget(QWidget):
 
             # Sheet 2: All Peaks
             all_peaks_data = []
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     continue
 
@@ -10360,7 +11408,13 @@ class HDF5AnalysisWidget(QWidget):
 
             # Sheet 3: Full Power Spectra (for plotting)
             # Export complete power spectrum data for each ROI
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     continue
 
@@ -10385,13 +11439,44 @@ class HDF5AnalysisWidget(QWidget):
                         writer, sheet_name=f"ROI_{roi_id}_Spectrum", index=False
                     )
 
-            # Sheet 4: Parameters
+            # Sheet 4: Sleep Phase Results (if available)
+            sleep_results = self.fisher_analysis_results.get("sleep_phase_results", {})
+            if sleep_results:
+                sleep_roi_data = {
+                    k: v for k, v in sleep_results.items() if isinstance(k, int)
+                }
+                if sleep_roi_data:
+                    sleep_summary_data = []
+                    for roi_id, result in sorted(sleep_roi_data.items()):
+                        if "error" in result:
+                            continue
+                        sleep_summary_data.append(
+                            {
+                                "ROI": roi_id,
+                                "Dominant_Period_h": result.get("dominant_period", 0),
+                                "Dominant_Power": result.get("dominant_power", 0),
+                                "Significant": result.get("is_significant", False),
+                            }
+                        )
+                    if sleep_summary_data:
+                        sleep_df = pd.DataFrame(sleep_summary_data)
+                        sleep_df.to_excel(
+                            writer, sheet_name="Sleep_Phase_Summary", index=False
+                        )
+
+            # Sheet 5: Parameters
+            has_sleep = bool(sleep_results)
             params_df = pd.DataFrame(
                 {
-                    "Parameter": ["Analysis Method", "Generated"],
+                    "Parameter": [
+                        "Analysis Method",
+                        "Generated",
+                        "Sleep Phase Calculated",
+                    ],
                     "Value": [
                         "FFT Power Spectrum",
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Yes" if has_sleep else "No",
                     ],
                 }
             )
@@ -10428,7 +11513,13 @@ class HDF5AnalysisWidget(QWidget):
                 ]
             )
 
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     writer.writerow(
                         [roi_id, "Error", result["error"], "", "", "", "", ""]
@@ -10467,7 +11558,13 @@ class HDF5AnalysisWidget(QWidget):
         with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
             # Sheet 1: Summary
             summary_data = []
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     continue
 
@@ -10495,7 +11592,13 @@ class HDF5AnalysisWidget(QWidget):
 
             # Sheet 2: Full Periodograms (for plotting)
             # Export complete periodogram data for each ROI
-            for roi_id, result in sorted(self.fisher_analysis_results.items()):
+            for roi_id, result in sorted(
+                {
+                    k: v
+                    for k, v in self.fisher_analysis_results.items()
+                    if isinstance(k, int)
+                }.items()
+            ):
                 if "error" in result:
                     continue
 
@@ -10520,7 +11623,39 @@ class HDF5AnalysisWidget(QWidget):
                         writer, sheet_name=f"ROI_{roi_id}_Periodogram", index=False
                     )
 
-            # Sheet 3: Parameters
+            # Sheet 3: Sleep Phase Results (if available)
+            sleep_results = self.fisher_analysis_results.get("sleep_phase_results", {})
+            if sleep_results:
+                sleep_roi_data = {
+                    k: v for k, v in sleep_results.items() if isinstance(k, int)
+                }
+                if sleep_roi_data:
+                    sleep_summary_data = []
+                    for roi_id, result in sorted(sleep_roi_data.items()):
+                        if "error" in result:
+                            continue
+                        periodogram = result.get("periodogram", {})
+                        sleep_summary_data.append(
+                            {
+                                "ROI": roi_id,
+                                "Significant Rhythm": periodogram.get(
+                                    "is_significant", False
+                                ),
+                                "Dominant Period (hours)": periodogram.get(
+                                    "dominant_period", 0
+                                ),
+                                "Z-Score": periodogram.get("dominant_z_score", 0),
+                                "P-Value": periodogram.get("p_value", 1.0),
+                            }
+                        )
+                    if sleep_summary_data:
+                        sleep_df = pd.DataFrame(sleep_summary_data)
+                        sleep_df.to_excel(
+                            writer, sheet_name="Sleep_Phase_Summary", index=False
+                        )
+
+            # Sheet 4: Parameters
+            has_sleep = bool(sleep_results)
             params_df = pd.DataFrame(
                 {
                     "Parameter": [
@@ -10528,12 +11663,14 @@ class HDF5AnalysisWidget(QWidget):
                         "Maximum Period",
                         "Significance Level",
                         "Sampling Interval",
+                        "Sleep Phase Calculated",
                     ],
                     "Value": [
                         f"{self.fisher_min_period.value():.1f} hours",
                         f"{self.fisher_max_period.value():.1f} hours",
                         f"{self.fisher_significance.value():.3f}",
                         f"{self.frame_interval.value():.1f} seconds",
+                        "Yes" if has_sleep else "No",
                     ],
                 }
             )
@@ -10724,143 +11861,172 @@ class HDF5AnalysisWidget(QWidget):
                 plt.close(self.fisher_plot_figure)
                 self.fisher_plot_figure = None
 
-            # Create figure with subplots
-            n_rois = len(fisher_results)
-            n_significant = sum(
-                1
-                for r in fisher_results.values()
-                if r.get("periodogram", {}).get("is_significant", False)
+            # Get data source name for titles
+            data_source_index = self.data_source_combo.currentIndex()
+            data_source = (
+                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
             )
+
+            # Check if sleep phase results are available
+            sleep_results = fisher_results.get("sleep_phase_results", None)
+            has_sleep = sleep_results is not None and len(sleep_results) > 0
+
+            # Create figure with subplots (only count integer ROI keys)
+            roi_only_results = {
+                k: v for k, v in fisher_results.items() if isinstance(k, int)
+            }
+            n_rois = len(roi_only_results)
 
             # Determine layout - max 3 columns
             n_cols = min(3, n_rois)
-            n_rows = (n_rois + n_cols - 1) // n_cols
+            n_rows_per_section = (n_rois + n_cols - 1) // n_cols
 
-            # Calculate appropriate figure size
-            fig_width = 4 * n_cols
-            fig_height = 3 * n_rows
-
-            fig, axes = plt.subplots(
-                n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
-            )
-            fig.suptitle(
-                "Fischer Z-Transformation Periodogram",
-                fontsize=14,
-                fontweight="bold",
-            )
-
-            # Find global Y-axis limits for consistent scaling
-            all_z_scores = []
-            for result in fisher_results.values():
-                periodogram = result.get("periodogram", {})
-                if "z_scores" in periodogram and "error" not in result:
-                    all_z_scores.extend(periodogram["z_scores"])
-
-            if all_z_scores:
-                global_y_min = 0  # Z-scores start at 0
-                global_y_max = max(all_z_scores) * 1.1  # Add 10% padding
+            # If we have sleep data, double the rows (Activity on top, Sleep on bottom)
+            if has_sleep:
+                total_rows = n_rows_per_section * 2
+                fig_height = 3.5 * total_rows + 1.5
             else:
-                global_y_min, global_y_max = 0, 10
+                total_rows = n_rows_per_section
+                fig_height = 3.5 * total_rows + 0.5
 
-            # Plot each ROI
-            for idx, (roi_id, result) in enumerate(sorted(fisher_results.items())):
-                row = idx // n_cols
-                col = idx % n_cols
-                ax = axes[row, col]
+            fig_width = 4 * n_cols
+            fig, axes = plt.subplots(
+                total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
+            )
 
-                periodogram = result.get("periodogram", {})
-
-                # Get ROI-specific color
-                roi_color = (
-                    self.roi_colors.get(roi_id, f"C{idx}")
-                    if hasattr(self, "roi_colors")
-                    else f"C{idx}"
+            if has_sleep:
+                fig.suptitle(
+                    f"Fisher Z-Transformation Periodogram  —  {data_source}",
+                    fontsize=13,
+                    fontweight="bold",
+                    y=0.99,
+                )
+            else:
+                fig.suptitle(
+                    f"Fisher Z-Transformation Periodogram  —  Activity from {data_source}",
+                    fontsize=13,
+                    fontweight="bold",
+                    y=0.99,
                 )
 
-                if "error" in result or "error" in periodogram:
-                    # Show error message
-                    ax.text(
-                        0.5,
-                        0.5,
-                        f"ROI {roi_id}\nInsufficient data",
-                        ha="center",
-                        va="center",
-                        transform=ax.transAxes,
-                    )
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-                else:
-                    # Plot periodogram
-                    periods = periodogram.get("periods", [])
-                    z_scores = periodogram.get("z_scores", [])
-                    critical_z = periodogram.get("critical_z", 0)
-                    is_significant = periodogram.get("is_significant", False)
+            # Helper function to plot a section (Activity or Sleep)
+            def plot_section(results_dict, start_row, section_label):
+                # Filter to integer keys only
+                roi_items = {
+                    k: v for k, v in results_dict.items() if isinstance(k, int)
+                }
 
-                    # Plot Z-scores with ROI-specific color
-                    ax.plot(
-                        periods,
-                        z_scores,
-                        color=roi_color,
-                        linewidth=1.5,
-                        label="Z-score",
+                for idx, (roi_id, result) in enumerate(sorted(roi_items.items())):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    ax = axes[row, col]
+
+                    periodogram = result.get("periodogram", {})
+
+                    # Get ROI-specific color
+                    roi_color = (
+                        self.roi_colors.get(roi_id, f"C{idx}")
+                        if hasattr(self, "roi_colors")
+                        else f"C{idx}"
                     )
 
-                    # Plot significance threshold
-                    if critical_z > 0:
-                        ax.axhline(
-                            y=critical_z,
-                            color="gray",
-                            linestyle="--",
-                            linewidth=1,
-                            label="Significance",
+                    if "error" in result or "error" in periodogram:
+                        ax.text(
+                            0.5,
+                            0.5,
+                            f"ROI {roi_id}\nInsufficient data",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
                         )
+                        ax.set_xticks([])
+                        ax.set_yticks([])
+                    else:
+                        periods = periodogram.get("periods", [])
+                        z_scores = periodogram.get("z_scores", [])
+                        critical_z = periodogram.get("critical_z", 0)
+                        is_significant = periodogram.get("is_significant", False)
 
-                    # Mark dominant period with point and vertical line
-                    if is_significant:
-                        dominant_period = periodogram.get("dominant_period", 0)
-                        dominant_z = periodogram.get("dominant_z_score", 0)
-                        ax.axvline(
-                            x=dominant_period,
-                            color=roi_color,
-                            linestyle="--",
-                            linewidth=1.5,
-                            alpha=0.5,
-                        )
                         ax.plot(
-                            dominant_period,
-                            dominant_z,
-                            "o",
+                            periods,
+                            z_scores,
                             color=roi_color,
-                            markersize=8,
-                            markeredgecolor="black",
-                            markeredgewidth=1,
-                            label=f"Peak: {dominant_period:.1f}h",
+                            linewidth=1.5,
+                            label="Z-score",
                         )
 
-                    # Styling with ROI-specific color for title
-                    ax.set_xlabel("Period (hours)", fontsize=9)
-                    ax.set_ylabel("Z-score", fontsize=9)
-                    # Use ROI color for title, with bold for significant
-                    title_weight = "bold" if is_significant else "normal"
-                    ax.set_title(
-                        f"ROI {roi_id}",
-                        fontsize=10,
-                        color=roi_color,
-                        fontweight=title_weight,
-                    )
-                    ax.legend(fontsize=7, loc="best")
-                    ax.grid(True, alpha=0.3)
+                        if critical_z > 0:
+                            ax.axhline(
+                                y=critical_z,
+                                color="gray",
+                                linestyle="--",
+                                linewidth=1,
+                                label="Significance",
+                            )
 
-                    # Apply global Y-axis scaling for consistency
-                    ax.set_ylim(global_y_min, global_y_max)
+                        if is_significant:
+                            dominant_period = periodogram.get("dominant_period", 0)
+                            dominant_z = periodogram.get("dominant_z_score", 0)
+                            ax.axvline(
+                                x=dominant_period,
+                                color=roi_color,
+                                linestyle="--",
+                                linewidth=1.5,
+                                alpha=0.5,
+                            )
+                            ax.plot(
+                                dominant_period,
+                                dominant_z,
+                                "o",
+                                color=roi_color,
+                                markersize=8,
+                                markeredgecolor="black",
+                                markeredgewidth=1,
+                                label=f"Peak: {dominant_period:.1f}h",
+                            )
 
-            # Hide unused subplots
-            for idx in range(n_rois, n_rows * n_cols):
-                row = idx // n_cols
-                col = idx % n_cols
-                axes[row, col].axis("off")
+                        ax.set_xlabel("Period (h)", fontsize=9)
+                        ax.set_ylabel("Z-score", fontsize=9)
+                        ax.tick_params(axis="both", labelsize=8)
+                        title_weight = "bold" if is_significant else "normal"
+                        # Include section label in ROI title
+                        ax.set_title(
+                            f"ROI {roi_id} - {section_label}",
+                            fontsize=9,
+                            color=roi_color,
+                            fontweight=title_weight,
+                            pad=4,
+                            loc="left",
+                        )
+                        ax.legend(fontsize=7, loc="best")
+                        ax.grid(True, alpha=0.3)
 
-            plt.tight_layout()
+                        # Per-ROI Y-axis scaling
+                        if len(z_scores) > 0:
+                            roi_y_max = max(z_scores) * 1.1
+                            ax.set_ylim(
+                                0,
+                                max(
+                                    roi_y_max,
+                                    critical_z * 1.2 if critical_z > 0 else roi_y_max,
+                                ),
+                            )
+
+                # Hide unused subplots in this section
+                for idx in range(n_rois, n_rows_per_section * n_cols):
+                    row = start_row + (idx // n_cols)
+                    col = idx % n_cols
+                    if row < total_rows:
+                        axes[row, col].axis("off")
+
+            # Plot Activity section
+            plot_section(roi_only_results, 0, "Activity")
+
+            # Plot Sleep section if available
+            if has_sleep:
+                plot_section(sleep_results, n_rows_per_section, "Sleep")
+
+            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0, w_pad=1.0)
 
             # Store figure for later export
             self.fisher_plot_figure = fig

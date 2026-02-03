@@ -10,12 +10,33 @@ from typing import Dict, List, Tuple, Any
 from scipy import signal
 
 
+def coherence_significance_threshold(n_segments: int, alpha: float = 0.05) -> float:
+    """
+    Calculate significance threshold for coherence.
+
+    For Welch's method with n_segments averaged periodograms,
+    the significance threshold for coherence is:
+    threshold = 1 - alpha^(1/(n_segments-1))
+
+    Args:
+        n_segments: Number of segments used in Welch's method
+        alpha: Significance level (default 0.05)
+
+    Returns:
+        Critical coherence value above which is significant
+    """
+    if n_segments <= 1:
+        return 1.0  # Cannot determine significance with 1 segment
+    return 1.0 - alpha ** (1.0 / (n_segments - 1))
+
+
 def calculate_coherence(
     signal1: np.ndarray,
     signal2: np.ndarray,
     sampling_interval: float = 60.0,
     nperseg: int = None,
     target_period_hours: float = 24.0,
+    significance_level: float = 0.05,
 ) -> Dict[str, Any]:
     """
     Calculate magnitude-squared coherence between two signals.
@@ -89,8 +110,14 @@ def calculate_coherence(
             else 1.0 / (target_period_hours * 3600)
         )
 
-    # Synchronization threshold: coherence > 0.6 at target frequency
-    is_synchronized = circadian_coherence > 0.6
+    # Calculate number of segments for significance threshold
+    n_segments = len(signal1) // nperseg
+    critical_coherence = coherence_significance_threshold(
+        n_segments, significance_level
+    )
+
+    # Synchronization based on statistical significance
+    is_synchronized = circadian_coherence > critical_coherence
 
     return {
         "frequencies": freqs,
@@ -105,6 +132,9 @@ def calculate_coherence(
             periods[np.argmax(coherence)] if len(periods) > 0 else 0
         ),
         "target_period_hours": target_period_hours,
+        "critical_coherence": critical_coherence,
+        "n_segments": n_segments,
+        "significance_level": significance_level,
     }
 
 
@@ -113,6 +143,7 @@ def calculate_coherence_matrix(
     sampling_interval: float = 5.0,
     bin_size_seconds: int = 60,
     target_period_hours: float = 24.0,
+    significance_level: float = 0.05,
 ) -> Dict[str, Any]:
     """
     Calculate coherence matrix for all ROI pairs at a specific period.
@@ -122,9 +153,10 @@ def calculate_coherence_matrix(
         sampling_interval: Time interval between samples (seconds)
         bin_size_seconds: Bin size for data averaging
         target_period_hours: Period to analyze (default: 24h)
+        significance_level: Alpha level for significance testing (default 0.05)
 
     Returns:
-        Dictionary with coherence matrix and ROI information
+        Dictionary with coherence matrix, significance matrix, and ROI information
     """
     from ._fisher_analysis import _bin_data
 
@@ -149,17 +181,21 @@ def calculate_coherence_matrix(
     n_rois = len(roi_signals)
     roi_list = sorted(roi_signals.keys())
     coherence_matrix = np.zeros((n_rois, n_rois))
+    significance_matrix = np.zeros((n_rois, n_rois), dtype=bool)
     pairwise_coherence = {}
+    critical_coherence = None
 
     for i, roi1 in enumerate(roi_list):
         for j, roi2 in enumerate(roi_list):
             if i == j:
                 coherence_matrix[i, j] = 1.0
+                significance_matrix[i, j] = True
                 continue
 
             # Skip if already computed (symmetric)
             if j < i:
                 coherence_matrix[i, j] = coherence_matrix[j, i]
+                significance_matrix[i, j] = significance_matrix[j, i]
                 continue
 
             result = calculate_coherence(
@@ -169,18 +205,25 @@ def calculate_coherence_matrix(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
                 target_period_hours=target_period_hours,
+                significance_level=significance_level,
             )
 
             if "error" not in result:
                 coherence_matrix[i, j] = result["circadian_coherence"]
+                significance_matrix[i, j] = result.get("is_synchronized", False)
                 pairwise_coherence[(roi1, roi2)] = result
+                if critical_coherence is None:
+                    critical_coherence = result.get("critical_coherence", 0.6)
 
     return {
         "roi_ids": roi_list,
         "coherence_matrix": coherence_matrix,
+        "significance_matrix": significance_matrix,
         "pairwise_coherence": pairwise_coherence,
         "n_rois": n_rois,
         "target_period_hours": target_period_hours,
+        "critical_coherence": critical_coherence,
+        "significance_level": significance_level,
     }
 
 
