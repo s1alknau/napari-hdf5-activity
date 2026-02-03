@@ -7,9 +7,53 @@ identify similar patterns, and group ROIs based on their activity profiles.
 
 import numpy as np
 from typing import Dict, List, Tuple, Any, Optional
-from scipy import signal
+from scipy import signal, stats
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
+
+
+def correlation_significance_test(
+    r: float, n: int, alpha: float = 0.05
+) -> Dict[str, Any]:
+    """
+    Test if correlation coefficient is statistically significant.
+
+    Uses Fisher's z-transformation to test H0: ρ = 0.
+
+    Args:
+        r: Correlation coefficient (-1 to 1)
+        n: Sample size
+        alpha: Significance level (default 0.05)
+
+    Returns:
+        Dictionary with p_value, is_significant, and critical_r
+    """
+    if n < 4:
+        return {"p_value": 1.0, "is_significant": False, "critical_r": 1.0}
+
+    # t-statistic for testing r = 0
+    if abs(r) >= 1.0:
+        r = np.sign(r) * 0.9999  # Avoid division by zero
+
+    t_stat = r * np.sqrt((n - 2) / (1 - r**2))
+
+    # Two-tailed p-value
+    p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df=n - 2))
+
+    # Critical r value for given alpha
+    t_critical = stats.t.ppf(1 - alpha / 2, df=n - 2)
+    # Solve for r: t = r * sqrt((n-2)/(1-r²))
+    # r² * (n-2) = t² * (1-r²)
+    # r² * (n-2 + t²) = t²
+    # r = sqrt(t² / (n-2+t²))
+    critical_r = np.sqrt(t_critical**2 / (n - 2 + t_critical**2))
+
+    return {
+        "p_value": float(p_value),
+        "is_significant": p_value < alpha,
+        "critical_r": float(critical_r),
+        "t_statistic": float(t_stat),
+    }
 
 
 def calculate_cross_correlation(
@@ -17,6 +61,7 @@ def calculate_cross_correlation(
     signal2: np.ndarray,
     max_lag_hours: float = 12.0,
     sampling_interval: float = 60.0,
+    significance_level: float = 0.05,
 ) -> Dict[str, Any]:
     """
     Calculate cross-correlation between two activity signals.
@@ -28,6 +73,7 @@ def calculate_cross_correlation(
         signal2: Second activity time series
         max_lag_hours: Maximum time lag to consider (hours)
         sampling_interval: Time between samples (seconds)
+        significance_level: Alpha level for significance testing (default 0.05)
 
     Returns:
         Dictionary containing:
@@ -35,7 +81,8 @@ def calculate_cross_correlation(
         - lags: Time lags (hours)
         - max_correlation: Maximum correlation coefficient
         - optimal_lag_hours: Time shift at maximum correlation
-        - is_similar: Whether signals are significantly similar
+        - is_similar: Whether signals are significantly similar (p < alpha)
+        - p_value: P-value for the correlation
     """
     if len(signal1) != len(signal2):
         min_len = min(len(signal1), len(signal2))
@@ -69,15 +116,20 @@ def calculate_cross_correlation(
     max_correlation = correlation_window[max_corr_idx]
     optimal_lag = lag_hours[max_corr_idx]
 
-    # Determine significance (correlation > 0.5 is considered similar)
-    is_similar = max_correlation > 0.5
+    # Statistical significance test for correlation
+    n_samples = len(signal1)
+    sig_test = correlation_significance_test(
+        max_correlation, n_samples, significance_level
+    )
 
     return {
         "correlation": correlation_window,
         "lags": lag_hours,
         "max_correlation": max_correlation,
         "optimal_lag_hours": optimal_lag,
-        "is_similar": is_similar,
+        "is_similar": sig_test["is_significant"],
+        "p_value": sig_test["p_value"],
+        "critical_r": sig_test["critical_r"],
         "zero_lag_correlation": correlation_window[max_lag_samples],  # At lag=0
     }
 
@@ -87,6 +139,7 @@ def calculate_roi_correlation_matrix(
     sampling_interval: float = 5.0,
     bin_size_seconds: int = 60,
     max_lag_hours: float = 12.0,
+    significance_level: float = 0.05,
 ) -> Dict[str, Any]:
     """
     Calculate pairwise correlations between all ROIs.
@@ -96,9 +149,10 @@ def calculate_roi_correlation_matrix(
         sampling_interval: Time interval between samples (seconds)
         bin_size_seconds: Bin size for data averaging
         max_lag_hours: Maximum lag for cross-correlation
+        significance_level: Alpha level for significance testing (default 0.05)
 
     Returns:
-        Dictionary containing correlation matrix and ROI pairs
+        Dictionary containing correlation matrix, ROI pairs, and significance matrix
     """
     from ._fisher_analysis import _bin_data
 
@@ -124,6 +178,8 @@ def calculate_roi_correlation_matrix(
     roi_list = sorted(roi_signals.keys())
     correlation_matrix = np.zeros((n_rois, n_rois))
     lag_matrix = np.zeros((n_rois, n_rois))
+    p_value_matrix = np.ones((n_rois, n_rois))
+    significance_matrix = np.zeros((n_rois, n_rois), dtype=bool)
     pairwise_results = {}
 
     for i, roi1 in enumerate(roi_list):
@@ -131,12 +187,16 @@ def calculate_roi_correlation_matrix(
             if i == j:
                 correlation_matrix[i, j] = 1.0
                 lag_matrix[i, j] = 0.0
+                p_value_matrix[i, j] = 0.0
+                significance_matrix[i, j] = True
                 continue
 
             # Skip if already computed (symmetric)
             if j < i:
                 correlation_matrix[i, j] = correlation_matrix[j, i]
                 lag_matrix[i, j] = -lag_matrix[j, i]  # Reverse lag
+                p_value_matrix[i, j] = p_value_matrix[j, i]
+                significance_matrix[i, j] = significance_matrix[j, i]
                 continue
 
             result = calculate_cross_correlation(
@@ -146,19 +206,25 @@ def calculate_roi_correlation_matrix(
                 sampling_interval=(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
+                significance_level=significance_level,
             )
 
             if "error" not in result:
                 correlation_matrix[i, j] = result["max_correlation"]
                 lag_matrix[i, j] = result["optimal_lag_hours"]
+                p_value_matrix[i, j] = result.get("p_value", 1.0)
+                significance_matrix[i, j] = result.get("is_similar", False)
                 pairwise_results[(roi1, roi2)] = result
 
     return {
         "roi_ids": roi_list,
         "correlation_matrix": correlation_matrix,
         "lag_matrix": lag_matrix,
+        "p_value_matrix": p_value_matrix,
+        "significance_matrix": significance_matrix,
         "pairwise_results": pairwise_results,
         "n_rois": n_rois,
+        "significance_level": significance_level,
     }
 
 

@@ -4,19 +4,20 @@
 1. [Overview](#overview)
 2. [Fisher Z-Transformation Periodogram](#fisher-z-transformation-periodogram)
 3. [FFT Power Spectrum](#fft-power-spectrum)
-4. [ROI Similarity Matrix](#roi-similarity-matrix)
-5. [Coherence Analysis](#coherence-analysis)
-6. [Phase Clustering](#phase-clustering)
-7. [Interpreting Results](#interpreting-results)
-8. [Export Functionality](#export-functionality)
-9. [Color Consistency](#color-consistency)
-10. [Best Practices](#best-practices)
+4. [Cosinor Analysis](#cosinor-analysis)
+5. [ROI Similarity Matrix](#roi-similarity-matrix)
+6. [Coherence Analysis](#coherence-analysis)
+7. [Phase Clustering](#phase-clustering)
+8. [Interpreting Results](#interpreting-results)
+9. [Export Functionality](#export-functionality)
+10. [Color Consistency](#color-consistency)
+11. [Best Practices](#best-practices)
 
 ---
 
 ## Overview
 
-The Extended Analysis tab provides five complementary methods for analyzing rhythmic patterns and synchronization in activity data. These methods are designed to detect circadian rhythms, ultradian cycles, and behavioral coordination across multiple ROIs.
+The Extended Analysis tab provides six complementary methods for analyzing rhythmic patterns and synchronization in activity data. These methods are designed to detect circadian rhythms, ultradian cycles, and behavioral coordination across multiple ROIs.
 
 ### Motivation and Scientific Rationale
 
@@ -78,25 +79,27 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 |--------|---------|----------|--------|
 | Fisher Z-Transformation | Statistical period detection | Confirming significant rhythms | Z-scores, p-values |
 | FFT Power Spectrum | Frequency-domain analysis | Identifying all periodic components | Power spectrum, dominant peaks |
+| Cosinor Analysis | Rhythm quantification | Measuring amplitude, phase, MESOR | Fitted curves, confidence intervals |
 | ROI Similarity | Cross-correlation analysis | Finding synchronized ROIs | Correlation matrix, clusters |
 | Coherence Analysis | Frequency-specific synchronization | Identifying shared rhythms | Coherence heatmap |
 | Phase Clustering | Timing relationships | Detecting activity phases | Phase plot, timing offsets |
 
 ### Method Comparison: Strengths and Limitations
 
-| Feature | Fisher Z | FFT | ROI Similarity | Coherence | Phase Clustering |
-|---------|----------|-----|----------------|-----------|------------------|
-| **Primary Output** | p-values, significance | Power spectrum | Correlation matrix | Coherence values | Phase & amplitude |
-| **Statistical Testing** | ✅ Yes (p-values) | ❌ No | ⚠️ Partial (correlation) | ❌ No | ❌ No |
-| **Exploratory Analysis** | ⚠️ Limited | ✅ Excellent | ✅ Good | ⚠️ Moderate | ❌ Poor |
-| **Computational Speed** | ⚠️ Slow | ✅ Very fast | ⚠️ Moderate | ⚠️ Slow | ✅ Fast |
-| **Data Requirements** | ≥3 cycles | ≥2 cycles | ≥2 cycles | ≥5 segments | ≥2 cycles |
-| **Finds Periods** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **Phase Information** | ❌ No | ❌ No | ✅ Yes (via lag) | ❌ No | ✅ Yes |
-| **Handles Mixed Periods** | ✅ Yes | ✅ Yes | ❌ Poor | ⚠️ Moderate | ❌ No |
-| **Multiple Rhythms** | ⚠️ Dominant only | ✅ All shown | ❌ N/A | ✅ All shown | ❌ Single period |
-| **Noise Robustness** | ✅ Good | ⚠️ Moderate | ⚠️ Moderate | ✅ Good | ⚠️ Moderate |
-| **Interpretation** | ✅ Clear (p-value) | ⚠️ Subjective | ✅ Intuitive | ⚠️ Complex | ✅ Visual |
+| Feature | Fisher Z | FFT | Cosinor | ROI Similarity | Coherence | Phase Clustering |
+|---------|----------|-----|---------|----------------|-----------|------------------|
+| **Primary Output** | p-values, significance | Power spectrum | MESOR, Amplitude, Acrophase | Correlation matrix | Coherence values | Phase & amplitude |
+| **Statistical Testing** | ✅ Yes (p-values) | ❌ No | ✅ Yes (p-values, CIs) | ⚠️ Partial (correlation) | ❌ No | ❌ No |
+| **Exploratory Analysis** | ⚠️ Limited | ✅ Excellent | ❌ Poor | ✅ Good | ⚠️ Moderate | ❌ Poor |
+| **Computational Speed** | ⚠️ Slow | ✅ Very fast | ✅ Fast | ⚠️ Moderate | ⚠️ Slow | ✅ Fast |
+| **Data Requirements** | ≥3 cycles | ≥2 cycles | ≥2 cycles | ≥2 cycles | ≥5 segments | ≥2 cycles |
+| **Finds Periods** | ✅ Yes | ✅ Yes | ✅ Yes (multi-period) | ❌ No | ❌ No | ❌ No |
+| **Phase Information** | ❌ No | ❌ No | ✅ Yes (Acrophase) | ✅ Yes (via lag) | ❌ No | ✅ Yes |
+| **Handles Mixed Periods** | ✅ Yes | ✅ Yes | ⚠️ Tests multiple | ❌ Poor | ⚠️ Moderate | ❌ No |
+| **Multiple Rhythms** | ⚠️ Dominant only | ✅ All shown | ⚠️ Tests separately | ❌ N/A | ✅ All shown | ❌ Single period |
+| **Noise Robustness** | ✅ Good | ⚠️ Moderate | ✅ Good | ⚠️ Moderate | ✅ Good | ⚠️ Moderate |
+| **Interpretation** | ✅ Clear (p-value) | ⚠️ Subjective | ✅ Intuitive (parameters) | ✅ Intuitive | ⚠️ Complex | ✅ Visual |
+| **Rhythm Quantification** | ❌ No | ⚠️ Indirect (power) | ✅ Direct (Amp, MESOR) | ❌ No | ⚠️ Indirect | ⚠️ Amplitude only |
 
 ### Quick Decision Guide
 
@@ -156,29 +159,66 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 
 ### What It Does
 
-Fisher's Z-transformation is a statistical method for detecting periodic patterns in time-series data. It tests whether activity follows a rhythmic pattern by correlating the signal with sine and cosine waves at different frequencies.
+Fisher's Z-transformation is a statistical method for detecting periodic patterns in time-series data. It tests whether activity follows a rhythmic pattern by correlating the signal with sine and cosine waves at different frequencies. The method provides formal statistical significance testing with p-values.
 
 ### How It Works
 
-1. **Correlation Analysis**: For each test period (e.g., 12h, 18h, 24h), the method calculates how well the activity data correlates with sine and cosine waves of that period
-2. **Z-Score Calculation**: Converts correlation strength into a statistical Z-score
-3. **Significance Testing**: Uses chi-square distribution (df=2) to determine if rhythms are statistically significant
-4. **Peak Detection**: Identifies the dominant period (strongest rhythm)
+1. **Reference Signal Construction**: For each candidate period T, construct orthogonal cosine and sine reference signals at angular frequency ω = 2π/T
+2. **Correlation Analysis**: Calculate Pearson correlation between the data and each reference signal
+3. **Squared Coherence**: Combine correlations to measure variance explained by the harmonic
+4. **Z-Score Calculation**: Transform to a test statistic with known null distribution
+5. **Significance Testing**: Compare to chi-square distribution (df=2) for p-values
 
-### Mathematical Background
+### Mathematical Foundation
 
-For a given test period T, the Z-score is calculated as:
+**Step 1: Correlation with Reference Signals**
+
+For each candidate period T with angular frequency ω = 2π/T, compute Pearson correlations:
 
 ```
-Z = N × (r_cos² + r_sin²)
+r_cos = Σᵢ(xᵢ - x̄)(cos(ωtᵢ) - cos̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(cos(ωtᵢ) - cos̄)²]
+
+r_sin = Σᵢ(xᵢ - x̄)(sin(ωtᵢ) - sin̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(sin(ωtᵢ) - sin̄)²]
 ```
 
-Where:
-- N = number of samples
-- r_cos = correlation with cosine wave
-- r_sin = correlation with sine wave
+These correlations measure how well the data aligns with cosine and sine waves at the test period. Both components are needed because a sinusoid of arbitrary phase can be expressed as a linear combination: A·cos(ωt + φ) = A·cos(φ)·cos(ωt) - A·sin(φ)·sin(ωt).
 
-The squared coherence (r_cos² + r_sin²) represents the "power" of that periodic component.
+**Step 2: Squared Coherence (R²)**
+
+The squared coherence represents the proportion of variance explained by a sinusoid at period T:
+
+```
+R²(T) = r_cos² + r_sin²
+```
+
+This ranges from 0 (no periodic component) to ~1 (perfect sinusoidal fit). The sum of squared correlations arises because cosine and sine are orthogonal basis functions—their independent contributions to explained variance are additive.
+
+**Step 3: Fisher's Z-Transformation**
+
+Convert R² to a test statistic with known null distribution:
+
+```
+Z(T) = n × R²(T)
+```
+
+where n is the number of observations.
+
+**Step 4: Statistical Significance**
+
+Under H₀ (no periodic component at frequency ω), Z follows a **chi-square distribution with 2 degrees of freedom**. The 2 df correspond to the two free parameters: the cosine coefficient and sine coefficient (equivalently, amplitude and phase).
+
+This distributional result derives from: under H₀, √n·r_cos and √n·r_sin are asymptotically independent standard normal variables, and the sum of squares of two independent standard normals follows χ²₂.
+
+**Critical values:**
+- α = 0.05: χ²₂,₀.₉₅ = 5.991
+- α = 0.01: χ²₂,₀.₉₉ = 9.210
+
+**p-value calculation (closed form for χ²₂):**
+```
+p = 1 - F_χ²₂(Z) = e^(-Z/2)
+```
+
+The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom.
 
 ### Parameters
 
@@ -309,28 +349,87 @@ ROI 1:
 
 ### What It Does
 
-Fast Fourier Transform (FFT) converts time-series data into the frequency domain, revealing all periodic components simultaneously. This is complementary to Fisher Z-transformation and provides standard spectral analysis.
+Fast Fourier Transform (FFT) converts time-series data into the frequency domain, revealing all periodic components simultaneously. Unlike Fisher Z which tests specific candidate periods, FFT provides a complete spectral decomposition that can reveal unexpected periodicities, harmonics, and the overall noise floor.
 
 ### How It Works
 
-1. **Detrending**: Removes linear trends from data
+1. **Linear Detrending**: Removes baseline drift
 2. **Windowing**: Applies Hann window to reduce spectral leakage
 3. **Zero-Padding**: Pads signal 4× for better frequency resolution
 4. **FFT Computation**: Calculates power spectrum
-5. **Peak Detection**: Identifies significant frequency peaks
+5. **Permutation Test**: Assesses statistical significance
+6. **Peak Detection**: Identifies significant frequency peaks
 
-### Mathematical Background
+### Mathematical Foundation
 
-The power spectrum is calculated as:
+**Discrete Fourier Transform (DFT)**
+
+The DFT decomposes a time series x[n] of N samples into complex-valued frequency components:
 
 ```
-Power(f) = |FFT(signal)|²
+X[k] = Σₙ₌₀^(N-1) x[n] × e^(-i2πkn/N),    k = 0, 1, ..., N-1
 ```
 
-Where:
-- FFT transforms time-domain signal to frequency domain
-- Power represents the strength of oscillation at each frequency
-- Dominant period = 1 / frequency with maximum power
+Each coefficient X[k] corresponds to frequency f_k = k/(N×Δt) Hz, where Δt is the sampling interval.
+
+**Power Spectral Density (PSD)**
+
+The PSD quantifies signal energy at each frequency:
+
+```
+P[k] = |X[k]|² = Re(X[k])² + Im(X[k])²
+```
+
+For real-valued signals, the spectrum is symmetric, so only frequencies up to the Nyquist frequency f_Nyq = 1/(2Δt) contain unique information.
+
+### Preprocessing Steps
+
+**Linear Detrending**
+
+Biological time series often exhibit slow baseline drift. A linear trend produces a large DC component and spectral leakage into low frequencies, potentially masking circadian signals:
+
+```
+x_detrended[n] = x[n] - (â×n + b̂)
+```
+
+where â and b̂ are least-squares estimates of the linear trend.
+
+**Hann Windowing**
+
+The DFT assumes the signal is periodic with period N. Non-integer cycles cause spectral leakage—energy spreads into adjacent frequency bins. The Hann (raised cosine) window tapers the signal to reduce this:
+
+```
+w[n] = 0.5 × (1 - cos(2πn/(N-1))),    n = 0, ..., N-1
+```
+
+The Hann window provides ~32 dB sidelobe suppression with a good trade-off between frequency resolution and leakage reduction.
+
+**Zero-Padding**
+
+Native frequency resolution is Δf = 1/(N×Δt). Zero-padding—appending zeros before FFT—interpolates additional frequency bins, providing a smoother spectral estimate:
+
+```
+N_FFT = 4 × N    (rounded to next power of 2 for computational efficiency)
+```
+
+This improves apparent resolution by 4× without adding new information.
+
+### Statistical Significance (Permutation Test)
+
+Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test:
+
+1. Compute observed power P_obs at the dominant frequency
+2. Generate N_perm = 1000 surrogate time series by randomly shuffling sample order (destroys temporal structure, preserves amplitude distribution)
+3. For each surrogate, apply same preprocessing and compute FFT power at target frequency
+4. Calculate p-value:
+
+```
+p = (1/N_perm) × Σᵢ 𝟙[P_perm,i ≥ P_obs]
+```
+
+where 𝟙[·] is the indicator function.
+
+This p-value represents the probability of observing such strong spectral power by chance if the signal were non-periodic. With 1000 permutations, minimum achievable p-value is 0.001.
 
 ### Parameters
 
@@ -479,32 +578,417 @@ Differences < 1 hour indicate excellent agreement.
 
 ---
 
+## Cosinor Analysis
+
+### What It Does
+
+Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activity data and extracting key rhythmic parameters: MESOR (mean level), Amplitude (rhythm strength), and Acrophase (peak timing). This is the gold standard method in chronobiology for rhythm characterization.
+
+### Mathematical Foundation
+
+**The Cosinor Model**
+
+The single-cosinor model assumes activity follows a sinusoidal pattern:
+
+```
+x(t) = M + A × cos(2πt/T + φ) + ε
+```
+
+Where:
+- **M (MESOR)**: Midline Estimating Statistic Of Rhythm—the rhythm-adjusted mean level
+- **A (Amplitude)**: Half the peak-to-trough difference—rhythm strength
+- **φ (Acrophase)**: Phase angle at peak activity—timing within cycle
+- **T (Period)**: Duration of one complete cycle (e.g., 24h for circadian)
+- **ε**: Residual error (assumed i.i.d. normal)
+
+### Linearization for Least-Squares Estimation
+
+Direct estimation of A and φ would require nonlinear optimization. Using the trigonometric identity cos(θ+φ) = cos(θ)cos(φ) - sin(θ)sin(φ), the model becomes linear:
+
+```
+x(t) = β₀ + β₁×cos(ωt) + β₂×sin(ωt) + ε
+```
+
+where ω = 2π/T, and:
+- β₀ = M (MESOR)
+- β₁ = A×cos(φ)
+- β₂ = -A×sin(φ)
+
+### Ordinary Least Squares (OLS) Estimation
+
+Construct the n×3 design matrix:
+
+```
+X = | 1   cos(ωt₁)   sin(ωt₁) |
+    | 1   cos(ωt₂)   sin(ωt₂) |
+    | ⋮      ⋮          ⋮     |
+    | 1   cos(ωtₙ)   sin(ωtₙ) |
+```
+
+The OLS estimator is:
+
+```
+β̂ = (X'X)⁻¹X'x
+```
+
+where x = [x(t₁), ..., x(tₙ)]' is the observation vector.
+
+**Parameter Recovery:**
+
+```
+M = β̂₀
+A = √(β̂₁² + β̂₂²)
+φ = atan2(-β̂₂, β̂₁)
+```
+
+The four-quadrant arctangent (atan2) correctly resolves phase to (-π, π] regardless of coefficient signs. Convert to clock time: t_acro = (φ/ω) mod T.
+
+### Significance Testing (F-test)
+
+The null hypothesis H₀: A = 0 (no rhythm) is tested by comparing the full model to the mean-only model:
+
+```
+F = [(SS_tot - SS_res)/k] / [SS_res/(n-k-1)] = [SS_model/2] / [SS_res/(n-3)]
+```
+
+where:
+- SS_tot = Σᵢ(xᵢ - x̄)² — total sum of squares
+- SS_res = Σᵢ(xᵢ - x̂ᵢ)² — residual sum of squares
+- SS_model = SS_tot - SS_res — model sum of squares
+- k = 2 — number of model parameters (cos and sin coefficients)
+- n-3 — residual degrees of freedom
+
+Under H₀, F follows an F-distribution with (2, n-3) degrees of freedom.
+
+**Goodness of Fit:**
+
+```
+R² = 1 - SS_res/SS_tot = SS_model/SS_tot
+```
+
+R² represents the proportion of variance explained by the fitted sinusoid.
+
+### Confidence Intervals
+
+Standard errors are computed from the variance-covariance matrix:
+
+```
+Var(β̂) = σ̂² × (X'X)⁻¹,    where σ̂² = SS_res/(n-3)
+```
+
+For MESOR: SE(M) = √Var(β̂₀)
+
+For Amplitude (nonlinear function), use the **delta method**:
+
+```
+SE(A) ≈ (1/A) × √[β̂₁²×Var(β̂₁) + β̂₂²×Var(β̂₂)]
+```
+
+Confidence intervals: θ ± t_{n-3,1-α/2} × SE(θ)
+
+### Population-Mean Cosinor
+
+For multiple individuals (ROIs), population parameters use **vector averaging**:
+
+Convert individual (Aⱼ, φⱼ) to Cartesian coordinates:
+```
+xⱼ = Aⱼ×cos(φⱼ),    yⱼ = Aⱼ×sin(φⱼ)
+```
+
+Population parameters:
+```
+x̄ = (1/J)Σⱼxⱼ,    ȳ = (1/J)Σⱼyⱼ
+A_pop = √(x̄² + ȳ²),    φ_pop = atan2(ȳ, x̄)
+```
+
+**Rayleigh Test** for population rhythm (H₀: uniform phase distribution):
+
+```
+R = J × A_pop,    p ≈ e^(-R²/J)    (for large J)
+```
+
+### Output Parameters
+
+**Individual ROI Results:**
+- **Best-fit period**: Period with highest R² among tested periods
+- **MESOR**: Mean activity level (rhythm-adjusted baseline)
+- **Amplitude**: Strength of rhythm (0 = no rhythm, higher = stronger)
+- **Acrophase**: Time of peak activity (hours from recording start)
+- **R²**: Goodness of fit (>0.3 = strong rhythm, 0.1-0.3 = moderate, <0.1 = weak)
+- **p-value**: Statistical significance (p < 0.05 = significant rhythm)
+- **95% Confidence Intervals**: Uncertainty ranges for each parameter
+
+**Population Results:**
+- **Population MESOR**: Average baseline activity across all ROIs
+- **Population Amplitude**: Collective rhythm strength (vector-averaged)
+- **Population Acrophase**: Common peak time across population
+- **Proportion significant**: Percentage of ROIs with significant rhythms
+
+### Interpretation Guide
+
+#### MESOR (Midline Estimating Statistic of Rhythm)
+- **What it means**: The rhythm-adjusted mean activity level
+- **Typical values**: 0.0-1.0 (fraction movement data)
+- **Interpretation**:
+  - High MESOR (>0.5): Generally active organism
+  - Low MESOR (<0.2): Generally inactive organism
+  - MESOR ≠ simple mean (accounts for rhythmic variation)
+
+#### Amplitude
+- **What it means**: Half the distance between peak and trough
+- **Typical values**: 0.0-0.5 for fraction movement
+- **Interpretation**:
+  - High amplitude (>0.2): Strong, robust circadian rhythm
+  - Moderate amplitude (0.1-0.2): Detectable but weaker rhythm
+  - Low amplitude (<0.1): Weak or absent rhythm
+  - Amplitude = 0: Arrhythmic (constant activity level)
+
+**Clinical relevance:**
+- Aging typically reduces amplitude (rhythm fragmentation)
+- SCN lesions eliminate amplitude (no circadian clock)
+- Zeitgebers (light/dark) increase amplitude (entrainment)
+
+#### Acrophase
+- **What it means**: Time of peak activity within the cycle
+- **Units**: Hours from start of recording
+- **Interpretation**:
+  - For 24h rhythm with lights on at t=0:
+    - Acrophase = 8-12h: Diurnal (day-active)
+    - Acrophase = 20-24h or 0-4h: Nocturnal (night-active)
+  - Acrophase shift indicates:
+    - Phase advance: Peak occurs earlier (e.g., jet lag west→east)
+    - Phase delay: Peak occurs later (e.g., jet lag east→west)
+
+**Group comparisons:**
+- Synchronized population: Similar acrophases (low SD)
+- Desynchronized population: Variable acrophases (high SD)
+- Anti-phase relationship: Acrophases differ by ~12h (for 24h rhythm)
+
+#### R² (Goodness of Fit)
+- **What it means**: Proportion of variance explained by the cosine model
+- **Scale**: 0.0-1.0
+- **Interpretation**:
+  - R² > 0.5: Excellent fit, very strong rhythm
+  - R² = 0.3-0.5: Good fit, strong rhythm
+  - R² = 0.1-0.3: Moderate fit, detectable rhythm
+  - R² < 0.1: Poor fit, weak or no rhythm
+
+**Why R² matters:**
+- High R²: Activity closely follows cosine pattern (clean rhythm)
+- Low R²: Activity deviates from cosine (ultradian, noise, or arrhythmic)
+- Compare with p-value: significant but low R² = detectable but weak rhythm
+
+#### p-value
+- **What it tests**: Null hypothesis that amplitude = 0 (no rhythm)
+- **Interpretation**:
+  - p < 0.001 (***): Very strong evidence for rhythm
+  - p < 0.01 (**): Strong evidence for rhythm
+  - p < 0.05 (*): Significant rhythm detected
+  - p ≥ 0.05 (ns): No significant rhythm
+
+**Important notes:**
+- Large sample sizes can yield p < 0.05 with low amplitude (biological significance ≠ statistical)
+- Check R² and amplitude together with p-value
+- Confidence intervals show precision of estimates
+
+### When to Use Cosinor
+
+**Ideal scenarios:**
+- **Quantifying rhythm strength**: Need numeric amplitude and MESOR values
+- **Comparing experimental groups**: Test if treatment affects rhythm parameters
+- **Publication requirements**: Cosinor is the most widely accepted method in chronobiology
+- **Known period**: Testing specific periods (e.g., 24h circadian rhythm)
+- **Population studies**: Combining rhythms across multiple individuals
+- **Phase response curves**: Measuring acrophase shifts after zeitgeber pulses
+
+**Advantages:**
+- Provides interpretable, quantitative parameters (MESOR, Amplitude, Acrophase)
+- Statistical testing with p-values and confidence intervals
+- Fast computation (least squares regression)
+- Robust to moderate noise
+- Standard method in chronobiology literature (easy comparison with published work)
+- Population-level statistics available
+
+**Limitations:**
+- Assumes sinusoidal rhythm (cosine wave) - may miss complex waveforms
+- Single-component model (doesn't detect multiple simultaneous rhythms like FFT)
+- Requires ~2-3 complete cycles for reliable parameter estimation
+- Less suitable for exploratory analysis (need to specify test periods)
+- Cannot detect period if not in the tested range
+
+### Practical Example
+
+**Scenario**: Testing whether a mutation affects circadian rhythm strength
+
+**Wildtype (WT) results:**
+```
+ROI 1:
+  Best-fit period: 24.0 hours
+  MESOR: 0.35 (moderate baseline activity)
+  Amplitude: 0.25 (strong rhythm)
+  Acrophase: 14.2 hours (peak in mid-afternoon)
+  R²: 0.65 (good fit)
+  p-value: 0.0001 (***)
+
+Population:
+  Amplitude: 0.23 (consistent across animals)
+  All 6 ROIs significant (100%)
+```
+
+**Mutant results:**
+```
+ROI 1:
+  Best-fit period: 24.0 hours
+  MESOR: 0.34 (similar baseline to WT)
+  Amplitude: 0.08 (weak rhythm - 3× lower than WT!)
+  Acrophase: 16.5 hours (2h phase delay)
+  R²: 0.18 (poor fit)
+  p-value: 0.12 (ns)
+
+Population:
+  Amplitude: 0.06 (very weak)
+  Only 2/6 ROIs significant (33%)
+```
+
+**Interpretation**: Mutation causes **circadian rhythm disruption**:
+- Amplitude reduced by 68% (from 0.25 to 0.08)
+- Most individuals show no significant rhythm (100% → 33%)
+- MESOR unchanged (mutation affects clock, not overall activity)
+- Acrophase variable (desynchronization)
+
+**Conclusion**: Mutation impairs circadian clock function without affecting total activity levels. This would be **missed** by standard activity analysis but **clearly detected** by cosinor.
+
+### Comparison with Other Methods
+
+| Feature | Cosinor | Fisher Z | FFT |
+|---------|---------|----------|-----|
+| **Primary Use** | Quantify rhythm parameters | Detect significant periods | Explore all frequencies |
+| **Output** | MESOR, Amplitude, Acrophase | p-values for periods | Full power spectrum |
+| **Best for** | Known periods, group comparisons | Period detection, hypothesis testing | Exploratory analysis |
+| **Speed** | Very fast | Slow | Very fast |
+| **Statistics** | p-values + 95% CIs | p-values only | No built-in tests |
+| **Assumptions** | Sinusoidal rhythm | None (non-parametric) | Stationarity |
+
+**Recommendation**: Use **Cosinor** for quantifying known rhythms (e.g., testing 24h circadian), **Fisher Z** for detecting unknown periods with statistical validation, and **FFT** for broad exploratory analysis of all frequencies.
+
+### Tips and Best Practices
+
+1. **Period Selection**:
+   - Test biologically relevant periods: 12h (ultradian), 24h (circadian), 30h (infradian)
+   - Include period range based on recording duration
+   - For free-running conditions, test 20-28h (circadian period may not be exactly 24h)
+
+2. **Data Requirements**:
+   - Minimum: 2 complete cycles (48h for circadian)
+   - Recommended: ≥3 cycles (72h for circadian)
+   - Longer recordings improve parameter precision (tighter confidence intervals)
+
+3. **Interpreting Significance**:
+   - **p < 0.05 but R² < 0.1**: Statistically detectable but biologically weak rhythm
+   - **p ≥ 0.05 but R² > 0.2**: May be underpowered, try longer recording
+   - **High amplitude with high p-value**: Check for outliers or bimodal rhythm
+
+4. **Population Analysis**:
+   - If <50% of individuals significant: population-level rhythm questionable
+   - High variability in acrophases: desynchronized population
+   - Use vector plots to visualize population phase distribution
+
+5. **Validation**:
+   - Always plot fitted curves over raw data (visual inspection critical)
+   - Check that acrophase aligns with visible peaks
+   - Compare results with Fisher Z or FFT for consistency
+
+6. **Common Pitfalls**:
+   - **Testing too many periods**: Multiple comparison problem (adjust α or use best-fit)
+   - **Ignoring confidence intervals**: Wide CIs indicate imprecise estimates
+   - **Over-interpreting small amplitude**: Amplitude < 0.05 may be noise, even if significant
+
+---
+
 ## ROI Similarity Matrix
 
 ### What It Does
 
-Computes pairwise cross-correlations between all ROIs to identify synchronized or anti-phase activity patterns. Uses hierarchical clustering to group similar ROIs.
+Computes pairwise cross-correlations between all ROIs to identify synchronized or anti-phase activity patterns. Uses hierarchical clustering to group similar ROIs. Provides both a similarity metric and phase offset estimates.
 
 ### How It Works
 
 1. **Normalization**: Standardizes each ROI's activity (mean=0, std=1)
-2. **Cross-Correlation**: Calculates correlation at different time lags
-3. **Max Correlation**: Finds maximum correlation (can be at non-zero lag)
-4. **Clustering**: Groups ROIs by similarity using hierarchical clustering
-5. **Visualization**: Displays correlation matrix and dendrogram
+2. **Cross-Correlation**: Calculates correlation at different time lags (±12h)
+3. **Peak Detection**: Finds maximum correlation and optimal lag
+4. **Significance Testing**: t-test for correlation significance
+5. **Clustering**: Groups ROIs by similarity using hierarchical clustering
 
-### Mathematical Background
+### Mathematical Foundation
 
-Cross-correlation at lag τ:
+**Signal Normalization**
+
+For each time series, normalize to zero mean and unit variance:
 
 ```
-r(τ) = Σ[x(t) × y(t+τ)] / √[Σx(t)² × Σy(t+τ)²]
+x̃(t) = (x(t) - x̄) / σₓ,    ỹ(t) = (y(t) - ȳ) / σᵧ
 ```
 
-The maximum correlation captures both:
-- **In-phase** synchronization (lag = 0)
-- **Anti-phase** relationships (lag = ½ period)
-- **Phase-shifted** patterns (other lags)
+**Cross-Correlation Function**
+
+The normalized cross-correlation at lag τ is:
+
+```
+r_xy(τ) = (1/n) × Σₜ x̃(t) × ỹ(t+τ)
+```
+
+This yields values in [-1, 1]:
+- r_xy(τ) = 1: Perfect positive correlation at lag τ
+- r_xy(τ) = -1: Perfect negative correlation (anti-phase)
+- r_xy(τ) = 0: No linear relationship
+
+The lag range is limited to ±12 hours (half the circadian period).
+
+**Peak Correlation and Optimal Lag**
+
+```
+r_max = max_τ |r_xy(τ)|
+τ_opt = argmax_τ |r_xy(τ)|
+```
+
+ROIs with |τ_opt| < 1h are considered in-phase (synchronized).
+
+### Statistical Significance Testing
+
+To determine if correlation differs significantly from zero, use the **t-test for Pearson correlation**:
+
+Under H₀: ρ = 0 (true population correlation is zero):
+
+```
+t = r × √[(n-2)/(1-r²)]
+```
+
+This follows a Student's t-distribution with ν = n-2 degrees of freedom.
+
+**Two-tailed p-value:**
+```
+p = 2 × (1 - F_{t,ν}(|t|))
+```
+
+**Critical correlation threshold** for significance at level α:
+
+```
+r_crit = √[t²_crit / (n-2 + t²_crit)]
+```
+
+where t_crit = F⁻¹_{t,ν}(1-α/2). This shows r_crit decreases as sample size increases.
+
+### Hierarchical Clustering
+
+To identify groups with similar activity patterns, correlations are converted to distances:
+
+```
+d_ij = 1 - r_ij
+```
+
+Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
+
+**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. Cut the dendrogram at threshold d_cut (default 0.5, corresponding to r = 0.5) to define clusters.
 
 ### Parameters
 
@@ -663,27 +1147,62 @@ Low Similarity:
 
 ### What It Does
 
-Measures frequency-specific synchronization between ROI pairs using Welch's method. Unlike simple correlation, coherence identifies which frequency components are synchronized.
+Measures frequency-specific synchronization between ROI pairs using Welch's method. Unlike cross-correlation (which measures overall similarity), coherence identifies which specific frequency components are synchronized. Two ROIs might have low overall correlation but high coherence at the circadian frequency.
 
 ### How It Works
 
-1. **Welch's Method**: Divides data into overlapping segments
-2. **Cross-Spectral Density**: Computes frequency-by-frequency correlation
-3. **Coherence Calculation**: Normalizes to 0-1 scale
-4. **Dominant Frequency**: Identifies strongest coherent frequency
+1. **Welch's Method**: Divides data into overlapping segments for robust spectral estimation
+2. **Spectral Density Estimation**: Computes auto- and cross-spectral densities
+3. **Coherence Calculation**: Normalizes to 0-1 scale at each frequency
+4. **Significance Testing**: Compares to threshold based on number of segments
 
-### Mathematical Background
+### Mathematical Foundation
 
-Coherence at frequency f:
+**Welch's Method for Spectral Estimation**
+
+Rather than computing a single periodogram (high variance), Welch's method averages across K overlapping segments:
+
+1. Divide each signal into segments of length L with 50% overlap
+2. Apply Hann window w[n] to each segment
+3. Compute DFT of each windowed segment: X_k[f], Y_k[f]
+4. Estimate spectral densities by averaging:
 
 ```
-Coh(f) = |Pxy(f)|² / [Pxx(f) × Pyy(f)]
+P̂₁₁(f) = (1/K) × Σₖ |Xₖ[f]|²
+P̂₂₂(f) = (1/K) × Σₖ |Yₖ[f]|²
+P̂₁₂(f) = (1/K) × Σₖ Xₖ*[f] × Yₖ[f]
 ```
 
-Where:
-- Pxy = cross-spectral density
-- Pxx, Pyy = auto-spectral densities
-- Coherence ranges from 0 (no synchronization) to 1 (perfect synchronization)
+where Xₖ* denotes complex conjugate.
+
+**Magnitude-Squared Coherence**
+
+```
+γ²(f) = |P̂₁₂(f)|² / [P̂₁₁(f) × P̂₂₂(f)]
+```
+
+This is analogous to squared correlation but computed at each frequency:
+- γ²(f) = 1: Perfect linear relationship at frequency f
+- γ²(f) = 0: No linear relationship at frequency f
+
+### Significance Threshold
+
+Under H₀ (two signals are independent), the coherence estimator follows a distribution that depends on K segments. The significance threshold for detecting non-zero coherence at level α is:
+
+```
+γ²_crit = 1 - α^(1/(K-1))
+```
+
+This derives from the beta distribution of coherence under the null hypothesis.
+
+**Example:** K = 8 segments, α = 0.05:
+```
+γ²_crit = 1 - 0.05^(1/7) ≈ 0.37
+```
+
+More segments → lower threshold → more statistical power, but reduced frequency resolution.
+
+For circadian analysis, extract coherence within ±20% of the target period (e.g., 24h) and compare to γ²_crit.
 
 ### Parameters
 
@@ -834,33 +1353,82 @@ Where:
 
 ### What It Does
 
-Uses Hilbert transform to extract instantaneous phase and amplitude of activity rhythms. Clusters ROIs by their activity timing (phase) to identify synchronized groups.
+Uses Hilbert transform to extract instantaneous phase and amplitude of activity rhythms. Clusters ROIs by their activity timing (phase) to identify synchronized groups. Measures phase synchronization between pairs using the Phase Locking Value (PLV).
 
 ### How It Works
 
-1. **Bandpass Filtering**: Isolates the dominant frequency
-2. **Hilbert Transform**: Extracts instantaneous phase and amplitude
-3. **Phase Extraction**: Converts to timing within the cycle
-4. **Clustering**: Groups ROIs by phase similarity
-5. **Visualization**: Polar plot showing phase relationships
+1. **Hilbert Transform**: Constructs analytic signal to extract instantaneous phase
+2. **Phase Extraction**: Computes instantaneous phase at each time point
+3. **Phase Locking Value**: Quantifies consistency of phase relationships
+4. **Phase Clustering**: Groups ROIs by mean phase into chronotype categories
+5. **Visualization**: Polar plot showing phase and amplitude
 
-### Mathematical Background
+### Mathematical Foundation
 
-Hilbert transform for signal x(t):
+**Hilbert Transform and Analytic Signal**
 
-```
-H[x(t)] = (1/π) ∫ x(τ)/(t-τ) dτ
-```
-
-Analytical signal:
+For a real-valued signal x(t), the analytic signal is:
 
 ```
-z(t) = x(t) + i·H[x(t)] = A(t)·e^(iφ(t))
+z(t) = x(t) + i×H{x(t)}
 ```
 
-Where:
-- A(t) = instantaneous amplitude (strength of rhythm)
-- φ(t) = instantaneous phase (timing within cycle)
+where H{x(t)} is the Hilbert transform—a 90° phase shift of all frequency components:
+
+```
+H{x(t)} = (1/π) × P.V. ∫ x(τ)/(t-τ) dτ
+```
+
+The analytic signal in polar form:
+
+```
+z(t) = a(t) × e^(iφ(t))
+```
+
+where:
+- a(t) = |z(t)| is the **instantaneous amplitude** (envelope)
+- φ(t) = arg(z(t)) is the **instantaneous phase**
+
+### Phase Locking Value (PLV)
+
+For two signals with instantaneous phases φ₁(t) and φ₂(t), the phase difference is Δφ(t) = φ₂(t) - φ₁(t). The PLV measures consistency of this phase difference:
+
+```
+PLV = |(1/N) × Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
+```
+
+**Geometric interpretation:** Each term e^(iΔφ(t)) is a unit vector at angle Δφ(t) on the complex plane:
+- Constant phase difference → all vectors point same direction → PLV = 1
+- Uniformly varying phase → vectors cancel → PLV ≈ 0
+
+**Interpretation guidelines:**
+- PLV > 0.8: Strong phase synchronization
+- PLV ∈ [0.5, 0.8]: Moderate synchronization
+- PLV ∈ [0.3, 0.5]: Weak synchronization
+- PLV < 0.3: No significant synchronization
+
+**Mean Phase Difference (circular mean):**
+
+```
+Δφ̄ = arg(Σₜ e^(iΔφ(t)))
+```
+
+Convert to hours: Δt = (Δφ̄/2π) × T gives the average time by which signal 2 leads/lags signal 1.
+
+### Phase Clustering for Chronotype Identification
+
+Each ROI's mean circadian phase (acrophase) is computed as the circular mean of instantaneous phase:
+
+```
+φ̄ = arg(Σₜ e^(iφ(t)))
+```
+
+Convert to clock time (hours from recording start, modulo period T). ROIs are binned into four chronotype clusters:
+
+- **Early-active** (0-6h): Peak activity in first quarter
+- **Mid-active** (6-12h): Peak activity in second quarter
+- **Late-active** (12-18h): Peak activity in third quarter
+- **Night-active** (18-24h): Peak activity in fourth quarter
 
 ### Parameters
 
