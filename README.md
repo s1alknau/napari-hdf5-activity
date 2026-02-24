@@ -29,7 +29,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - [📚 Additional Documentation](#-additional-documentation)
 - [Troubleshooting](#troubleshooting)
 - [Scientific Background](#scientific-background)
-  - [Fischer Z-Transformation](#fischer-z-transformation-for-circadian-rhythm-detection)
+  - [Fisher Periodicity Test](#fisher-periodicity-test-for-circadian-rhythm-detection)
   - [Frame Viewer](#frame-viewer)
 - [📐 Mathematical Documentation](#-mathematical-documentation)
   - [Movement Analysis Pipeline](#movement-analysis-pipeline-mathematics)
@@ -40,7 +40,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
     - [Hysteresis State Detection](#movement-state-detection-hysteresis)
     - [Activity Fraction & Sleep Bouts](#activity-fraction-and-sleep-detection)
   - [Rhythmic Pattern Analysis](#rhythmic-pattern-analysis-mathematics)
-    - [Fisher Z-Transformation](#fisher-z-transformation-mathematical-details)
+    - [Fisher Periodicity Test](#fisher-periodicity-test-mathematical-details)
     - [FFT Power Spectrum](#fft-power-spectrum-mathematical-details)
     - [Cosinor Analysis](#cosinor-analysis-mathematical-details)
     - [Method Comparison](#comparison-of-rhythmic-analysis-methods)
@@ -62,7 +62,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - Analyze circadian rhythms and ultradian cycles in model organisms (C. elegans, Drosophila, zebrafish, Nematostella, etc.)
 - Automatically detect sleep/wake states based on movement patterns
 - Quantify activity levels across light/dark cycles with LED-based lighting detection
-- Statistical periodogram analysis (Fisher Z-transformation, FFT) to identify dominant rhythmic patterns
+- Statistical periodogram analysis (Fisher periodicity test, FFT) to identify dominant rhythmic patterns
 
 **Key Advantages:**
 - **Automated ROI detection**: No manual tracking required - automatically identifies and monitors multiple organisms
@@ -85,7 +85,7 @@ Detailed documentation for advanced features and workflows:
 
 ### Analysis & Methods
 - **[Extended Analysis Guide](EXTENDED_ANALYSIS.md)** - Comprehensive guide for rhythmic pattern analysis
-  - Fisher Z-Transformation Periodogram
+  - Fisher Periodicity Test (Harmonic Analysis Periodogram)
   - FFT Power Spectrum
   - ROI Similarity Matrix
   - Coherence Analysis
@@ -129,9 +129,9 @@ Detailed documentation for advanced features and workflows:
   - **Adaptive**: Dynamic threshold adjustment during analysis
 - **Hysteresis Algorithm**: Robust state detection with upper and lower thresholds
 - **Sleep/Wake Detection**: Automated classification of activity states
-- **Extended Analysis**: Fischer Z-transformation for circadian rhythm detection
-  - Periodogram analysis for detecting periodic patterns
-  - Statistical significance testing (Chi-square)
+- **Extended Analysis**: Fisher periodicity test for circadian rhythm detection
+  - Harmonic analysis periodogram (Z = n × R², follows χ²(2) under H₀)
+  - Statistical significance testing (chi-square, df=2)
   - Sleep/wake phase identification based on dominant periods
   - Configurable period range (0-100 hours)
   - Visual periodogram plots for all ROIs
@@ -251,7 +251,7 @@ Detailed documentation for advanced features and workflows:
 - Enhanced "Number of Processes" parameter now functional
 
 ### Version 0.3.0 (2025)
-- Added Extended Analysis tab with Fischer Z-transformation
+- Added Extended Analysis tab with Fisher periodicity test (harmonic analysis)
 - Periodogram visualization for circadian rhythm detection
 - Statistical significance testing for periodic patterns
 - Sleep/wake phase identification
@@ -888,9 +888,9 @@ Sleep Bouts (start, end, duration in minutes)
    - Horizontal bars: Sleep bouts
    - Bar length: Sleep duration (minutes)
 
-4. **Periodogram (Fisher Analysis)**:
+4. **Periodogram (Fisher Periodicity Test)**:
    - X-axis: "Period (hours)"
-   - Y-axis: "Fischer Z-Score" (dimensionless)
+   - Y-axis: "Z-Score" = n × R² (dimensionless, follows χ²(2) under H₀)
    - Range: 0 to ~30+ (higher = stronger rhythm)
    - Horizontal line: Significance threshold (chi-square, df=2)
 
@@ -1384,9 +1384,11 @@ The multiprocessing speedup for baseline analysis is the same as HDF5 processing
 
 ## Scientific Background
 
-### Fischer Z-Transformation for Circadian Rhythm Detection
+### Fisher Periodicity Test for Circadian Rhythm Detection
 
-The plugin implements **Fischer's Z-transformation periodogram** for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries. This method tests for correlations between the time series and sine/cosine waves at different periods.
+The plugin implements a **harmonic analysis periodicity test** (following Fisher, 1929) for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries. This method tests for correlations between the time series and sine/cosine waves at different periods.
+
+> **Note on terminology:** Despite sometimes being called "Fisher Z-Transformation" in biological software, this is *not* the classic Fisher r-to-z transform (z = arctanh(r)). The correct name is Fisher's periodicity test or chi-square periodogram. The test statistic Z = n × R² follows a χ²(2) distribution under H₀ — not a normal distribution. See the [Mathematical Details](#fisher-periodicity-test-mathematical-details) section for a full derivation.
 
 #### What is a Periodogram?
 
@@ -1421,8 +1423,8 @@ A periodogram is a statistical tool that identifies periodic (repeating) pattern
       - r_cos = correlation(activity_data, cos_wave)
       - r_sin = correlation(activity_data, sin_wave)
    e. Calculate coherence squared: C² = r_cos² + r_sin²
-   f. Calculate Fischer Z-score: Z = n × C²
-      (where n = number of data points)
+   f. Calculate test statistic (Z-score): Z = n × C²
+      (where n = number of data points; follows χ²(2) under H₀)
    ```
 
 3. **Statistical Significance**:
@@ -1450,7 +1452,7 @@ A periodogram is a statistical tool that identifies periodic (repeating) pattern
 - Resolution: 100 test points
 - Covers circadian (24h) and ultradian (<24h) rhythms
 
-**Y-Axis: Fischer Z-Score (dimensionless)**
+**Y-Axis: Z-Score = n × R² (dimensionless, follows χ²(2) under H₀)**
 - Range: Typically 0 to 30+
 - **Z > 5.99**: Statistically significant (p < 0.05)
 - **Z > 9.21**: Highly significant (p < 0.01)
@@ -1605,7 +1607,7 @@ Target Period    Minimum Recording    Recommended
 
 **Problem 4: "Z-scores very low despite clear activity patterns"**
 - **Cause**: Activity patterns are not sinusoidal (e.g., square wave LD response)
-- **Solution**: Fischer Z tests for sinusoidal rhythms. Try autocorrelation analysis for non-sinusoidal patterns.
+- **Solution**: The periodicity test assumes sinusoidal rhythms. Try autocorrelation analysis for non-sinusoidal patterns.
 
 #### Technical Notes
 
@@ -1926,11 +1928,15 @@ Sleep Efficiency:  SE_i = TST_i / Total_Recording_Duration
 
 ### Rhythmic Pattern Analysis (Mathematics)
 
-#### Fisher Z-Transformation (Mathematical Details)
+#### Fisher Periodicity Test (Mathematical Details)
 
 **Core Principle:**
 
-Tests for sinusoidal rhythms by correlating data with cosine/sine waves at different periods.
+Tests for sinusoidal rhythms by correlating data with cosine/sine waves at different periods (Fisher, 1929, "Tests of significance in harmonic analysis").
+
+> **What this is NOT:** The classic *Fisher r-to-z transform* is z = arctanh(r), used to normalise Pearson correlations. That is a different method entirely.
+>
+> **What this IS:** A chi-square periodogram. The test statistic Z = n × R² follows χ²(2) under H₀ because, under the null, √n·r_cos and √n·r_sin are asymptotically independent standard normals — and the sum of squares of two independent standard normals follows χ²(2). The "2" degrees of freedom correspond to the two free parameters of a sinusoid: amplitude and phase.
 
 **For test period τ:**
 ```
@@ -1940,13 +1946,14 @@ Reference waves:
   C(t) = cos(ω · t)
   S(t) = sin(ω · t)
 
-Correlations:
+Correlations (Pearson):
   r_cos = corr(y, C)
   r_sin = corr(y, S)
 
 Squared coherence:  R² = r_cos² + r_sin²
+  (proportion of variance explained by a sinusoid of arbitrary phase at period τ)
 
-Fisher Z-score:  Z(τ) = n · R²
+Test statistic:  Z(τ) = n · R²   ~  χ²(2) under H₀
 ```
 
 **Statistical Significance:**
@@ -2133,14 +2140,14 @@ Standard errors from covariance matrix:
 
 | Method | Best For | Significance Test | Period Detection |
 |--------|----------|-------------------|------------------|
-| **Fisher Z** | Testing for circadian rhythms | Chi-square (df=2) | Scans 100 test periods |
+| **Fisher Periodicity Test** | Testing for circadian rhythms | Chi-square (df=2), Z = n × R² | Scans 100 test periods |
 | **FFT** | Exploratory analysis, harmonics | Permutation (1000x) | Full frequency spectrum |
 | **Cosinor** | Quantifying rhythm parameters | F-test (df=2, n-3) | Assumes known period |
 
 **When to Use Each:**
 
-1. **Fisher Z-Transformation:**
-   - ✓ Hypothesis testing (analytical p-values)
+1. **Fisher Periodicity Test:**
+   - ✓ Hypothesis testing (analytical p-values via χ²(2))
    - ✓ Standard circadian analysis
    - ✓ Fast computation
    - ✗ Limited frequency resolution (100 points)
@@ -2161,7 +2168,7 @@ Standard errors from covariance matrix:
 
 **Integrated Workflow:**
 ```
-Step 1: Run Fisher Z and FFT
+Step 1: Run Fisher periodicity test and FFT
   → Detect if rhythm exists
   → Estimate dominant period τ_dom
 
@@ -2180,7 +2187,7 @@ Step 4: Biological interpretation
 **Expected Concordance:**
 ```
 Strong 24h rhythm:
-  Fisher Z: Peak at 24h, Z = 18.5, p < 0.001 ✓
+  Fisher periodicity test: Peak at 24h, Z = 18.5, p < 0.001 ✓
   FFT: Peak at 24h, p = 0.002 ✓
   Cosinor (24h): A = 0.28, F = 45.3, p < 0.001 ✓
 
@@ -2188,7 +2195,7 @@ Strong 24h rhythm:
 ```
 
 **Key Differences:**
-- **Fisher Z**: Tests specific periods, analytical p-value (chi-square)
+- **Fisher Periodicity Test**: Tests specific periods, analytical p-value (Z = n × R² ~ χ²(2))
 - **FFT**: Tests all frequencies, empirical p-value (permutation)
 - **Cosinor**: Assumes period, parametric p-value (F-test)
 
