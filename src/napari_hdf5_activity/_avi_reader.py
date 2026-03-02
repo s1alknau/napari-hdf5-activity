@@ -414,6 +414,7 @@ def process_avi_batch_streaming(
     print("Phase 1: Scanning video metadata...")
     scan_results: Dict[int, Tuple[Optional[Dict], str]] = {}
 
+    scanned_count = 0
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
             executor.submit(_scan_video_metadata, idx, path, target_frame_interval): idx
@@ -422,8 +423,15 @@ def process_avi_batch_streaming(
         for future in as_completed(futures):
             idx_result, metadata, error_msg = future.result(timeout=60)
             scan_results[idx_result] = (metadata, error_msg)
+            scanned_count += 1
             status = f"✓ {metadata['name']} ({metadata['sampled_frames']} frames)" if not error_msg else f"✗ {error_msg}"
             print(f"  [{idx_result + 1}/{total_videos}] {status}")
+            if progress_callback:
+                # Phase 1 uses 0–10% of the progress bar
+                progress_callback(
+                    (scanned_count / total_videos) * 10,
+                    f"Scanning {scanned_count}/{total_videos} videos...",
+                )
 
     # Calculate time offsets in temporal order; stop at first error
     time_offsets: Dict[int, float] = {}
@@ -472,8 +480,9 @@ def process_avi_batch_streaming(
             completed_count += 1
 
             if progress_callback:
+                # Phase 2 uses 10–95% of the progress bar
                 progress_callback(
-                    (completed_count / len(valid_video_indices)) * 100,
+                    10 + (completed_count / len(valid_video_indices)) * 85,
                     f"Analyzed {completed_count}/{len(valid_video_indices)} videos",
                 )
 
