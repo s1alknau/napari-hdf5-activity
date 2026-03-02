@@ -11919,8 +11919,14 @@ class HDF5AnalysisWidget(QWidget):
             from qtpy.QtGui import QPixmap
             import io
 
+            # Close the previous figure and disconnect all Qt event callbacks
+            # before creating a new one to prevent NavigationToolbar2QT dangling refs.
             if hasattr(self, "fisher_plot_figure") and self.fisher_plot_figure:
-                plt.close(self.fisher_plot_figure)
+                try:
+                    plt.close(self.fisher_plot_figure)
+                except Exception:
+                    pass
+                self.fisher_plot_figure = None
 
             roi_results = cosinor_results.get("roi_results", {})
             # Filter to only integer ROI keys
@@ -11972,6 +11978,9 @@ class HDF5AnalysisWidget(QWidget):
                 y=0.99,
             )
 
+            # Recording duration (hours) — needed for figure-level warning and per-ROI annotation
+            _recording_dur_h = cosinor_results.get("recording_duration_h", 0.0)
+
             # Figure-level warning if recording < 2× any test period
             test_periods_plot = cosinor_results.get("test_periods", [])
             short_periods = [
@@ -11996,9 +12005,6 @@ class HDF5AnalysisWidget(QWidget):
             if not activity_data_dict:
                 activity_data_dict = self.fraction_data if hasattr(self, "fraction_data") else {}
             activity_y_label = data_type_name
-
-            # Recording duration (hours) for n_cycles annotation in each ROI plot
-            _recording_dur_h = cosinor_results.get("recording_duration_h", 0.0)
 
             # Helper function to plot ROI results
             def plot_section(
