@@ -279,6 +279,95 @@ def _load_single_video_for_batch(
         return video_idx, None, None, f"Error loading {video_name}: {str(e)}"
 
 
+def _process_single_video_streaming(
+    video_idx: int,
+    video_path: str,
+    masks: List[np.ndarray],
+    time_offset: float,
+    target_frame_interval: float,
+    chunk_size: int,
+) -> Tuple[int, Dict[int, List], Optional[Dict], str]:
+    """
+    Process a single AVI video for streaming analysis.
+
+    Loads frames in chunks, computes per-ROI intensity changes via process_chunk,
+    and returns results for later temporal merging. Designed for concurrent
+    execution via ThreadPoolExecutor — cv2 and numpy both release the GIL.
+
+    Args:
+        video_idx: Position of this video in the temporal sequence
+        video_path: Path to AVI file
+        masks: List of ROI boolean masks (shared across threads — read-only)
+        time_offset: Absolute time (seconds) at which this video starts
+        target_frame_interval: Target seconds between sampled frames
+        chunk_size: Number of sampled frames per processing chunk
+
+    Returns:
+        (video_idx, roi_changes, metadata_dict, error_message)
+        roi_changes maps ROI index → list of (timestamp, intensity) tuples.
+        metadata_dict is None on error, error_message is "" on success.
+    """
+    from ._reader import process_chunk
+
+    roi_changes: Dict[int, List] = {roi_idx + 1: [] for roi_idx in range(len(masks))}
+
+    try:
+        with AVIVideoReader(video_path) as reader:
+            video_fps = reader.fps
+            video_duration = reader.duration
+            frames_per_sample = max(1, int(video_fps * target_frame_interval))
+
+            frame_indices = list(range(0, reader.frame_count, frames_per_sample))
+            total_sampled = len(frame_indices)
+
+            if total_sampled == 0:
+                return video_idx, roi_changes, None, "No frames to sample"
+
+            num_chunks = (total_sampled + chunk_size - 1) // chunk_size
+
+            for chunk_idx in range(num_chunks):
+                chunk_start = chunk_idx * chunk_size
+                chunk_end = min(chunk_start + chunk_size, total_sampled)
+                chunk_frame_indices = frame_indices[chunk_start:chunk_end]
+
+                chunk_frames = []
+                for fidx in chunk_frame_indices:
+                    frame = reader.get_frame(fidx)
+                    if frame is not None:
+                        chunk_frames.append(frame)
+
+                if len(chunk_frames) < 2:
+                    continue
+
+                chunk_array = np.stack(chunk_frames, axis=0)
+                chunk_start_time = time_offset + (chunk_frame_indices[0] / video_fps)
+
+                chunk_results = process_chunk(
+                    chunk_array, masks, chunk_start_time, target_frame_interval
+                )
+
+                for roi_id in chunk_results:
+                    roi_changes[roi_id].extend(chunk_results[roi_id])
+
+                del chunk_array, chunk_frames
+
+            metadata = {
+                "path": video_path,
+                "index": video_idx,
+                "name": Path(video_path).name,
+                "fps": video_fps,
+                "frame_count": reader.frame_count,
+                "duration": video_duration,
+                "sampled_frames": total_sampled,
+                "frames_per_sample": frames_per_sample,
+            }
+
+            return video_idx, roi_changes, metadata, ""
+
+    except Exception as e:
+        return video_idx, roi_changes, None, f"Error processing {Path(video_path).name}: {str(e)}"
+
+
 def process_avi_batch_streaming(
     video_paths: List[str],
     masks: List[np.ndarray],
@@ -289,151 +378,140 @@ def process_avi_batch_streaming(
     """
     Process AVI batch with streaming analysis - no need to load all frames into memory.
 
-    This function loads videos in parallel chunks, processes frames immediately,
-    and discards them after analysis. Much more memory efficient than loading
-    all frames first.
+    Process AVI videos in parallel for streaming analysis — low memory, high throughput.
+
+    Phase 1 scans video metadata in parallel to pre-calculate each video's absolute
+    time offset. Phase 2 processes all videos concurrently using ThreadPoolExecutor
+    (cv2 and numpy both release the GIL, so threads parallelize effectively).
+    Results are merged in temporal order after all workers finish.
 
     Args:
         video_paths: List of AVI file paths in temporal order
         masks: List of ROI masks for analysis
         target_frame_interval: Target time interval between processed frames (seconds)
-        chunk_size: Number of frames to process at once per video
+        chunk_size: Number of sampled frames to process at once per video
         progress_callback: Optional callback function(percent, message)
 
     Returns:
         Tuple of (roi_changes dict, metadata dict)
     """
-    from ._reader import process_chunk
-
     total_videos = len(video_paths)
-    num_workers = min(6, os.cpu_count() or 4)
+    num_workers = min(max(2, (os.cpu_count() or 4) - 1), 12)
 
-    # Initialize results
-    roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
-    combined_metadata = {
+    roi_changes: Dict[int, List] = {roi_idx + 1: [] for roi_idx in range(len(masks))}
+    combined_metadata: Dict[str, Any] = {
         "videos": [],
         "total_duration": 0.0,
         "target_frame_interval": target_frame_interval,
         "source_type": "avi_batch_streaming",
     }
 
-    current_time_offset = 0.0
+    print(f"\nStreaming analysis of {total_videos} videos with {num_workers} workers...")
+
+    # ------------------------------------------------------------------
+    # Phase 1: Parallel metadata scan → determine time offset per video
+    # ------------------------------------------------------------------
+    print("Phase 1: Scanning video metadata...")
+    scan_results: Dict[int, Tuple[Optional[Dict], str]] = {}
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_scan_video_metadata, idx, path, target_frame_interval): idx
+            for idx, path in enumerate(video_paths)
+        }
+        for future in as_completed(futures):
+            idx_result, metadata, error_msg = future.result(timeout=60)
+            scan_results[idx_result] = (metadata, error_msg)
+            status = f"✓ {metadata['name']} ({metadata['sampled_frames']} frames)" if not error_msg else f"✗ {error_msg}"
+            print(f"  [{idx_result + 1}/{total_videos}] {status}")
+
+    # Calculate time offsets in temporal order; stop at first error
+    time_offsets: Dict[int, float] = {}
+    valid_video_indices: List[int] = []
+    current_offset = 0.0
+
+    for video_idx in sorted(scan_results.keys()):
+        meta, error_msg = scan_results[video_idx]
+        if error_msg or meta is None:
+            print(f"  STOPPING before video {video_idx + 1}: {error_msg}")
+            break
+        time_offsets[video_idx] = current_offset
+        current_offset += meta["duration"]
+        valid_video_indices.append(video_idx)
+
+    if not valid_video_indices:
+        raise ValueError("No valid videos found during metadata scan")
+
+    print(f"  → {len(valid_video_indices)} valid videos, total duration {current_offset:.1f}s")
+
+    # ------------------------------------------------------------------
+    # Phase 2: Process all valid videos in parallel
+    # ------------------------------------------------------------------
+    print(f"\nPhase 2: Analyzing {len(valid_video_indices)} videos in parallel...")
+    worker_results: Dict[int, Tuple[Dict[int, List], Optional[Dict], str]] = {}
+    completed_count = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_single_video_streaming,
+                video_idx,
+                video_paths[video_idx],
+                masks,
+                time_offsets[video_idx],
+                target_frame_interval,
+                chunk_size,
+            ): video_idx
+            for video_idx in valid_video_indices
+        }
+
+        for future in as_completed(futures):
+            video_idx = futures[future]
+            v_idx, v_roi_changes, v_metadata, error_msg = future.result()
+            worker_results[v_idx] = (v_roi_changes, v_metadata, error_msg)
+            completed_count += 1
+
+            if progress_callback:
+                progress_callback(
+                    (completed_count / len(valid_video_indices)) * 100,
+                    f"Analyzed {completed_count}/{len(valid_video_indices)} videos",
+                )
+
+            video_name = Path(video_paths[video_idx]).name
+            if error_msg:
+                print(f"  ✗ [{video_idx + 1}] {video_name}: {error_msg}")
+            else:
+                frames = v_metadata["sampled_frames"] if v_metadata else 0
+                print(f"  ✓ [{video_idx + 1}] {video_name}: {frames} frames")
+
+    # ------------------------------------------------------------------
+    # Phase 3: Merge results in temporal order
+    # ------------------------------------------------------------------
     total_frames_processed = 0
 
-    print(f"\nStreaming analysis of {total_videos} videos...")
-    print(f"Processing {num_workers} videos in parallel when possible")
-    print(f"Analyzing in chunks of {chunk_size} frames per video")
+    for video_idx in sorted(worker_results.keys()):
+        v_roi_changes, v_metadata, error_msg = worker_results[video_idx]
+        if error_msg or v_metadata is None:
+            continue
 
-    # Process videos sequentially to maintain temporal order
-    for video_idx, video_path in enumerate(video_paths):
-        video_name = Path(video_path).name
+        for roi_id in v_roi_changes:
+            roi_changes[roi_id].extend(v_roi_changes[roi_id])
 
-        if progress_callback:
-            percent = (video_idx / total_videos) * 100
-            progress_callback(
-                percent, f"Analyzing video {video_idx + 1}/{total_videos}"
-            )
+        total_frames_processed += v_metadata["sampled_frames"]
+        combined_metadata["videos"].append(v_metadata)
 
-        print(f"\n[{video_idx + 1}/{total_videos}] Processing: {video_name}")
+    # Sort each ROI's timeseries by timestamp
+    for roi_id in roi_changes:
+        roi_changes[roi_id].sort(key=lambda x: x[0])
 
-        try:
-            with AVIVideoReader(video_path) as reader:
-                video_fps = reader.fps
-                video_duration = reader.duration
-                frames_per_sample = max(1, int(video_fps * target_frame_interval))
-
-                # Get sampled frame indices
-                frame_indices = list(range(0, reader.frame_count, frames_per_sample))
-                total_sampled = len(frame_indices)
-
-                if total_sampled == 0:
-                    print("  ⚠️  No frames to sample, skipping")
-                    continue
-
-                print(f"  FPS: {video_fps}, Duration: {video_duration:.1f}s")
-                print(
-                    f"  Sampling every {frames_per_sample} frames = {total_sampled} frames"
-                )
-
-                # Process video frames in chunks
-                num_chunks = (total_sampled + chunk_size - 1) // chunk_size
-
-                for chunk_idx in range(num_chunks):
-                    chunk_start = chunk_idx * chunk_size
-                    chunk_end = min(chunk_start + chunk_size, total_sampled)
-                    chunk_frame_indices = frame_indices[chunk_start:chunk_end]
-
-                    # Load chunk frames
-                    chunk_frames = []
-                    for frame_idx in chunk_frame_indices:
-                        frame = reader.get_frame(frame_idx)
-                        if frame is not None:
-                            chunk_frames.append(frame)
-
-                    if len(chunk_frames) < 2:
-                        continue  # Need at least 2 frames for change detection
-
-                    # Convert to numpy array for processing
-                    chunk_array = np.stack(chunk_frames, axis=0)
-
-                    # Calculate start time for this chunk
-                    chunk_start_time = current_time_offset + (
-                        chunk_frame_indices[0] / video_fps
-                    )
-
-                    # Process chunk
-                    chunk_results = process_chunk(
-                        chunk_array, masks, chunk_start_time, target_frame_interval
-                    )
-
-                    # Merge results
-                    for roi_idx in chunk_results:
-                        roi_changes[roi_idx].extend(chunk_results[roi_idx])
-
-                    total_frames_processed += len(chunk_frames)
-
-                    # Free memory
-                    del chunk_array, chunk_frames
-
-                # Update time offset for next video
-                current_time_offset += video_duration
-
-                # Store video metadata
-                combined_metadata["videos"].append(
-                    {
-                        "path": video_path,
-                        "index": video_idx,
-                        "name": video_name,
-                        "fps": video_fps,
-                        "frame_count": reader.frame_count,
-                        "duration": video_duration,
-                        "sampled_frames": total_sampled,
-                        "frames_per_sample": frames_per_sample,
-                    }
-                )
-
-                print(f"  ✓ Processed {total_sampled} frames")
-
-        except Exception as e:
-            print(f"  ✗ ERROR: {e}")
-            print(f"  STOPPING at video {video_idx + 1}")
-            break
-
-    # Sort results by time
-    for roi_idx in roi_changes:
-        roi_changes[roi_idx].sort(key=lambda x: x[0])
-
-    # Log raw value ranges (MinMax normalization is applied post-movement-detection in _calc.py)
-    for roi_idx, data in roi_changes.items():
+    # Log raw value ranges
+    for roi_id, data in roi_changes.items():
         if not data:
             continue
         values = [v for _, v in data]
-        min_val = min(values)
-        max_val = max(values)
-        print(f"  ROI {roi_idx}: raw value range [{min_val:.6f}, {max_val:.6f}]")
+        print(f"  ROI {roi_id}: raw range [{min(values):.6f}, {max(values):.6f}]")
 
-    # Complete metadata
-    combined_metadata["total_duration"] = current_time_offset
+    combined_metadata["total_duration"] = current_offset
     combined_metadata["total_frames"] = total_frames_processed
     combined_metadata["effective_fps"] = 1.0 / target_frame_interval
     combined_metadata["frame_interval"] = target_frame_interval
@@ -444,9 +522,7 @@ def process_avi_batch_streaming(
     print("\n✓ Streaming analysis complete:")
     print(f"  Videos processed: {len(combined_metadata['videos'])}")
     print(f"  Frames analyzed: {total_frames_processed}")
-    print(
-        f"  Total duration: {current_time_offset:.1f}s ({current_time_offset/60:.1f}min)"
-    )
+    print(f"  Total duration: {current_offset:.1f}s ({current_offset / 60:.1f} min)")
     print(f"  ROIs tracked: {len(roi_changes)}")
 
     return roi_changes, combined_metadata
@@ -491,7 +567,7 @@ def load_avi_batch_timeseries(
     current_time_offset = 0.0
 
     # Determine number of parallel workers and chunk size
-    num_workers = min(6, os.cpu_count() or 4)
+    num_workers = min(max(2, (os.cpu_count() or 4) - 1), 12)
     # Process videos in chunks to avoid memory overflow
     # Chunk size of 10 videos for counting/metadata phase
     chunk_size = 10
