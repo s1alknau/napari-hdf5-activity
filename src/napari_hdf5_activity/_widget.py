@@ -7370,6 +7370,7 @@ class HDF5AnalysisWidget(QWidget):
                     # Calculate total duration from merged_results
                     total_duration_s = 0
                     start_time_s = 0
+                    end_time_s = 0
                     if self.merged_results:
                         first_roi = next(iter(self.merged_results.values()))
                         if first_roi:
