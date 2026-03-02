@@ -7208,7 +7208,24 @@ class HDF5AnalysisWidget(QWidget):
                         "Time column in minutes."
                     )
 
-                # === SHEET 6: LIGHTING CONDITIONS ===
+                # === SHEET 6: QUIESCENCE ===
+                if hasattr(self, "quiescence_data") and self.quiescence_data:
+                    quiescence_df = self._create_time_series_dataframe(
+                        self.quiescence_data,
+                        sorted_rois,
+                        "Quiescence",
+                        convert_to_minutes=True,
+                    )
+                    quiescence_df.to_excel(
+                        writer, sheet_name="Quiescence", index=False, startrow=1
+                    )
+                    writer.sheets["Quiescence"].cell(row=1, column=1).value = (
+                        "Binary quiescence state per ROI (1=quiescent, 0=active). "
+                        "Quiescence = fraction movement below the quiescence threshold. "
+                        "Time column in minutes."
+                    )
+
+                # === SHEET 7: LIGHTING CONDITIONS ===
                 if hasattr(self, "fraction_data") and self.fraction_data:
                     # Create lighting conditions data (binned activity for circadian analysis)
                     try:
@@ -7239,7 +7256,7 @@ class HDF5AnalysisWidget(QWidget):
                             f"Warning: Could not create lighting conditions sheet: {e}"
                         )
 
-                # === SHEET 7: REAL AMPLITUDE (MATLAB-EQUIVALENT) ===
+                # === SHEET 8: REAL AMPLITUDE (MATLAB-EQUIVALENT) ===
                 if hasattr(self, "merged_results_raw") and self.merged_results_raw:
                     _norm_factor = getattr(self, "frame_norm_factor", 1.0)
                     _pixel_counts = getattr(self, "roi_pixel_counts", {})
@@ -7261,7 +7278,7 @@ class HDF5AnalysisWidget(QWidget):
                         "(equivalent to MATLAB diffs.sum()). Time column in minutes."
                     )
 
-                # === SHEET 8: PARAMETERS ===
+                # === SHEET 9: PARAMETERS ===
                 # Determine source type (HDF5 or AVI)
                 is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
                 source_label = "AVI Batch" if is_avi else "HDF5"
