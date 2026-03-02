@@ -8147,9 +8147,16 @@ class HDF5AnalysisWidget(QWidget):
                     f"Saving enhanced Excel with metadata: {os.path.basename(excel_path)}"
                 )
 
-                self._save_results_excel_with_metadata(
-                    excel_path, metadata_dict, has_analysis_results
-                )
+                if has_analysis_results:
+                    # Step 1: Write all analysis sheets (Movement, Sleep, etc.)
+                    self._save_results_excel_to_path(excel_path)
+                    # Step 2: Append HDF5 sensor timeseries sheets to same file
+                    self._append_hdf5_sheets_to_excel(excel_path, metadata_dict)
+                else:
+                    # No analysis data — write HDF5 metadata only
+                    self._save_results_excel_with_metadata(
+                        excel_path, metadata_dict, False
+                    )
                 saved_files.append(("Enhanced Excel with Metadata", excel_path))
                 self._log_message("Enhanced Excel with metadata saved successfully")
 
@@ -8606,6 +8613,100 @@ class HDF5AnalysisWidget(QWidget):
             "Files include comprehensive HDF5 metadata in time-series format matching analysis data structure."
         )
         msg.exec_()
+
+    def _append_hdf5_sheets_to_excel(self, excel_path: str, metadata_dict: dict):
+        """
+        Append HDF5 sensor timeseries sheets (temperature, humidity, LED, frame drift, etc.)
+        to an existing Excel file without overwriting the analysis sheets already in it.
+        """
+        import pandas as pd
+
+        is_legacy_enhanced = metadata_dict.get("main_file", {}).get(
+            "legacy_enhanced", False
+        )
+        appended_sheets = []
+
+        try:
+            with pd.ExcelWriter(
+                excel_path, engine="openpyxl", mode="a", if_sheet_exists="new"
+            ) as writer:
+                for source_name, metadata in metadata_dict.items():
+                    if source_name in [
+                        "analysis_info",
+                        "file_info_only",
+                        "nematostella_analysis",
+                    ]:
+                        continue
+
+                    # HDF5 timeseries sheets
+                    if "timeseries_data" in metadata and metadata["timeseries_data"]:
+                        ts_data = metadata["timeseries_data"]
+                        unit_info = ts_data.get("_unit_info", {})
+                        hdf5_metadata_only = self._filter_hdf5_metadata_only(ts_data)
+
+                        if hdf5_metadata_only:
+                            frame_interval = self.frame_interval.value()
+
+                            if is_legacy_enhanced and unit_info:
+                                created = self._create_unit_enhanced_timeseries_sheets(
+                                    writer,
+                                    hdf5_metadata_only,
+                                    unit_info,
+                                    frame_interval,
+                                    source_name,
+                                )
+                            else:
+                                try:
+                                    from ._metadata import (
+                                        create_individual_timeseries_sheets,
+                                    )
+
+                                    created = create_individual_timeseries_sheets(
+                                        writer, hdf5_metadata_only, frame_interval
+                                    )
+                                except Exception:
+                                    created = self._create_timeseries_sheets_manually(
+                                        writer, hdf5_metadata_only, source_name
+                                    )
+
+                            appended_sheets.extend(created)
+                            for s in created:
+                                self._log_message(f"   ✓ HDF5 sheet appended: '{s}'")
+
+                    # Static HDF5 metadata sheet
+                    static_metadata = {
+                        k: v for k, v in metadata.items() if k != "timeseries_data"
+                    }
+                    if static_metadata:
+                        try:
+                            try:
+                                from ._metadata import create_metadata_dataframe
+
+                                meta_df = create_metadata_dataframe(
+                                    static_metadata, source_name
+                                )
+                            except ImportError:
+                                meta_df = self._create_metadata_dataframe_manually(
+                                    static_metadata, source_name
+                                )
+
+                            sheet_name = f"Static_{source_name}"[:31]
+                            meta_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                            appended_sheets.append(sheet_name)
+                            self._log_message(
+                                f"   ✓ Static metadata sheet appended: '{sheet_name}'"
+                            )
+                        except Exception as e:
+                            self._log_message(
+                                f"   Warning: Could not create static sheet: {e}"
+                            )
+
+            self._log_message(
+                f"HDF5 sensor sheets appended ({len(appended_sheets)} sheets): "
+                + ", ".join(appended_sheets)
+            )
+        except Exception as e:
+            self._log_message(f"Warning: Could not append HDF5 sheets: {e}")
 
     def _save_results_excel_with_metadata(
         self, excel_path: str, metadata_dict: dict, has_analysis_results: bool = True
