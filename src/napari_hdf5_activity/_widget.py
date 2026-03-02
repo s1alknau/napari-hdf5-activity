@@ -99,7 +99,13 @@ except ImportError as e:
 
 
 def _fmt_p(p: float) -> str:
-    """Format a p-value: scientific notation for p < 0.001, otherwise 4 decimal places."""
+    """Format a p-value for display.
+
+    Handles float underflow (p == 0.0) which occurs when N is very large and the
+    test statistic exceeds the range of float64 survival functions.
+    """
+    if p == 0.0:
+        return "< 1e-300"
     if p < 0.001:
         return f"{p:.2e}"
     return f"{p:.4f}"
