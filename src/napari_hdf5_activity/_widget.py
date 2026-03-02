@@ -11986,7 +11986,7 @@ class HDF5AnalysisWidget(QWidget):
                 for idx in range(n_rois, n_rows_per_section * n_cols):
                     row = start_row + (idx // n_cols)
                     col = idx % n_cols
-                    if row < total_rows:
+                    if row < n_rows_per_section:
                         axes[row, col].axis("off")
 
             # Plot Activity section
@@ -12294,7 +12294,7 @@ class HDF5AnalysisWidget(QWidget):
                 for idx in range(n_rois, n_rows_per_section * n_cols):
                     row = start_row + (idx // n_cols)
                     col = idx % n_cols
-                    if row < total_rows:
+                    if row < n_rows_per_section:
                         axes[row, col].axis("off")
 
             # Plot Activity section — use a short label derived from data_type_name
@@ -14060,7 +14060,7 @@ class HDF5AnalysisWidget(QWidget):
                 for idx in range(n_rois, n_rows_per_section * n_cols):
                     row = start_row + (idx // n_cols)
                     col = idx % n_cols
-                    if row < total_rows:
+                    if row < n_rows_per_section:
                         axes[row, col].axis("off")
 
             # Plot Activity section
