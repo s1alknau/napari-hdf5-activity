@@ -86,7 +86,7 @@
 #             detrended_results[roi] = list(zip(times, values_final))
 
 #         except Exception as e:
-#             print(f"Detrending failed for ROI {roi}: {e}")
+#             logger.warning(f"Detrending failed for ROI {roi}: {e}")
 #             detrended_results[roi] = data
 
 #     return detrended_results
@@ -697,9 +697,12 @@ Other methods are in separate modules:
 - _calc_integration.py: Method routing and integration
 """
 
+import logging
 import time
 import numpy as np
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -817,7 +820,7 @@ def improved_full_dataset_detrending(
             if enable_jump_correction:
                 values, jump_indices = detect_and_remove_jumps(times, values)
                 if len(jump_indices) > 0:
-                    print(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
+                    logger.debug(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
 
             # Step 2: Remove polynomial trend (handles curved drift)
             if len(values) >= 10:
@@ -846,7 +849,7 @@ def improved_full_dataset_detrending(
             detrended_results[roi] = list(zip(times, values_final))
 
         except Exception as e:
-            print(f"Detrending failed for ROI {roi}: {e}")
+            logger.warning(f"Detrending failed for ROI {roi}: {e}")
             detrended_results[roi] = data
 
     return detrended_results
@@ -872,24 +875,42 @@ def compute_threshold_baseline_hysteresis(
     # Sort data by time
     sorted_data = sorted(data, key=lambda x: x[0])
 
-    # Calculate baseline time range
-    baseline_duration_seconds = baseline_duration_minutes * 60
+    # Calculate baseline time range — cap to actual recording duration
+    recording_duration_seconds = sorted_data[-1][0] - sorted_data[0][0]
+    baseline_duration_seconds = min(
+        baseline_duration_minutes * 60, recording_duration_seconds
+    )
     start_time = sorted_data[0][0]
     end_time = start_time + baseline_duration_seconds
 
     # Select baseline data
     baseline_data = [(t, v) for t, v in sorted_data if start_time <= t < end_time]
 
-    # Check minimum data requirement
-    min_required_frames = max(10, int(baseline_duration_seconds / frame_interval * 0.8))
+    # Check minimum data requirement.
+    # Use the ACTUAL time step between consecutive data points, not frame_interval.
+    # frame_interval is the raw camera interval (e.g. 5 s), but data may already
+    # be binned (e.g. 5-min bins = 300 s).  Using frame_interval would demand
+    # 25 920 frames for a 72 h baseline when only 864 are available.
+    if len(sorted_data) >= 2:
+        actual_dt = (sorted_data[-1][0] - sorted_data[0][0]) / (len(sorted_data) - 1)
+    else:
+        actual_dt = frame_interval
+    actual_dt = max(actual_dt, frame_interval)  # never smaller than raw frame interval
+
+    min_required_frames = max(2, int(baseline_duration_seconds / actual_dt * 0.5))
     if len(baseline_data) < min_required_frames:
+        # Fallback: use full-signal percentiles so thresholds are never (0, 0, 0)
+        full_vals = np.array([v for _, v in sorted_data])
+        fb_mean   = float(np.median(full_vals))
+        fb_upper  = float(np.percentile(full_vals, 75))
+        fb_lower  = float(np.percentile(full_vals, 25))
         return (
-            0.0,
-            0.0,
-            0.0,
+            fb_mean,
+            fb_upper,
+            fb_lower,
             {
                 "method": "baseline_hysteresis",
-                "status": "insufficient_data",
+                "status": "insufficient_data_fallback_percentiles",
                 "found_frames": len(baseline_data),
                 "required_frames": min_required_frames,
             },
@@ -897,20 +918,38 @@ def compute_threshold_baseline_hysteresis(
 
     # Calculate statistics
     values = np.array([val for _, val in baseline_data])
+    full_values = np.array([v for _, v in sorted_data])
 
     mean_val = np.mean(values)
     std_val = np.std(values)
+    full_std = float(np.std(full_values))
+
+    # Fallback: if the baseline std is too small (< 5 % of full-signal std, or
+    # exactly 0 — which happens when detrending flattens the baseline period),
+    # use the full-signal std so the threshold band is never zero.
+    std_source = "baseline"
+    if full_std > 0 and std_val < 0.05 * full_std:
+        std_val = full_std
+        std_source = "full_signal_fallback"
+        logger.debug(
+            f"Baseline std too small ({std_val:.2e} < 5% of full std {full_std:.2e}); "
+            "using full-signal std as fallback."
+        )
 
     # Calculate hysteresis thresholds
     baseline_mean = mean_val
     threshold_band = multiplier * std_val
     upper_threshold = baseline_mean + threshold_band
-    lower_threshold = baseline_mean - threshold_band  # ← ENTFERNE max(0, ...)
+    # Clamp lower threshold to the minimum actually observed during the baseline
+    # period — the signal never reaches 0 (absolute frame differences always have
+    # a camera-noise floor), so 0 is not a meaningful lower bound.
+    min_baseline = float(np.min(values))
+    lower_threshold = max(min_baseline, baseline_mean - threshold_band)
 
     # Validate thresholds
     if np.isnan(upper_threshold) or np.isinf(upper_threshold):
-        upper_threshold = np.percentile(values, 75)
-        lower_threshold = np.percentile(values, 25)
+        upper_threshold = np.percentile(full_values, 75)
+        lower_threshold = np.percentile(full_values, 25)
         baseline_mean = np.median(values)
 
     statistics = {
@@ -921,15 +960,139 @@ def compute_threshold_baseline_hysteresis(
         "threshold_band": threshold_band,
         "mean": mean_val,
         "std": std_val,
+        "std_source": std_source,
         "multiplier": multiplier,
         "baseline_frames": len(baseline_data),
         "baseline_duration_minutes": baseline_duration_minutes,
         "frame_interval": frame_interval,
-        "data_range": (np.min(values), np.max(values)),
+        "data_range": (float(np.min(full_values)), float(np.max(full_values))),
+        "min_baseline": min_baseline,
         "status": "calculated_from_preprocessed_data",
     }
 
     return baseline_mean, upper_threshold, lower_threshold, statistics
+
+
+# =============================================================================
+# ROI ACTIVITY CHECK (EMPTY WELL DETECTION)
+# =============================================================================
+
+
+def check_roi_activity(
+    merged_results: Dict[int, List[Tuple[float, float]]],
+    relative_threshold: float = 0.3,
+) -> Dict[int, bool]:
+    """Check which ROIs have sufficient signal amplitude to be considered active.
+
+    Empty wells produce sensor noise that looks similar in range to active wells
+    when using per-pixel normalization.  This function uses the **standard deviation**
+    of each ROI's time-series as the activity metric and compares it against the
+    median std across all ROIs.  Active wells have higher variability (movement
+    periods vs. rest) while empty wells have uniform low-level noise.
+
+    If there are fewer than 2 ROIs, all are treated as active (no comparison possible).
+
+    Args:
+        merged_results: Raw (un-normalized) frame difference data per ROI.
+        relative_threshold: Fraction of the median std below which a ROI is
+            considered inactive.  Default 0.3 (30 % of median).
+
+    Returns:
+        Dictionary mapping ROI ID to boolean (True = active, False = inactive/empty).
+    """
+    import numpy as np
+
+    # First pass: compute std per ROI
+    roi_stds: Dict[int, float] = {}
+    for roi, data in merged_results.items():
+        if not data or len(data) < 10:
+            roi_stds[roi] = 0.0
+            continue
+        values = np.array([v for _, v in data])
+        roi_stds[roi] = float(np.std(values))
+
+    # Need at least 2 ROIs to do a meaningful comparison
+    non_zero_stds = [s for s in roi_stds.values() if s > 0]
+    if len(non_zero_stds) < 2:
+        return {roi: True for roi in merged_results}
+
+    median_std = float(sorted(non_zero_stds)[len(non_zero_stds) // 2])
+    activity_threshold = relative_threshold * median_std
+
+    roi_active = {}
+    for roi, std_val in roi_stds.items():
+        roi_active[roi] = std_val >= activity_threshold
+
+    logger.debug(f"Activity check (std-based): median std = {median_std:.6e}, "
+                 f"threshold = {activity_threshold:.6e}")
+    for roi in sorted(roi_stds.keys()):
+        status = "ACTIVE" if roi_active[roi] else "INACTIVE"
+        logger.debug(f"  ROI {roi}: std = {roi_stds[roi]:.6e} -> {status}")
+
+    return roi_active
+
+
+def apply_minmax_normalization(
+    data_dict: Dict[int, List[Tuple[float, float]]],
+    baseline_means: Dict[int, float],
+    upper_thresholds: Dict[int, float],
+    lower_thresholds: Dict[int, float],
+    roi_active: Optional[Dict[int, bool]] = None,
+) -> Tuple[
+    Dict[int, List[Tuple[float, float]]],
+    Dict[int, float],
+    Dict[int, float],
+    Dict[int, float],
+]:
+    """Apply MinMax normalization to processed data AND consistently transform
+    baseline means and thresholds using the same per-ROI scaling factors.
+
+    For inactive ROIs, data is set to all zeros.
+
+    Args:
+        data_dict: Time-series data per ROI.
+        baseline_means: Per-ROI baseline means.
+        upper_thresholds: Per-ROI upper hysteresis thresholds.
+        lower_thresholds: Per-ROI lower hysteresis thresholds.
+        roi_active: Optional activity flags. If None, all ROIs treated as active.
+
+    Returns:
+        Tuple of (normalized_data, normalized_baselines, normalized_upper, normalized_lower).
+    """
+    norm_data = {}
+    norm_baselines = {}
+    norm_upper = {}
+    norm_lower = {}
+
+    for roi, data in data_dict.items():
+        is_active = roi_active.get(roi, True) if roi_active else True
+
+        if not data or not is_active:
+            norm_data[roi] = [(t, 0.0) for t, _ in data] if data else []
+            norm_baselines[roi] = 0.0
+            norm_upper[roi] = 0.0
+            norm_lower[roi] = 0.0
+            continue
+
+        values = [v for _, v in data]
+        min_val = min(values)
+        max_val = max(values)
+        val_range = max_val - min_val
+
+        logger.debug(f"MinMax ROI {roi}: min={min_val:.6e}, max={max_val:.6e}, range={val_range:.6e}, active={is_active}")
+
+        if val_range > 0:
+            norm_data[roi] = [(t, (v - min_val) / val_range) for t, v in data]
+            norm_baselines[roi] = (baseline_means.get(roi, 0.0) - min_val) / val_range
+            norm_upper[roi] = (upper_thresholds.get(roi, 0.0) - min_val) / val_range
+            norm_lower[roi] = (lower_thresholds.get(roi, 0.0) - min_val) / val_range
+        else:
+            norm_data[roi] = [(t, 0.0) for t, _ in data]
+            norm_baselines[roi] = 0.0
+            norm_upper[roi] = 0.0
+            norm_lower[roi] = 0.0
+
+    return norm_data, norm_baselines, norm_upper, norm_lower
 
 
 # =============================================================================
@@ -999,8 +1162,11 @@ def bin_fraction_movement(
     bin_size_seconds: int,
     frame_interval: float,
 ) -> Dict[int, List[Tuple[float, float]]]:
-    """Calculate fraction movement using hysteresis state data."""
+    """Calculate fraction movement using hysteresis state data.
 
+    Uses a two-pointer sweep (O(n+m)) instead of a nested loop (O(n*m))
+    for efficient binning over large datasets.
+    """
     fraction_data = {}
 
     for roi, data in movement_data.items():
@@ -1014,51 +1180,48 @@ def bin_fraction_movement(
             fraction_data[roi] = []
             continue
 
-        start_time = sorted_data[0][0]
-        end_time = sorted_data[-1][0]
+        # Convert to numpy arrays for fast indexing
+        times  = np.array([t for t, _ in sorted_data], dtype=np.float64)
+        states = np.array([s for _, s in sorted_data], dtype=np.int8)
+        end_time = times[-1]
 
-        # Create time bins
-        first_bin_start = (start_time // bin_size_seconds) * bin_size_seconds
-        bin_edges = []
-        current_bin_start = first_bin_start
-        while current_bin_start < end_time:
-            bin_edges.append(current_bin_start)
-            current_bin_start += bin_size_seconds
-        bin_edges.append(current_bin_start)
+        # Build bin edges
+        first_bin_start = (times[0] // bin_size_seconds) * bin_size_seconds
+        bin_starts = np.arange(
+            first_bin_start,
+            end_time + bin_size_seconds,
+            bin_size_seconds,
+            dtype=np.float64,
+        )
 
         roi_fractions = []
+        ptr = 0  # two-pointer: advance through data once across all bins
 
-        for i in range(len(bin_edges) - 1):
-            bin_start = bin_edges[i]
-            bin_end = bin_edges[i + 1]
-            bin_center = (bin_start + bin_end) / 2
-            bin_duration = bin_end - bin_start
+        for bin_start in bin_starts[:-1]:
+            bin_end = bin_start + bin_size_seconds
+            bin_center = (bin_start + bin_end) / 2.0
 
-            # Calculate time spent in movement state
+            # Advance pointer past entries that end before this bin
+            while ptr + 1 < len(times) and times[ptr + 1] <= bin_start:
+                ptr += 1
+
+            # Accumulate movement time within [bin_start, bin_end)
             movement_time = 0.0
+            j = ptr
+            while j < len(times):
+                t_curr = times[j]
+                if t_curr >= bin_end:
+                    break
+                t_next = times[j + 1] if j + 1 < len(times) else end_time
+                if states[j] == 1:
+                    overlap_start = max(t_curr, bin_start)
+                    overlap_end   = min(t_next, bin_end)
+                    if overlap_end > overlap_start:
+                        movement_time += overlap_end - overlap_start
+                j += 1
 
-            for j in range(len(sorted_data)):
-                current_time = sorted_data[j][0]
-                current_state = sorted_data[j][1]
-
-                # Determine when this state ends
-                next_time = (
-                    sorted_data[j + 1][0] if j + 1 < len(sorted_data) else end_time
-                )
-
-                # Check overlap with current bin
-                state_start = max(current_time, bin_start)
-                state_end = min(next_time, bin_end)
-
-                if state_start < state_end and current_state == 1:
-                    movement_time += state_end - state_start
-
-            fraction_movement = (
-                movement_time / bin_duration if bin_duration > 0 else 0.0
-            )
-            fraction_movement = max(0.0, min(1.0, fraction_movement))
-
-            roi_fractions.append((bin_center, fraction_movement))
+            fraction = movement_time / bin_size_seconds
+            roi_fractions.append((bin_center, max(0.0, min(1.0, fraction))))
 
         fraction_data[roi] = roi_fractions
 
@@ -1084,6 +1247,80 @@ def bin_quiescence(
         quiescence_data[roi] = quiescent_roi_data
 
     return quiescence_data
+
+
+def bin_and_normalize_movement(
+    merged_results: Dict[int, List[Tuple[float, float]]],
+    bin_size_seconds: int,
+) -> Dict[int, List[Tuple[float, float]]]:
+    """Bin raw pixel changes and min/max normalize per ROI.
+
+    Creates a continuous 0-1 normalized movement signal comparable to
+    Aguillon et al. (2023) "Normalized Movement (a.u.)" where total distance
+    is summed per hourly bin and min/max normalized per animal.
+
+    Args:
+        merged_results: Raw frame-differencing data {roi: [(time, pixel_change), ...]}
+        bin_size_seconds: Bin size in seconds (e.g. 3600 for hourly bins)
+
+    Returns:
+        Dict mapping ROI ID to list of (bin_center_time, normalized_value) tuples
+        where normalized_value is 0-1 (min/max per ROI).
+    """
+    normalized_data = {}
+
+    for roi, data in merged_results.items():
+        if not data:
+            normalized_data[roi] = []
+            continue
+
+        sorted_data = sorted(data, key=lambda x: x[0])
+
+        if len(sorted_data) < 2:
+            normalized_data[roi] = []
+            continue
+
+        start_time = sorted_data[0][0]
+        end_time = sorted_data[-1][0]
+
+        # Create time bins
+        first_bin_start = (start_time // bin_size_seconds) * bin_size_seconds
+        bin_edges = []
+        current_bin_start = first_bin_start
+        while current_bin_start < end_time:
+            bin_edges.append(current_bin_start)
+            current_bin_start += bin_size_seconds
+        bin_edges.append(current_bin_start)
+
+        # Sum pixel changes per bin (like Aguillon sums distance per hour)
+        roi_binned = []
+        for i in range(len(bin_edges) - 1):
+            bin_start = bin_edges[i]
+            bin_end = bin_edges[i + 1]
+            bin_center = (bin_start + bin_end) / 2
+
+            bin_sum = sum(
+                v for t, v in sorted_data if bin_start <= t < bin_end
+            )
+            roi_binned.append((bin_center, bin_sum))
+
+        # Min/Max normalize per ROI
+        if roi_binned:
+            values = [v for _, v in roi_binned]
+            min_val = min(values)
+            max_val = max(values)
+            val_range = max_val - min_val
+
+            if val_range > 0:
+                normalized_data[roi] = [
+                    (t, (v - min_val) / val_range) for t, v in roi_binned
+                ]
+            else:
+                normalized_data[roi] = [(t, 0.0) for t, _ in roi_binned]
+        else:
+            normalized_data[roi] = []
+
+    return normalized_data
 
 
 def rebin_fraction_movement(
@@ -1167,7 +1404,7 @@ def define_sleep_periods(
     """Define sleep as sustained quiescence periods."""
 
     sleep_data = {}
-    min_bins_for_sleep = (sleep_threshold_minutes * 60) // bin_size_seconds
+    min_bins_for_sleep = max(1, (sleep_threshold_minutes * 60) // bin_size_seconds)
 
     for roi, data in quiescence_data.items():
         if not data:
@@ -1199,6 +1436,107 @@ def define_sleep_periods(
         sleep_data[roi] = list(zip(times, sleep_state))
 
     return sleep_data
+
+
+def calculate_sleep_quality_hourly(
+    sleep_data: Dict[int, List[Tuple[float, int]]],
+    bin_size_minutes: int = 60,
+    data_bin_seconds: int = 60,
+) -> Dict[str, Dict[int, List[Tuple[float, float]]]]:
+    """
+    Calculate hourly sleep quality metrics (MATLAB-compatible).
+
+    Computes per ROI and per hourly bin:
+    - sleep_minutes: Total minutes of sleep per hour
+    - transitions: Number of sleep<->wake transitions per hour
+    - bout_length: Mean sleep bout length (minutes) per hour
+
+    Args:
+        sleep_data: Binary sleep data {roi: [(time_s, 0/1), ...]}
+        bin_size_minutes: Hourly bin size (default 60 min)
+        data_bin_seconds: Resolution of input data bins (default 60s)
+
+    Returns:
+        Dict with keys 'sleep_minutes', 'transitions', 'bout_length',
+        each mapping to {roi: [(bin_center_s, value), ...]}
+    """
+    bin_size_seconds = bin_size_minutes * 60
+    minutes_per_data_bin = data_bin_seconds / 60.0
+
+    result = {
+        "sleep_minutes": {},
+        "transitions": {},
+        "bout_length": {},
+    }
+
+    for roi, data in sleep_data.items():
+        if not data:
+            for key in result:
+                result[key][roi] = []
+            continue
+
+        sorted_data = sorted(data, key=lambda x: x[0])
+        times = np.array([t for t, _ in sorted_data])
+        states = np.array([s for _, s in sorted_data])
+
+        start_time = times[0]
+        end_time = times[-1]
+        # Align to hour boundaries
+        hour_start = (start_time // bin_size_seconds) * bin_size_seconds
+
+        sleep_min_roi = []
+        transitions_roi = []
+        bout_length_roi = []
+
+        current_bin_start = hour_start
+        while current_bin_start < end_time:
+            bin_end = current_bin_start + bin_size_seconds
+            bin_center = current_bin_start + bin_size_seconds / 2
+
+            # Get data points in this bin
+            mask = (times >= current_bin_start) & (times < bin_end)
+            bin_states = states[mask]
+
+            if len(bin_states) == 0:
+                current_bin_start = bin_end
+                continue
+
+            # 1. Sleep minutes: count sleep bins × minutes per bin
+            sleep_bins_count = int(np.sum(bin_states))
+            sleep_min = sleep_bins_count * minutes_per_data_bin
+            sleep_min_roi.append((bin_center, float(sleep_min)))
+
+            # 2. Transitions: count state changes (|diff|)
+            if len(bin_states) > 1:
+                trans_count = int(np.sum(np.abs(np.diff(bin_states))))
+            else:
+                trans_count = 0
+            transitions_roi.append((bin_center, float(trans_count)))
+
+            # 3. Mean bout length: find consecutive sleep runs
+            bout_lengths = []
+            i = 0
+            while i < len(bin_states):
+                if bin_states[i] == 1:
+                    j = i
+                    while j < len(bin_states) and bin_states[j] == 1:
+                        j += 1
+                    bout_len_min = (j - i) * minutes_per_data_bin
+                    bout_lengths.append(bout_len_min)
+                    i = j
+                else:
+                    i += 1
+
+            mean_bout = float(np.mean(bout_lengths)) if bout_lengths else 0.0
+            bout_length_roi.append((bin_center, mean_bout))
+
+            current_bin_start = bin_end
+
+        result["sleep_minutes"][roi] = sleep_min_roi
+        result["transitions"][roi] = transitions_roi
+        result["bout_length"][roi] = bout_length_roi
+
+    return result
 
 
 def bin_activity_data_for_lighting(
@@ -1251,14 +1589,14 @@ def bin_activity_data_for_lighting(
 
 
 def _process_single_roi_movement(
-    args: Tuple[int, List[Tuple[float, float]], float, float, float, float, float],
+    args: Tuple,
 ) -> Tuple[int, Dict[str, Any]]:
     """
     Worker function for parallel ROI movement detection with pre-calculated baseline.
 
     Args:
         args: Tuple of (roi_id, data, baseline_mean, upper_threshold,
-                       lower_threshold, bin_size_seconds, frame_interval)
+                       lower_threshold, bin_size_seconds, frame_interval, is_active)
 
     Returns:
         Tuple of (roi_id, results_dict)
@@ -1271,6 +1609,7 @@ def _process_single_roi_movement(
         lower_threshold,
         bin_size_seconds,
         frame_interval,
+        is_active,
     ) = args
 
     results = {}
@@ -1278,6 +1617,18 @@ def _process_single_roi_movement(
     if not data:
         results["movement_data"] = []
         results["fraction_data"] = []
+        return roi_id, results
+
+    # Inactive ROI (empty well): force all movement to 0
+    if not is_active:
+        sorted_data = sorted(data, key=lambda x: x[0])
+        zero_movement = [(t, 0) for t, _ in sorted_data]
+        results["movement_data"] = zero_movement
+        movement_data_dict = {roi_id: zero_movement}
+        fraction_data_dict = bin_fraction_movement(
+            movement_data_dict, bin_size_seconds, frame_interval
+        )
+        results["fraction_data"] = fraction_data_dict.get(roi_id, [])
         return roi_id, results
 
     try:
@@ -1377,14 +1728,32 @@ def run_baseline_analysis(
     else:
         normalized_data = merged_results
 
-    # Step 1a: Calculate baseline thresholds from normalized data (BEFORE detrending)
-    # This ensures baseline reflects the original signal, not the detrended signal
+    # Step 1.1: Amplitude check for inactive ROIs (empty wells)
+    roi_active = check_roi_activity(normalized_data)
+    analysis_results["roi_active"] = roi_active
+    inactive_count = sum(1 for v in roi_active.values() if not v)
+    if inactive_count > 0:
+        logger.info(f"Detected {inactive_count} inactive ROIs (empty wells)")
+
+    # Step 1a: Apply detrending and jump correction (if enabled) FIRST,
+    # so baseline thresholds are computed on the same signal used for movement detection.
+    logger.debug(f"Step 1a: Detrending enabled={enable_detrending}, jump_correction={enable_jump_correction}")
+    if enable_detrending and use_improved_detrending:
+        processed_data = improved_full_dataset_detrending(
+            normalized_data, enable_jump_correction=enable_jump_correction
+        )
+    else:
+        processed_data = normalized_data
+    logger.debug(f"Step 1a complete: {len(processed_data)} ROIs")
+
+    # Step 1b: Calculate baseline thresholds from processed (detrended) data.
+    # Thresholds must be in the same signal space as movement detection.
     baseline_means = {}
     upper_thresholds = {}
     lower_thresholds = {}
     roi_statistics = {}
 
-    for roi, data in normalized_data.items():
+    for roi, data in processed_data.items():
         if not data:
             baseline_means[roi] = 0.0
             upper_thresholds[roi] = 0.0
@@ -1403,19 +1772,10 @@ def run_baseline_analysis(
         lower_thresholds[roi] = lower_thresh
         roi_statistics[roi] = stats
 
-    # Step 1b: Apply detrending and jump correction (if enabled)
-    if enable_detrending and use_improved_detrending:
-        processed_data = improved_full_dataset_detrending(
-            normalized_data, enable_jump_correction=enable_jump_correction
-        )
-    else:
-        processed_data = normalized_data
-
-    analysis_results["processed_data"] = processed_data
-
     # Step 2: ROI-level processing (parallel or sequential)
     # Movement detection uses processed_data but pre-calculated baselines
     bin_size_seconds = kwargs.get("bin_size_seconds", 60)
+    logger.debug(f"Step 2: Movement detection (parallel={use_parallel}, processes={num_processes})")
 
     if use_parallel:
         # Parallel processing using multiprocessing.Pool
@@ -1428,12 +1788,15 @@ def run_baseline_analysis(
                 lower_thresholds[roi_id],
                 bin_size_seconds,
                 frame_interval,
+                roi_active.get(roi_id, True),
             )
             for roi_id in processed_data.keys()
         ]
 
+        logger.debug(f"Starting Pool with {num_processes} processes...")
         with Pool(processes=num_processes) as pool:
             roi_results = pool.map(_process_single_roi_movement, roi_args)
+        logger.debug(f"Pool complete: {len(roi_results)} results")
 
         # Aggregate results from parallel workers
         movement_data = {}
@@ -1450,16 +1813,33 @@ def run_baseline_analysis(
             processed_data, baseline_means, upper_thresholds, lower_thresholds
         )
 
+        # Force inactive ROIs to zero movement
+        for roi in movement_data:
+            if not roi_active.get(roi, True):
+                movement_data[roi] = [(t, 0) for t, _ in processed_data.get(roi, [])]
+
         # Fraction movement
         fraction_data = bin_fraction_movement(
             movement_data, bin_size_seconds, frame_interval
         )
 
+    # Step 2.5: Apply MinMax normalization AFTER movement detection (for display)
+    logger.debug(f"Applying MinMax normalization to {len(processed_data)} ROIs...")
+    norm_processed, norm_baselines, norm_upper, norm_lower = apply_minmax_normalization(
+        processed_data, baseline_means, upper_thresholds, lower_thresholds, roi_active
+    )
+
     analysis_results.update(
         {
-            "baseline_means": baseline_means,
-            "upper_thresholds": upper_thresholds,
-            "lower_thresholds": lower_thresholds,
+            "processed_data": norm_processed,
+            "baseline_means": norm_baselines,
+            "upper_thresholds": norm_upper,
+            "lower_thresholds": norm_lower,
+            # Keep raw (pre-MinMax) data for amplitude view toggle
+            "processed_data_raw": processed_data,
+            "baseline_means_raw": baseline_means,
+            "upper_thresholds_raw": upper_thresholds,
+            "lower_thresholds_raw": lower_thresholds,
             "roi_statistics": roi_statistics,
             "movement_data": movement_data,
             "fraction_data": fraction_data,
@@ -1484,7 +1864,7 @@ def run_baseline_analysis(
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
     except Exception:
         roi_colors = {
-            roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
+            roi: f"C{(roi - 1) % 10}" for roi in sorted(processed_data.keys())
         }
 
     analysis_results["roi_colors"] = roi_colors
@@ -1492,109 +1872,6 @@ def run_baseline_analysis(
     return analysis_results
 
 
-# =============================================================================
-# PURE ANALYSIS FUNCTIONS (for centralized preprocessing)
-# =============================================================================
-
-
-def run_baseline_analysis_pure(
-    preprocessed_data: Dict[int, List[Tuple[float, float]]], **kwargs
-) -> Dict[str, Any]:
-    """
-    Pure baseline analysis function that works on already-preprocessed data.
-    No internal preprocessing - used by centralized integration pipeline.
-    Now MATLAB-compatible.
-    """
-
-    analysis_results = {
-        "method": "baseline",
-        "parameters": {
-            "baseline_duration_minutes": kwargs.get("baseline_duration_minutes", 200.0),
-            "multiplier": kwargs.get("multiplier", 1.0),
-            "frame_interval": kwargs.get("frame_interval", 5.0),
-            "preprocessing_skipped": True,
-            "matlab_compatible": True,
-        },
-    }
-
-    # Use the preprocessed data directly (no internal preprocessing)
-    processed_data = preprocessed_data
-    analysis_results["processed_data"] = processed_data
-
-    # Step 2: Baseline threshold calculation
-    baseline_means = {}
-    upper_thresholds = {}
-    lower_thresholds = {}
-    roi_statistics = {}
-
-    for roi, data in processed_data.items():
-        if not data:
-            baseline_means[roi] = 0.0
-            upper_thresholds[roi] = 0.0
-            lower_thresholds[roi] = 0.0
-            roi_statistics[roi] = {"method": "baseline", "status": "no_data"}
-            continue
-
-        baseline_mean, upper_thresh, lower_thresh, stats = (
-            compute_threshold_baseline_hysteresis(
-                data,
-                kwargs.get("baseline_duration_minutes", 200.0),
-                kwargs.get("multiplier", 1.0),
-                kwargs.get("frame_interval", 5.0),
-            )
-        )
-
-        baseline_means[roi] = baseline_mean
-        upper_thresholds[roi] = upper_thresh
-        lower_thresholds[roi] = lower_thresh
-        roi_statistics[roi] = stats
-
-    analysis_results.update(
-        {
-            "baseline_means": baseline_means,
-            "upper_thresholds": upper_thresholds,
-            "lower_thresholds": lower_thresholds,
-            "roi_statistics": roi_statistics,
-        }
-    )
-
-    # Step 3: Movement detection
-    movement_data = define_movement_with_hysteresis(
-        processed_data, baseline_means, upper_thresholds, lower_thresholds
-    )
-    analysis_results["movement_data"] = movement_data
-
-    # Step 4: Behavioral analysis
-    bin_size_seconds = kwargs.get("bin_size_seconds", 60)
-    frame_interval = kwargs.get("frame_interval", 5.0)
-    fraction_data = bin_fraction_movement(
-        movement_data, bin_size_seconds, frame_interval
-    )
-    analysis_results["fraction_data"] = fraction_data
-
-    quiescence_threshold = kwargs.get("quiescence_threshold", 0.5)
-    quiescence_data = bin_quiescence(fraction_data, quiescence_threshold)
-    analysis_results["quiescence_data"] = quiescence_data
-
-    sleep_threshold_minutes = kwargs.get("sleep_threshold_minutes", 8)
-    sleep_data = define_sleep_periods(
-        quiescence_data, sleep_threshold_minutes, bin_size_seconds
-    )
-    analysis_results["sleep_data"] = sleep_data
-
-    # Add ROI colors
-    try:
-        from ._reader import get_roi_colors
-
-        roi_colors = get_roi_colors(sorted(processed_data.keys()))
-    except Exception:
-        roi_colors = {
-            roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
-        }
-
-    analysis_results["roi_colors"] = roi_colors
-
-    return analysis_results
 
 
 # =============================================================================

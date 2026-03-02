@@ -86,6 +86,57 @@ def save_comprehensive_results(
                     array = np.array(data, dtype=dtype)
                     roi_group.create_dataset("timeseries", data=array)
 
+            # Save binary movement data per ROI (1=moving, 0=not)
+            if "movement_data_binary" in core_results:
+                mov_bin_group = core_group.create_group("movement_data_binary")
+                for roi_id, data in core_results["movement_data_binary"].items():
+                    roi_group = mov_bin_group.create_group(f"roi_{roi_id}")
+                    dtype = np.dtype([("time", "f8"), ("state", "i4")])
+                    array = np.array([(t, int(v)) for t, v in data], dtype=dtype)
+                    roi_group.create_dataset("timeseries", data=array)
+
+            # Save quiescence data per ROI (1=quiescent, 0=active)
+            if "quiescence_data" in core_results:
+                quiescence_group = core_group.create_group("quiescence_data")
+                for roi_id, data in core_results["quiescence_data"].items():
+                    roi_group = quiescence_group.create_group(f"roi_{roi_id}")
+                    dtype = np.dtype([("time", "f8"), ("state", "i4")])
+                    array = np.array([(t, int(v)) for t, v in data], dtype=dtype)
+                    roi_group.create_dataset("timeseries", data=array)
+
+            # Save sleep data per ROI (1=sleeping, 0=awake)
+            if "sleep_data" in core_results:
+                sleep_grp = core_group.create_group("sleep_data")
+                for roi_id, data in core_results["sleep_data"].items():
+                    roi_group = sleep_grp.create_group(f"roi_{roi_id}")
+                    dtype = np.dtype([("time", "f8"), ("state", "i4")])
+                    array = np.array([(t, int(v)) for t, v in data], dtype=dtype)
+                    roi_group.create_dataset("timeseries", data=array)
+
+            # Save ROI colors ({roi_id: color_string_or_tuple})
+            if "roi_colors" in core_results:
+                colors_group = core_group.create_group("roi_colors")
+                for roi_id, color in core_results["roi_colors"].items():
+                    if isinstance(color, (list, tuple)):
+                        colors_group.attrs[f"roi_{roi_id}"] = json.dumps(list(color))
+                    else:
+                        colors_group.attrs[f"roi_{roi_id}"] = str(color)
+
+            # Save ROI statistics (threshold analysis results)
+            if "roi_statistics" in core_results:
+                roi_stats_group = core_group.create_group("roi_statistics")
+                for roi_id, stats in core_results["roi_statistics"].items():
+                    roi_group = roi_stats_group.create_group(f"roi_{roi_id}")
+                    for key, value in stats.items():
+                        if isinstance(value, (int, float, str, bool,
+                                              np.integer, np.floating)):
+                            roi_group.attrs[key] = value
+                        elif isinstance(value, (tuple, list)):
+                            # e.g. data_range = (min, max)
+                            roi_group.create_dataset(
+                                key, data=np.array(value, dtype="f8")
+                            )
+
             # Save ROI summary statistics
             if "roi_summary" in core_results:
                 summary_group = core_group.create_group("roi_summary")
@@ -493,6 +544,69 @@ def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
                             ]
 
                     results["core_analysis"]["fraction_data"] = fraction_data
+
+                # Load binary movement data
+                if "movement_data_binary" in core_group:
+                    mov_bin = {}
+                    for roi_key in core_group["movement_data_binary"].keys():
+                        roi_id = int(roi_key.split("_")[1])
+                        roi_group = core_group["movement_data_binary"][roi_key]
+                        if "timeseries" in roi_group:
+                            array = roi_group["timeseries"][:]
+                            mov_bin[roi_id] = [(float(t), int(v)) for t, v in array]
+                    results["core_analysis"]["movement_data"] = mov_bin
+
+                # Load quiescence data
+                if "quiescence_data" in core_group:
+                    quiescence_data = {}
+                    for roi_key in core_group["quiescence_data"].keys():
+                        roi_id = int(roi_key.split("_")[1])
+                        roi_group = core_group["quiescence_data"][roi_key]
+                        if "timeseries" in roi_group:
+                            array = roi_group["timeseries"][:]
+                            quiescence_data[roi_id] = [
+                                (float(t), int(v)) for t, v in array
+                            ]
+                    results["core_analysis"]["quiescence_data"] = quiescence_data
+
+                # Load sleep data
+                if "sleep_data" in core_group:
+                    sleep_data = {}
+                    for roi_key in core_group["sleep_data"].keys():
+                        roi_id = int(roi_key.split("_")[1])
+                        roi_group = core_group["sleep_data"][roi_key]
+                        if "timeseries" in roi_group:
+                            array = roi_group["timeseries"][:]
+                            sleep_data[roi_id] = [
+                                (float(t), int(v)) for t, v in array
+                            ]
+                    results["core_analysis"]["sleep_data"] = sleep_data
+
+                # Load ROI colors
+                if "roi_colors" in core_group:
+                    roi_colors = {}
+                    for key, value in core_group["roi_colors"].attrs.items():
+                        roi_id = int(key.split("_")[1])
+                        try:
+                            roi_colors[roi_id] = json.loads(value)
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            roi_colors[roi_id] = value
+                    results["core_analysis"]["roi_colors"] = roi_colors
+
+                # Load ROI statistics
+                if "roi_statistics" in core_group:
+                    roi_statistics = {}
+                    for roi_key in core_group["roi_statistics"].keys():
+                        roi_id = int(roi_key.split("_")[1])
+                        roi_group = core_group["roi_statistics"][roi_key]
+                        stats = dict(roi_group.attrs)
+                        # Load tuple/array datasets (e.g. data_range)
+                        for ds_key in roi_group.keys():
+                            stats[ds_key] = tuple(
+                                roi_group[ds_key][:].tolist()
+                            )
+                        roi_statistics[roi_id] = stats
+                    results["core_analysis"]["roi_statistics"] = roi_statistics
 
                 # Load ROI summary
                 if "roi_summary" in core_group:

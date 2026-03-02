@@ -423,6 +423,15 @@ def process_avi_batch_streaming(
     for roi_idx in roi_changes:
         roi_changes[roi_idx].sort(key=lambda x: x[0])
 
+    # Log raw value ranges (MinMax normalization is applied post-movement-detection in _calc.py)
+    for roi_idx, data in roi_changes.items():
+        if not data:
+            continue
+        values = [v for _, v in data]
+        min_val = min(values)
+        max_val = max(values)
+        print(f"  ROI {roi_idx}: raw value range [{min_val:.6f}, {max_val:.6f}]")
+
     # Complete metadata
     combined_metadata["total_duration"] = current_time_offset
     combined_metadata["total_frames"] = total_frames_processed

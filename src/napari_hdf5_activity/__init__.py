@@ -99,7 +99,16 @@ except ImportError as e:
     print(f"Warning: Metadata functions not available: {e}")
 
 # === MODULE 5: MAIN WIDGET ===
-from ._widget import HDF5AnalysisWidget
+# Lazy import: _widget.py imports napari at module level, which triggers
+# napari → numba → llvmlite imports. Worker processes spawned by
+# ProcessPoolExecutor must NOT load this chain — they only need _reader.py.
+# napari discovers the widget via napari.yaml (python_name: ...._widget:HDF5AnalysisWidget)
+# so this top-level import is not required for the plugin to work.
+def __getattr__(name):
+    if name == "HDF5AnalysisWidget":
+        from ._widget import HDF5AnalysisWidget
+        return HDF5AnalysisWidget
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # === BACKWARDS COMPATIBILITY ===
 # Legacy aliases for backwards compatibility

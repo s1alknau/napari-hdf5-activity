@@ -7,7 +7,11 @@ cosine curve to time series data and extracts key rhythmic parameters:
 
 - MESOR (Midline Estimating Statistic of Rhythm): Mean activity level
 - Amplitude: Half the difference between peak and trough
-- Acrophase: Time of peak activity (phase)
+- Phase angle (φ): Phase offset of the fitted cosine (radians).
+  NOTE: this is NOT the biological acrophase, which requires knowledge of
+  the ZT reference and a confirmed circadian/ultradian signal. The "peak_time"
+  output (hours from recording start to the first fitted peak) is also only
+  a proxy for the biological acrophase.
 - Period: Duration of one complete cycle
 
 Reference:
@@ -30,11 +34,11 @@ def single_cosinor_analysis(
     """
     Perform single-component cosinor analysis on time series data.
 
-    Fits a cosine function: y(t) = MESOR + Amplitude * cos(2π*t/τ + Acrophase)
-    where τ is the period being tested.
+    Fits a cosine function: y(t) = MESOR + Amplitude * cos(2π*t/τ + φ)
+    where τ is the period being tested and φ is the phase angle.
 
     Args:
-        time_series: 1D array of activity values (e.g., fraction movement)
+        time_series: 1D array of activity values
         timestamps: Optional array of timestamps in seconds. If None, uses
                    regular intervals based on sampling_interval
         period_hours: Period to test (default: 24h for circadian rhythm)
@@ -45,8 +49,10 @@ def single_cosinor_analysis(
         Dictionary containing:
         - mesor: Midline Estimating Statistic of Rhythm (mean level)
         - amplitude: Amplitude of the rhythm
-        - acrophase: Phase angle at peak (hours from start)
-        - acrophase_time: Clock time of peak activity
+        - phase_angle_rad: Phase offset φ of the fitted cosine (radians, range −π to π)
+        - peak_time: Time from recording start to first fitted cosine peak within
+                     one period (hours). Only interpretable as biological acrophase
+                     if ZT0 is known and the signal is a confirmed rhythm.
         - period: Tested period (hours)
         - p_value: Statistical significance of rhythm
         - r_squared: Goodness of fit
@@ -54,15 +60,15 @@ def single_cosinor_analysis(
         - fitted_curve: Fitted cosine curve values
         - ci_mesor: 95% confidence interval for MESOR
         - ci_amplitude: 95% confidence interval for amplitude
-        - ci_acrophase: 95% confidence interval for acrophase
+        - ci_peak_time: 95% confidence interval for peak_time (hours)
     """
     # Input validation
     if len(time_series) < 10:
         return {
             "mesor": np.nan,
             "amplitude": np.nan,
-            "acrophase": np.nan,
-            "acrophase_time": np.nan,
+            "phase_angle_rad": np.nan,
+            "peak_time": np.nan,
             "period": period_hours,
             "p_value": 1.0,
             "r_squared": 0.0,
@@ -84,8 +90,8 @@ def single_cosinor_analysis(
         return {
             "mesor": np.nan,
             "amplitude": np.nan,
-            "acrophase": np.nan,
-            "acrophase_time": np.nan,
+            "phase_angle_rad": np.nan,
+            "peak_time": np.nan,
             "period": period_hours,
             "p_value": 1.0,
             "r_squared": 0.0,
@@ -115,20 +121,23 @@ def single_cosinor_analysis(
 
     # Perform least squares regression
     try:
-        # Use numpy's least squares
         beta, residuals, rank, s = np.linalg.lstsq(X, data_clean, rcond=None)
 
         # Extract parameters
-        mesor = beta[0]  # β0
+        mesor = beta[0]   # β0
         beta_cos = beta[1]  # β1
         beta_sin = beta[2]  # β2
 
-        # Calculate amplitude and acrophase
+        # Calculate amplitude and phase angle φ
+        # Model: y = MESOR + β1·cos(ωt) + β2·sin(ωt)
+        #           = MESOR + A·cos(ωt + φ)
+        # where β1 = A·cos(φ), β2 = −A·sin(φ)  → φ = arctan2(−β2, β1)
         amplitude = np.sqrt(beta_cos**2 + beta_sin**2)
-        acrophase_rad = np.arctan2(-beta_sin, beta_cos)  # Phase in radians
+        phase_angle_rad = np.arctan2(-beta_sin, beta_cos)  # φ in radians, range (−π, π]
 
-        # Convert acrophase to hours (0-24 range)
-        acrophase_hours = (acrophase_rad / omega) % period_hours
+        # Time of fitted cosine peak within one period
+        # Peak of cos(ωt + φ) occurs at ωt + φ = 0  →  t_peak = −φ/ω
+        peak_time = (-phase_angle_rad / omega) % period_hours
 
         # Generate fitted curve for full time range
         fitted_curve = (
@@ -170,10 +179,8 @@ def single_cosinor_analysis(
         significant = p_value < alpha
 
         # Calculate confidence intervals (approximate)
-        # Standard error estimation
         if df_residual > 0:
             mse = ss_res / df_residual
-            # Variance-covariance matrix
             try:
                 XtX_inv = np.linalg.inv(X.T @ X)
                 var_beta = mse * np.diag(XtX_inv)
@@ -183,8 +190,8 @@ def single_cosinor_analysis(
                 t_crit = stats.t.ppf(1 - alpha / 2, df_residual)
                 ci_mesor = (mesor - t_crit * se_beta[0], mesor + t_crit * se_beta[0])
 
-                # CI for amplitude (using delta method - approximate)
-                # SE(amplitude) ≈ sqrt[(β1*SE(β1))^2 + (β2*SE(β2))^2] / amplitude
+                # CI for amplitude (delta method — approximate)
+                # SE(A) ≈ sqrt[(β1·SE(β1))² + (β2·SE(β2))²] / A
                 if amplitude > 0:
                     se_amp = (
                         np.sqrt(
@@ -199,33 +206,36 @@ def single_cosinor_analysis(
                 else:
                     ci_amplitude = (0, 0)
 
-                # CI for acrophase (circular statistics - approximate)
-                # This is a simplified approach
-                if amplitude > 0:
-                    se_acrophase_rad = np.sqrt(
-                        (se_beta[1] / beta_cos) ** 2 + (se_beta[2] / beta_sin) ** 2
-                    )
-                    se_acrophase_hours = se_acrophase_rad / omega
-                    ci_acrophase = (
-                        (acrophase_hours - t_crit * se_acrophase_hours) % period_hours,
-                        (acrophase_hours + t_crit * se_acrophase_hours) % period_hours,
+                # CI for peak_time via delta method
+                # φ = arctan2(−β2, β1)  →  ∂φ/∂β1 = β2/A²,  ∂φ/∂β2 = −β1/A²
+                # se(φ)² = (β2²·var(β1) + β1²·var(β2)) / A⁴
+                # t_peak = −φ/ω  →  se(t_peak) = se(φ)/ω
+                A_sq = beta_cos**2 + beta_sin**2
+                if A_sq > 0:
+                    se_phi = np.sqrt(
+                        beta_sin**2 * var_beta[1] + beta_cos**2 * var_beta[2]
+                    ) / A_sq
+                    se_peak_time = se_phi / omega
+                    ci_peak_time = (
+                        (peak_time - t_crit * se_peak_time) % period_hours,
+                        (peak_time + t_crit * se_peak_time) % period_hours,
                     )
                 else:
-                    ci_acrophase = (0, 0)
+                    ci_peak_time = (0, 0)
             except np.linalg.LinAlgError:
                 ci_mesor = (np.nan, np.nan)
                 ci_amplitude = (np.nan, np.nan)
-                ci_acrophase = (np.nan, np.nan)
+                ci_peak_time = (np.nan, np.nan)
         else:
             ci_mesor = (np.nan, np.nan)
             ci_amplitude = (np.nan, np.nan)
-            ci_acrophase = (np.nan, np.nan)
+            ci_peak_time = (np.nan, np.nan)
 
         return {
             "mesor": float(mesor),
             "amplitude": float(amplitude),
-            "acrophase": float(acrophase_hours),
-            "acrophase_time": float(acrophase_hours),
+            "phase_angle_rad": float(phase_angle_rad),  # φ — phase offset of the cosine
+            "peak_time": float(peak_time),              # −φ/ω mod T — time of fitted peak (h)
             "period": float(period_hours),
             "p_value": float(p_value),
             "f_statistic": float(f_statistic),
@@ -234,7 +244,7 @@ def single_cosinor_analysis(
             "fitted_curve": fitted_curve,
             "ci_mesor": ci_mesor,
             "ci_amplitude": ci_amplitude,
-            "ci_acrophase": ci_acrophase,
+            "ci_peak_time": ci_peak_time,
             "n_observations": int(n),
             "df_residual": int(df_residual),
         }
@@ -243,8 +253,8 @@ def single_cosinor_analysis(
         return {
             "mesor": np.nan,
             "amplitude": np.nan,
-            "acrophase": np.nan,
-            "acrophase_time": np.nan,
+            "phase_angle_rad": np.nan,
+            "peak_time": np.nan,
             "period": period_hours,
             "p_value": 1.0,
             "r_squared": 0.0,
@@ -338,7 +348,8 @@ def population_cosinor(
         Dictionary containing:
         - population_mesor: Population-level MESOR
         - population_amplitude: Population-level amplitude
-        - population_acrophase: Population-level acrophase
+        - population_peak_time: Circular mean of individual peak_time values (hours).
+                                Not a biological acrophase without ZT reference.
         - p_value: Test for zero amplitude (no rhythm)
         - significant: Whether population rhythm is significant
         - individual_results: List of individual cosinor results
@@ -366,7 +377,7 @@ def population_cosinor(
         )
         individual_results.append(result)
 
-    # Extract individual amplitudes and acrophases
+    # Extract individual amplitudes and peak times
     valid_results = [
         r for r in individual_results if not np.isnan(r.get("amplitude", np.nan))
     ]
@@ -378,38 +389,40 @@ def population_cosinor(
             "individual_results": individual_results,
         }
 
-    # Convert to polar coordinates for population averaging
+    # Convert peak_time (hours) to phase angles for circular averaging
+    # peak_time ∈ [0, T)  →  angle = peak_time * 2π / T  ∈ [0, 2π)
     amplitudes = np.array([r["amplitude"] for r in valid_results])
-    acrophases_rad = np.array(
-        [r["acrophase"] * 2 * np.pi / period_hours for r in valid_results]
+    peak_time_angles = np.array(
+        [r["peak_time"] * 2 * np.pi / period_hours for r in valid_results]
     )
     mesors = np.array([r["mesor"] for r in valid_results])
 
     # Population MESOR (simple mean)
     pop_mesor = np.mean(mesors)
 
-    # Population amplitude and acrophase using vector averaging
-    # Convert to Cartesian coordinates
-    x_coords = amplitudes * np.cos(acrophases_rad)
-    y_coords = amplitudes * np.sin(acrophases_rad)
+    # Population amplitude and peak_time using vector averaging
+    x_coords = amplitudes * np.cos(peak_time_angles)
+    y_coords = amplitudes * np.sin(peak_time_angles)
 
-    # Mean vector
     mean_x = np.mean(x_coords)
     mean_y = np.mean(y_coords)
 
     # Population amplitude (length of mean vector)
     pop_amplitude = np.sqrt(mean_x**2 + mean_y**2)
 
-    # Population acrophase (angle of mean vector)
-    pop_acrophase_rad = np.arctan2(mean_y, mean_x)
-    pop_acrophase_hours = (
-        pop_acrophase_rad * period_hours / (2 * np.pi)
-    ) % period_hours
+    # Population peak_time (angle of mean vector, converted back to hours)
+    pop_peak_time_rad = np.arctan2(mean_y, mean_x)
+    pop_peak_time = (pop_peak_time_rad * period_hours / (2 * np.pi)) % period_hours
 
-    # Test for zero amplitude (Rayleigh test for uniformity)
+    # Rayleigh test for phase concentration (tests whether peak times cluster)
+    # Uses UNIT vectors (direction only) — NOT amplitude-weighted.
+    # pop_amplitude uses amplitude-weighted vectors for biological estimates,
+    # but the significance test must use unit vectors so R_bar ∈ [0, 1].
     n = len(valid_results)
-    R = n * pop_amplitude  # Resultant vector length
-    z = R**2 / n  # Rayleigh's R²/n
+    unit_x = np.cos(peak_time_angles)
+    unit_y = np.sin(peak_time_angles)
+    R_bar = np.sqrt(np.mean(unit_x) ** 2 + np.mean(unit_y) ** 2)  # mean resultant length ∈ [0,1]
+    z = n * R_bar ** 2  # Rayleigh statistic
     p_value = np.exp(-z) * (
         1
         + (2 * z - z**2) / (4 * n)
@@ -424,7 +437,7 @@ def population_cosinor(
     return {
         "population_mesor": float(pop_mesor),
         "population_amplitude": float(pop_amplitude),
-        "population_acrophase": float(pop_acrophase_hours),
+        "population_peak_time": float(pop_peak_time),  # circular mean, NOT biological acrophase
         "period": float(period_hours),
         "p_value": float(p_value),
         "significant": bool(significant),

@@ -68,7 +68,16 @@ def run_calibration_analysis_with_precomputed_baseline(
     else:
         processed_data = normalized_data
 
+    # Amplitude check on raw values (before any normalization)
+    from ._calc import check_roi_activity, apply_minmax_normalization
+
+    roi_active = check_roi_activity(normalized_data)
+    inactive_count = sum(1 for active in roi_active.values() if not active)
+    if inactive_count > 0:
+        print(f"  ⚠️ {inactive_count} inactive ROI(s) detected (low amplitude)")
+
     analysis_results["processed_data"] = processed_data
+    analysis_results["roi_active"] = roi_active
 
     # Step 2: Apply calibration thresholds
     baseline_means = {}
@@ -132,7 +141,30 @@ def run_calibration_analysis_with_precomputed_baseline(
     movement_data = define_movement_with_hysteresis(
         processed_data, baseline_means, upper_thresholds, lower_thresholds
     )
+
+    # Force inactive ROIs to zero movement
+    for roi, is_active in roi_active.items():
+        if not is_active and roi in movement_data:
+            movement_data[roi] = [(t, 0) for t, _ in movement_data[roi]]
+
     analysis_results["movement_data"] = movement_data
+
+    # Keep raw (pre-MinMax) data for amplitude view toggle
+    analysis_results["processed_data_raw"] = processed_data
+    analysis_results["baseline_means_raw"] = baseline_means
+    analysis_results["upper_thresholds_raw"] = upper_thresholds
+    analysis_results["lower_thresholds_raw"] = lower_thresholds
+
+    # Apply MinMax normalization for display (post-movement-detection)
+    norm_processed, norm_baselines, norm_upper, norm_lower = (
+        apply_minmax_normalization(
+            processed_data, baseline_means, upper_thresholds, lower_thresholds, roi_active
+        )
+    )
+    analysis_results["processed_data"] = norm_processed
+    analysis_results["baseline_means"] = norm_baselines
+    analysis_results["upper_thresholds"] = norm_upper
+    analysis_results["lower_thresholds"] = norm_lower
 
     # Step 4: Behavioral analysis
     successful_movement_data = {
@@ -171,7 +203,7 @@ def run_calibration_analysis_with_precomputed_baseline(
         roi_colors = get_roi_colors(sorted(processed_data.keys()))
     except:
         roi_colors = {
-            roi: f"C{i}" for i, roi in enumerate(sorted(processed_data.keys()))
+            roi: f"C{(roi - 1) % 10}" for roi in sorted(processed_data.keys())
         }
 
     analysis_results["roi_colors"] = roi_colors

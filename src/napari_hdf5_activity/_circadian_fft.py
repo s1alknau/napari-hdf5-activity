@@ -15,32 +15,34 @@ def _permutation_test_fft(
     time_series: np.ndarray,
     observed_power: float,
     sampling_interval: float,
-    target_period: float,
+    min_period_hours: float,
+    max_period_hours: float,
     window: str = "hann",
     n_permutations: int = 1000,
 ) -> float:
     """
     Perform permutation test to assess significance of observed FFT power.
 
-    This test randomizes the time series data while preserving its amplitude
-    distribution, then computes the FFT power at the target period. The p-value
-    is the proportion of permutations that produce power >= observed power.
+    The observed_power is the MAXIMUM power over the entire period range
+    [min_period_hours, max_period_hours].  To build a valid null distribution
+    each permutation therefore also records the MAXIMUM power over the same
+    range, not the power at a single fixed frequency.  Using a single fixed
+    frequency would give a null distribution that is systematically lower than
+    the observed statistic (which is a maximum), producing anti-conservative
+    (too-small) p-values.
 
     Args:
         time_series: Original time series data
-        observed_power: Observed power at the dominant period
+        observed_power: Maximum power over the tested period range
         sampling_interval: Time between samples (seconds)
-        target_period: Period to test (hours)
+        min_period_hours: Lower bound of tested period range (hours)
+        max_period_hours: Upper bound of tested period range (hours)
         window: Window function to apply
         n_permutations: Number of random permutations (default: 1000)
 
     Returns:
-        p_value: Proportion of permutations with power >= observed power
+        p_value: Proportion of permutations with max-power >= observed_power
     """
-    # Convert target period to frequency
-    target_freq = 1.0 / (target_period * 3600.0)  # Hz
-
-    # Store powers from permutations
     permuted_powers = []
 
     for _ in range(n_permutations):
@@ -67,16 +69,21 @@ def _permutation_test_fft(
         fft_values = np.fft.rfft(detrended, n=n_fft)
         power_spectrum = np.abs(fft_values) ** 2
 
-        # Get frequencies
+        # Get periods for all frequency bins
         frequencies = np.fft.rfftfreq(n_fft, d=sampling_interval)
+        periods = np.zeros_like(frequencies)
+        nz = frequencies > 0
+        periods[nz] = (1.0 / frequencies[nz]) / 3600.0
 
-        # Find power at target frequency (closest bin)
-        freq_idx = np.argmin(np.abs(frequencies - target_freq))
-        permuted_powers.append(power_spectrum[freq_idx])
+        # Take MAXIMUM power over the same period range as the observed statistic
+        period_mask = (periods >= min_period_hours) & (periods <= max_period_hours)
+        if period_mask.any():
+            permuted_powers.append(power_spectrum[period_mask].max())
+        else:
+            permuted_powers.append(0.0)
 
-    # Calculate p-value: proportion of permuted powers >= observed power
+    # p-value: proportion of permuted max-powers >= observed max-power
     p_value = np.sum(np.array(permuted_powers) >= observed_power) / n_permutations
-
     return p_value
 
 
@@ -173,6 +180,22 @@ def fft_periodogram(
     dominant_frequency = relevant_freqs[max_power_idx]
     dominant_power = relevant_power[max_power_idx]
 
+    # Extract phase angle from the complex FFT coefficient at the dominant frequency.
+    # For a cosine signal A·cos(2πft + φ), the rfft coefficient at frequency f is
+    # approximately (n/2)·A·e^(iφ), so np.angle() recovers φ directly.
+    # The peak of the cosine occurs at t_peak = −φ / (2πf), wrapped into [0, T).
+    # Note: Hann windowing preserves phase for exact-bin frequencies; minor error
+    # may occur for off-bin frequencies, but zero-padding (4×) minimises this.
+    relevant_indices = np.where(period_mask)[0]
+    dominant_fft_idx = relevant_indices[max_power_idx]
+    dominant_phase_rad = float(np.angle(fft_values[dominant_fft_idx]))
+
+    if dominant_frequency > 0:
+        peak_time_seconds = -dominant_phase_rad / (2.0 * np.pi * dominant_frequency)
+        dominant_peak_time_hours = float(peak_time_seconds / 3600.0) % float(dominant_period)
+    else:
+        dominant_peak_time_hours = float("nan")
+
     # Perform permutation test for statistical significance
     # This tests whether the observed power is significantly higher than what would
     # be expected by chance (i.e., from a non-periodic time series)
@@ -180,7 +203,8 @@ def fft_periodogram(
         time_series=time_series,
         observed_power=dominant_power,
         sampling_interval=sampling_interval,
-        target_period=dominant_period,
+        min_period_hours=min_period_hours,
+        max_period_hours=max_period_hours,
         window=window,
         n_permutations=n_permutations,
     )
@@ -215,6 +239,8 @@ def fft_periodogram(
         "dominant_period": dominant_period,
         "dominant_frequency": dominant_frequency,
         "dominant_power": dominant_power,
+        "dominant_phase_rad": dominant_phase_rad,
+        "dominant_peak_time_hours": dominant_peak_time_hours,
         "p_value": p_value,
         "is_significant": is_significant,
         "significance_level": significance_level,

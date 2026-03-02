@@ -95,7 +95,8 @@ def fisher_z_periodogram(
         # Calculate squared coherence (power)
         coherence_sq = r_cos**2 + r_sin**2
 
-        # Fischer's Z-transformation
+        # Chi² periodogram test statistic: n × (r_cos² + r_sin²)
+        # Follows chi-square distribution with df=2 under null hypothesis of no periodicity
         n = len(time_series)
         z_scores[idx] = n * coherence_sq
 
@@ -114,6 +115,7 @@ def fisher_z_periodogram(
 
     return {
         "periods": periods,
+        "test_periods": periods.tolist(),   # alias expected by generate_circadian_summary
         "z_scores": z_scores,
         "significant_periods": significant_periods,
         "dominant_period": dominant_period,
@@ -123,6 +125,10 @@ def fisher_z_periodogram(
         "critical_z": critical_z,
         "sampling_hours": sampling_hours,
         "total_duration_hours": total_duration_hours,
+        "actual_min_period": float(min_period),
+        "actual_max_period": float(max_period),
+        "requested_max_period": float(max_period_hours),
+        "period_capped": float(max_period) < float(max_period_hours),
     }
 
 
@@ -172,7 +178,7 @@ def analyze_roi_circadian_patterns(
         else:
             effective_interval = sampling_interval
 
-        # Run Fisher periodogram
+        # Run Chi² periodogram
         periodogram = fisher_z_periodogram(
             values,
             sampling_interval=effective_interval,

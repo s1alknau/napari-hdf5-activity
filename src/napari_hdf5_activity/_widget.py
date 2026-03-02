@@ -16,7 +16,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from napari.qt.threading import thread_worker
-from qtpy.QtCore import QTimer, Signal, Qt
+from qtpy.QtCore import QTimer, Signal, Qt, QSettings
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -36,12 +37,18 @@ from qtpy.QtWidgets import (
     QSlider,
     QSplitter,
     QScrollArea,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QHeaderView,
+    QListWidget,
+    QListWidgetItem,
 )
 
 try:
     from ._reader import (
         detect_hdf5_structure_type,
         get_first_frame_enhanced,
+        get_frame_norm_factor,
         process_single_file_in_parallel_dual_structure,
         process_hdf5_file_dual_structure,
         reader_function_dual_structure,
@@ -91,6 +98,31 @@ except ImportError as e:
     nematostella_analysis_available = False
 
 
+def _fmt_p(p: float) -> str:
+    """Format a p-value: scientific notation for p < 0.001, otherwise 4 decimal places."""
+    if p < 0.001:
+        return f"{p:.2e}"
+    return f"{p:.4f}"
+
+
+def _parse_recording_start_datetime(file_path: str):
+    """Extract recording start datetime from filename pattern YYYYMMDD_HHMMSS.
+
+    Returns a datetime object or None if the pattern is not found.
+    Example: 'nematostella_timelapse_20260126_181210.h5' → datetime(2026,1,26,18,12,10)
+    """
+    import re
+    from datetime import datetime as _dt
+    name = os.path.basename(file_path)
+    m = re.search(r'(\d{8})_(\d{6})', name)
+    if m:
+        try:
+            return _dt.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            return None
+    return None
+
+
 # Import calculation functions with clear fallbacks
 def validate_analysis_parameters(
     frame_interval: float, chunk_size: int, baseline_duration_minutes: float
@@ -102,8 +134,8 @@ def validate_analysis_parameters(
         return False, "Chunk size must be positive"
     if baseline_duration_minutes <= 0:
         return False, "Baseline duration must be positive"
-    if baseline_duration_minutes > 10000:
-        return False, "Baseline duration seems unreasonably long (>10000 minutes)"
+    if baseline_duration_minutes > 100000:
+        return False, "Baseline duration seems unreasonably long (>100000 minutes)"
     if frame_interval > 300:
         return False, "Frame interval seems unreasonably long (>5 minutes)"
     return True, ""
@@ -254,21 +286,32 @@ class HDF5AnalysisWidget(QWidget):
         # Connect signals
         self._connect_signals()
 
+        # Restore last ROI detection settings from previous session
+        self._load_roi_settings()
+
     def _initialize_attributes(self):
         """Initialize all class attributes."""
         # Performance monitoring
         self.cpu_count = psutil.cpu_count()
         # Add dataset state management
         self._initialize_dataset_state()
-        # Conservative approach for Windows multiprocessing
+        # Memory-aware process count for Windows (workers import napari/numba ~600MB each)
         if os.name == "nt":  # Windows
-            self.optimal_processes = max(1, min(4, int(self.cpu_count * 0.6)))
+            try:
+                available_mb = psutil.virtual_memory().available / (1024 * 1024)
+                usable_mb = max(0, available_mb - 2048)  # Reserve 2GB for main process
+                max_from_memory = max(1, int(usable_mb / 600))
+                cpu_based = max(1, min(4, int(self.cpu_count * 0.6)))
+                self.optimal_processes = min(cpu_based, max_from_memory)
+            except Exception:
+                self.optimal_processes = max(1, min(2, int(self.cpu_count * 0.5)))
         else:  # Unix/Linux/Mac
             self.optimal_processes = max(1, int(self.cpu_count * 0.9))
 
         # Analysis state variables
         self.directory: Optional[str] = None
         self.file_path: Optional[str] = None
+        self.recording_start_datetime = None  # parsed from filename YYYYMMDD_HHMMSS
         self.masks: List[np.ndarray] = []
         self.labeled_frame: Optional[np.ndarray] = None
 
@@ -491,12 +534,14 @@ class HDF5AnalysisWidget(QWidget):
         self.tab_results = QWidget()
         self.tab_extended = QWidget()
         self.tab_viewer = QWidget()
+        self.tab_telemetry = QWidget()
 
         self.tab_widget.addTab(self.tab_input, "Input")
         self.tab_widget.addTab(self.tab_analysis, "Analysis")
         self.tab_widget.addTab(self.tab_results, "Results")
         self.tab_widget.addTab(self.tab_extended, "Extended Analysis")
         self.tab_widget.addTab(self.tab_viewer, "Frame Viewer")
+        self.tab_widget.addTab(self.tab_telemetry, "HDF5 Telemetry")
 
         container_layout.addWidget(self.tab_widget)
 
@@ -512,6 +557,7 @@ class HDF5AnalysisWidget(QWidget):
         self.setup_results_tab()
         self.setup_extended_tab()
         self.setup_viewer_tab()
+        self.setup_telemetry_tab()
 
     def setup_input_tab(self):
         """Setup the input tab with file loading and ROI detection parameters."""
@@ -629,7 +675,85 @@ class HDF5AnalysisWidget(QWidget):
         roi_layout.addRow("", self.btn_apply_scale)
 
         layout.addWidget(roi_group)
+
+        # ROI Selection (exclude/include)
+        roi_select_group = QGroupBox("ROI Selection (exclude empty wells)")
+        self.roi_select_layout = QVBoxLayout()
+        roi_select_group.setLayout(self.roi_select_layout)
+
+        self.roi_select_info = QLabel("Run ROI detection first")
+        self.roi_select_info.setStyleSheet("color: #7f8c8d; font-size: 10px;")
+        self.roi_select_layout.addWidget(self.roi_select_info)
+
+        # Buttons for quick select/deselect
+        roi_btn_layout = QHBoxLayout()
+        self.btn_select_all_rois = QPushButton("Select All")
+        self.btn_deselect_all_rois = QPushButton("Deselect All")
+        self.btn_select_all_rois.clicked.connect(lambda: self._set_all_roi_checkboxes(True))
+        self.btn_deselect_all_rois.clicked.connect(lambda: self._set_all_roi_checkboxes(False))
+        roi_btn_layout.addWidget(self.btn_select_all_rois)
+        roi_btn_layout.addWidget(self.btn_deselect_all_rois)
+        roi_btn_layout.addStretch()
+        self.roi_select_layout.addLayout(roi_btn_layout)
+
+        # Container for dynamic checkboxes
+        self.roi_checkboxes_layout = QHBoxLayout()
+        self.roi_select_layout.addLayout(self.roi_checkboxes_layout)
+        self.roi_checkboxes: list = []
+
+        layout.addWidget(roi_select_group)
         layout.addStretch()
+
+    def _populate_roi_checkboxes(self, n_rois: int):
+        """Create checkboxes for each detected ROI."""
+        # Clear existing
+        for cb in self.roi_checkboxes:
+            cb.setParent(None)
+        self.roi_checkboxes.clear()
+
+        # Create new checkboxes
+        for i in range(n_rois):
+            cb = QCheckBox(f"ROI {i + 1}")
+            cb.setChecked(True)
+            cb.setToolTip(f"Include ROI {i + 1} in analysis")
+            self.roi_checkboxes_layout.addWidget(cb)
+            self.roi_checkboxes.append(cb)
+
+        self.roi_select_info.setText(f"{n_rois} ROIs detected — uncheck to exclude from analysis")
+
+    def _set_all_roi_checkboxes(self, checked: bool):
+        """Select or deselect all ROI checkboxes."""
+        for cb in self.roi_checkboxes:
+            cb.setChecked(checked)
+
+    def _get_excluded_roi_indices(self) -> list:
+        """Return list of ROI indices (0-based) that are unchecked."""
+        return [i for i, cb in enumerate(self.roi_checkboxes) if not cb.isChecked()]
+
+    def _get_active_masks(self) -> list:
+        """Return only the masks for checked (included) ROIs."""
+        if not self.roi_checkboxes:
+            return self.masks  # No checkboxes = use all
+        return [m for i, m in enumerate(self.masks) if i < len(self.roi_checkboxes) and self.roi_checkboxes[i].isChecked()]
+
+    def _get_roi_index_mapping(self) -> dict:
+        """Return mapping from sequential reader ROI index (1-based) to original ROI index.
+
+        When ROIs are excluded, the reader assigns sequential indices 1..N to the
+        N active masks.  This mapping restores the original ROI numbering.
+        Example: if ROI 1 is excluded from 6 ROIs, returns {1:2, 2:3, 3:4, 4:5, 5:6}.
+        If no ROIs are excluded, returns identity mapping {1:1, 2:2, ...}.
+        """
+        if not self.roi_checkboxes:
+            return {i + 1: i + 1 for i in range(len(self.masks))}
+        active_original_indices = [
+            i for i, cb in enumerate(self.roi_checkboxes) if cb.isChecked()
+        ]
+        # reader_idx is 1-based, original is also 1-based (i+1)
+        return {
+            reader_idx: orig_0based + 1
+            for reader_idx, orig_0based in enumerate(active_original_indices, start=1)
+        }
 
     def setup_analysis_tab(self):
         """Setup the analysis tab with threshold calculation methods."""
@@ -1084,6 +1208,7 @@ class HDF5AnalysisWidget(QWidget):
                 "Fraction Movement",
                 "Quiescence",
                 "Sleep",
+                "Sleep Quality",
                 "Lighting Conditions (dark IR)",
             ]
         )
@@ -1094,6 +1219,18 @@ class HDF5AnalysisWidget(QWidget):
 
         basic_row.addWidget(QLabel("Plot Type:"))
         basic_row.addWidget(self.plot_type_combo)
+
+        # Sleep Quality metric sub-selector (visible only when Sleep Quality selected)
+        self.sleep_quality_metric_combo = QComboBox()
+        self.sleep_quality_metric_combo.addItems([
+            "Sleep min/h",
+            "Transitions/h",
+            "Bout Length/h",
+        ])
+        self.sleep_quality_metric_combo.setVisible(False)
+        self.sleep_quality_metric_combo.currentIndexChanged.connect(lambda _: self.generate_plot())
+        basic_row.addWidget(self.sleep_quality_metric_combo)
+
         basic_row.addWidget(QLabel("DPI:"))
         basic_row.addWidget(self.plot_dpi_spin)
         basic_row.addStretch()
@@ -1118,6 +1255,27 @@ class HDF5AnalysisWidget(QWidget):
         size_row.addWidget(self.plot_height_spin)
         size_row.addStretch()
         plot_config_layout.addLayout(size_row)
+
+        # Amplitude mode toggle
+        self.show_real_amplitude = QCheckBox("Show Real Amplitude (instead of 0-1 normalized)")
+        self.show_real_amplitude.setChecked(False)
+        self.show_real_amplitude.setToolTip(
+            "Toggle between MinMax-normalized [0,1] view and real amplitude values.\n"
+            "Real amplitude shows sum(|Δpixel|) per ROI in raw pixel counts (MATLAB-style)."
+        )
+        plot_config_layout.addWidget(self.show_real_amplitude)
+
+        self.chk_divide_by_pixels = QCheckBox("÷ ROI pixel count (per-pixel mean)")
+        self.chk_divide_by_pixels.setChecked(False)   # default: pixel sum (MATLAB-style)
+        self.chk_divide_by_pixels.setEnabled(False)   # enabled only when Real Amplitude is on
+        self.chk_divide_by_pixels.setToolTip(
+            "Unchecked (default): pixel sum — sum(|Δpixel|) per ROI, MATLAB-equivalent\n"
+            "Checked: per-pixel mean — divide by ROI pixel count, ROI-size independent"
+        )
+        self.chk_divide_by_pixels.toggled.connect(self.generate_plot)
+        # Enable/disable together with Real Amplitude toggle
+        self.show_real_amplitude.toggled.connect(self.chk_divide_by_pixels.setEnabled)
+        plot_config_layout.addWidget(self.chk_divide_by_pixels)
 
         # Y-Axis scaling controls
         y_axis_group = QGroupBox("Y-Axis Scaling (Per ROI Optimization)")
@@ -1279,6 +1437,9 @@ class HDF5AnalysisWidget(QWidget):
             lambda: self.plot_bin_minutes.setValue(60)
         )
 
+        # Auto-refresh plot when bin size changes
+        self.plot_bin_minutes.valueChanged.connect(self._on_plot_bin_changed)
+
         plot_binning_layout.addWidget(QLabel("Plot Bin Size:"))
         plot_binning_layout.addWidget(self.plot_bin_minutes)
         plot_binning_layout.addWidget(QLabel("Presets:"))
@@ -1287,6 +1448,18 @@ class HDF5AnalysisWidget(QWidget):
         plot_binning_layout.addWidget(self.btn_plot_bin_30min)
         plot_binning_layout.addWidget(self.btn_plot_bin_60min)
         plot_binning_layout.addStretch()
+
+        # ZT time axis and lighting overlay options
+        self.chk_zt_axis = QCheckBox("ZT time (h)")
+        self.chk_zt_axis.setToolTip("X-axis in hours from recording start (ZT 0 = start)")
+        self.chk_zt_axis.toggled.connect(lambda _: self.generate_plot())
+
+        self.chk_show_lighting = QCheckBox("Light/Dark")
+        self.chk_show_lighting.setToolTip("Overlay day/night shading from HDF5 LED data")
+        self.chk_show_lighting.toggled.connect(lambda _: self.generate_plot())
+
+        plot_binning_layout.addWidget(self.chk_zt_axis)
+        plot_binning_layout.addWidget(self.chk_show_lighting)
 
         layout.addWidget(time_range_group)
         layout.addWidget(plot_binning_group)
@@ -1447,6 +1620,14 @@ class HDF5AnalysisWidget(QWidget):
 
         layout.addWidget(preset_group)
 
+        # Cosinor-specific option
+        self.chk_cosinor_population = QCheckBox("Show population mean (Cosinor)")
+        self.chk_cosinor_population.setToolTip(
+            "Add a full-width subplot below the per-ROI panels showing\n"
+            "the population-level cosinor fit (mean across all ROIs)."
+        )
+        layout.addWidget(self.chk_cosinor_population)
+
         # Analysis method selection
         method_group = QGroupBox("Analysis Method")
         method_layout = QFormLayout()
@@ -1457,7 +1638,7 @@ class HDF5AnalysisWidget(QWidget):
         self.fisher_method_combo = QComboBox()
         self.fisher_method_combo.addItems(
             [
-                "Fisher Z-Transformation",
+                "Chi² Periodogram",
                 "FFT Power Spectrum",
                 "Cosinor Analysis",
                 "ROI Similarity Matrix",
@@ -1466,13 +1647,28 @@ class HDF5AnalysisWidget(QWidget):
             ]
         )
         self.fisher_method_combo.setToolTip(
-            "Select the rhythmic pattern analysis method:\n"
-            "• Fisher Z: Statistical periodogram (default, most robust)\n"
-            "• FFT: Fast Fourier Transform spectrum (good for noisy data)\n"
-            "• Cosinor: Cosine curve fitting (MESOR, Amplitude, Acrophase)\n"
-            "• Similarity: Cross-correlation between ROIs\n"
-            "• Coherence: Frequency-specific synchronization\n"
-            "• Phase Clustering: Group ROIs by activity phase"
+            "Select the rhythmic pattern analysis method:\n\n"
+            "• Chi² Periodogram: Most robust. Tests all periods in range using chi-square\n"
+            "  statistic. Recommended default. Use Fraction Movement.\n\n"
+            "• FFT Power Spectrum: Good for noisy data. Permutation-based significance\n"
+            "  (1000 permutations). Use Fraction Movement.\n\n"
+            "• Cosinor Analysis: Fits cosine curve — gives MESOR, Amplitude, Acrophase.\n"
+            "  Tests specific periods (12, 24, 30 h + min/mid/max of range).\n"
+            "  Use Fraction or Normalized Movement. Needs ≥ 2 complete cycles.\n\n"
+            "• ROI Similarity Matrix: Pairwise cross-correlation between all ROIs at\n"
+            "  optimal time lag (≤ max_period / 2). Hierarchical clustering at r = 0.5.\n"
+            "  Period range does not affect result. Use Fraction Movement.\n\n"
+            "• Coherence Analysis: Welch magnitude-squared coherence between ROI pairs\n"
+            "  at one target period = midpoint of period range.\n"
+            "  ⚠ Set period range so that (min + max) / 2 = target period\n"
+            "  (e.g. 20–28 h for circadian → target = 24 h).\n"
+            "  Needs long recordings (≥ 3× target period) for good frequency resolution.\n"
+            "  Recommended bin size: 30–60 min.\n\n"
+            "• Phase Clustering: Hilbert-transform phase per ROI → peak activity time.\n"
+            "  Bins ROIs into 4 groups: 0–6 h / 6–12 h / 12–18 h / 18–24 h.\n"
+            "  ⚠ Set period range so midpoint = target period (same as Coherence).\n"
+            "  Reliable only when the target rhythm is strong and dominant in the signal.\n"
+            "  Phase is relative to recording start (ZT 0 = start of recording)."
         )
         self.fisher_method_combo.currentIndexChanged.connect(
             self._on_fisher_method_changed
@@ -1519,9 +1715,14 @@ class HDF5AnalysisWidget(QWidget):
         self.analysis_bin_size.setSingleStep(10)
         self.analysis_bin_size.setSuffix(" sec")
         self.analysis_bin_size.setToolTip(
-            "Bin size for extended analysis (10 sec - 60 min).\n"
-            "Larger bins reduce noise but lose temporal resolution.\n"
-            "For Cosinor: larger bins (5-10 min) reduce saturation at 1.0.\n"
+            "Bin size for extended analysis (10 sec – 60 min).\n"
+            "Larger bins reduce noise but lose temporal resolution.\n\n"
+            "Recommendations by method:\n"
+            "• Chi² / FFT: 60–300 s (1–5 min)\n"
+            "• Cosinor: 300–600 s (5–10 min) — reduces saturation at 1.0\n"
+            "• Similarity: 300–1800 s (5–30 min)\n"
+            "• Coherence: 1800–3600 s (30–60 min) — improves frequency resolution\n"
+            "• Phase Clustering: 300–1800 s (5–30 min)\n\n"
             "Data will be automatically re-binned if different from original."
         )
         self.analysis_bin_size.setMinimumWidth(100)
@@ -1594,14 +1795,24 @@ class HDF5AnalysisWidget(QWidget):
         data_source_layout.addWidget(QLabel("Data Source:"))
 
         self.data_source_combo = QComboBox()
-        self.data_source_combo.addItems(
-            ["Fraction Movement (0-1)", "Raw Movement (binary)"]
-        )
+        self.data_source_combo.addItems([
+            "Fraction Movement (0-1)",
+            "Raw Intensity (continuous)",
+            "Normalized Movement (0-1)",
+        ])
         self.data_source_combo.setCurrentIndex(0)  # Default: fraction movement
         self.data_source_combo.setToolTip(
-            "Choose data source for extended analysis:\n"
-            "• Fraction Movement: Binned activity ratio (0-1), smoother\n"
-            "• Raw Movement: Binary movement detection, more detail"
+            "Choose data source for extended analysis:\n\n"
+            "• Fraction Movement (0-1): Proportion of time in movement state per bin.\n"
+            "  Recommended for Chi², FFT, Similarity, Coherence, Phase Clustering.\n\n"
+            "• Raw Intensity (continuous): Per-pixel intensity changes, MinMax normalized.\n"
+            "  Use for Cosinor when a sinusoidal waveform is expected.\n\n"
+            "• Normalized Movement (0-1): Re-binned & min/max normalized per ROI.\n"
+            "  Comparable to Aguillon et al. 2023 'Normalized Movement (a.u.)'.\n"
+            "  Best for Cosinor and cross-study comparison.\n\n"
+            "Recommendation by method:\n"
+            "  Chi² / FFT / Similarity / Coherence / Phase Clustering → Fraction Movement\n"
+            "  Cosinor → Fraction Movement or Normalized Movement"
         )
         self.data_source_combo.currentIndexChanged.connect(self._on_data_source_changed)
         data_source_layout.addWidget(self.data_source_combo)
@@ -1610,13 +1821,27 @@ class HDF5AnalysisWidget(QWidget):
         self.chk_calculate_sleep_phase = QCheckBox("Also calculate Sleep Phase")
         self.chk_calculate_sleep_phase.setChecked(True)
         self.chk_calculate_sleep_phase.setToolTip(
-            "Calculate both Acrophase (peak activity) and Sleep Phase (peak sleep):\n"
-            "• Acrophase: Time of maximum activity (from movement data)\n"
-            "• Sleep Phase: Time of maximum sleep (from sleep_data)\n\n"
-            "Sleep = continuous quiescence ≥ sleep threshold (default 8 min)\n"
+            "Calculate both Acrophase (peak activity) and Sleep Phase (peak sleep).\n"
             "Requires main analysis to be run first."
         )
         data_source_layout.addWidget(self.chk_calculate_sleep_phase)
+
+        # Sleep data source selector
+        self.sleep_source_combo = QComboBox()
+        self.sleep_source_combo.addItems([
+            "Quiescence (comparable)",
+            "Sleep (≥8min sustained)",
+        ])
+        self.sleep_source_combo.setCurrentIndex(1)  # Default: Sleep ≥8min (differs from activity spectrum)
+        self.sleep_source_combo.setToolTip(
+            "Choose data source for sleep rhythm analysis:\n"
+            "• Quiescence: Binary rest state (movement < threshold), same temporal\n"
+            "  resolution as activity data — best for direct period comparison.\n"
+            "• Sleep (≥8min sustained): Only sustained quiescence episodes ≥8 min\n"
+            "  are counted as sleep. Acts as a low-pass filter (~16 min cutoff).\n"
+            "  More biologically strict, but not directly comparable to activity."
+        )
+        data_source_layout.addWidget(self.sleep_source_combo)
         data_source_layout.addStretch()
 
         rebinning_layout.addLayout(data_source_layout)
@@ -1762,6 +1987,14 @@ class HDF5AnalysisWidget(QWidget):
 
         plot_header_layout.addStretch()
 
+        # Button to save the current periodogram plot as image
+        self.btn_save_fisher_plot = QPushButton("Save Plot...")
+        self.btn_save_fisher_plot.setToolTip("Save the current plot as PNG / PDF / SVG")
+        self.btn_save_fisher_plot.setMaximumWidth(110)
+        self.btn_save_fisher_plot.clicked.connect(self._save_fisher_plot)
+        self.btn_save_fisher_plot.setEnabled(False)
+        plot_header_layout.addWidget(self.btn_save_fisher_plot)
+
         # Button to open plot in separate window
         self.btn_popout_plot = QPushButton("🗖 Open in Separate Window")
         self.btn_popout_plot.setToolTip("Open plot in a larger, resizable window")
@@ -1896,14 +2129,36 @@ class HDF5AnalysisWidget(QWidget):
 
         layout.addWidget(nav_group)
 
+        # File selector for multiple loaded files
+        file_select_layout = QHBoxLayout()
+        file_select_layout.addWidget(QLabel("File:"))
+        self.viewer_file_combo = QComboBox()
+        self.viewer_file_combo.setToolTip("Select which file to view in the Frame Viewer")
+        self.viewer_file_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        file_select_layout.addWidget(self.viewer_file_combo)
+        layout.addLayout(file_select_layout)
+
         # Load data button
-        self.btn_viewer_load = QPushButton("Load Current Dataset into Viewer")
+        self.btn_viewer_load = QPushButton("Load Selected File into Viewer")
         self.btn_viewer_load.clicked.connect(self._viewer_load_data)
         self.btn_viewer_load.setStyleSheet(
             "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
             "padding: 10px; } QPushButton:hover { background-color: #1976D2; }"
         )
         layout.addWidget(self.btn_viewer_load)
+
+        # ROI overlay option
+        overlay_row = QHBoxLayout()
+        self.viewer_show_roi_overlay = QCheckBox("Show ROI overlay (circles + numbers)")
+        self.viewer_show_roi_overlay.setChecked(True)
+        self.viewer_show_roi_overlay.setToolTip(
+            "Draw detected ROI circles and numbers on each frame "
+            "so you can identify which well corresponds to which ROI"
+        )
+        self.viewer_show_roi_overlay.toggled.connect(self._on_viewer_roi_overlay_changed)
+        overlay_row.addWidget(self.viewer_show_roi_overlay)
+        overlay_row.addStretch()
+        layout.addLayout(overlay_row)
 
         # Export video/GIF section
         export_group = QGroupBox("Export Video/GIF")
@@ -1968,11 +2223,99 @@ class HDF5AnalysisWidget(QWidget):
         # Info display
         self.viewer_info_text = QTextEdit()
         self.viewer_info_text.setReadOnly(True)
-        self.viewer_info_text.setMaximumHeight(150)
+        self.viewer_info_text.setMaximumHeight(100)
         self.viewer_info_text.setPlaceholderText(
             "Frame information will appear here..."
         )
         layout.addWidget(self.viewer_info_text)
+
+        # === SYNCHRONIZED ANALYSIS PLOTS ===
+        sync_plot_group = QGroupBox("Synchronized Analysis Plots")
+        sync_plot_layout = QVBoxLayout()
+        sync_plot_group.setLayout(sync_plot_layout)
+
+        # Enable checkbox
+        self.sync_plots_enabled = QCheckBox("Show synchronized plots with time marker")
+        self.sync_plots_enabled.setChecked(False)
+        self.sync_plots_enabled.setToolTip(
+            "Display analysis results below with a time marker "
+            "synchronized to the current frame position"
+        )
+        self.sync_plots_enabled.toggled.connect(self._toggle_sync_plots)
+        sync_plot_layout.addWidget(self.sync_plots_enabled)
+
+        # Plot type selector
+        sync_type_layout = QHBoxLayout()
+        sync_type_layout.addWidget(QLabel("Plot Type:"))
+        self.sync_plot_type = QComboBox()
+        self.sync_plot_type.addItems([
+            "Raw Intensity (0-1)",
+            "Movement (binary)",
+            "Fraction Movement",
+            "Quiescence",
+            "Sleep",
+            "Sleep Quality",
+        ])
+        self.sync_plot_type.currentIndexChanged.connect(self._update_sync_plot)
+        self.sync_plot_type.setCurrentIndex(2)  # Default to Fraction Movement
+        sync_type_layout.addWidget(self.sync_plot_type)
+
+        # Binning control for synchronized plots
+        sync_type_layout.addWidget(QLabel("Bin:"))
+        self.sync_plot_bin = QSpinBox()
+        self.sync_plot_bin.setRange(0, 240)
+        self.sync_plot_bin.setValue(0)
+        self.sync_plot_bin.setSuffix(" min")
+        self.sync_plot_bin.setSpecialValueText("Original")
+        self.sync_plot_bin.setToolTip("Re-bin data for visualization (0 = original binning)")
+        self.sync_plot_bin.valueChanged.connect(self._update_sync_plot)
+        sync_type_layout.addWidget(self.sync_plot_bin)
+
+        sync_type_layout.addStretch()
+        sync_plot_layout.addLayout(sync_type_layout)
+
+        # Matplotlib canvas for synchronized plots
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        self.sync_figure = Figure(figsize=(12, 6), dpi=100)
+        self.sync_canvas = FigureCanvasQTAgg(self.sync_figure)
+        self.sync_canvas.setMinimumHeight(350)
+        self.sync_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.sync_canvas.setVisible(False)  # Hidden by default
+        sync_plot_layout.addWidget(self.sync_canvas, stretch=1)
+
+        # Store time marker line references
+        self.sync_time_markers = []
+
+        # Export buttons for video/GIF with synchronized plots
+        export_sync_layout = QHBoxLayout()
+        self.btn_export_sync_video = QPushButton("Export Video with Plots (MP4)")
+        self.btn_export_sync_video.setToolTip(
+            "Export video showing frame + synchronized analysis plots side by side"
+        )
+        self.btn_export_sync_video.clicked.connect(self._export_video_with_plots)
+        self.btn_export_sync_video.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 8px; }"
+            "QPushButton:hover { background-color: #45a049; }"
+        )
+        export_sync_layout.addWidget(self.btn_export_sync_video)
+
+        self.btn_export_sync_gif = QPushButton("Export GIF with Plots")
+        self.btn_export_sync_gif.setToolTip(
+            "Export animated GIF showing frame + synchronized analysis plots"
+        )
+        self.btn_export_sync_gif.clicked.connect(self._export_gif_with_plots)
+        self.btn_export_sync_gif.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 8px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+        )
+        export_sync_layout.addWidget(self.btn_export_sync_gif)
+
+        export_sync_layout.addStretch()
+        sync_plot_layout.addLayout(export_sync_layout)
+
+        layout.addWidget(sync_plot_group)
 
         layout.addStretch()
 
@@ -1982,6 +2325,561 @@ class HDF5AnalysisWidget(QWidget):
         self.viewer_timer = QTimer()
         self.viewer_timer.timeout.connect(self._viewer_play_next_frame)
         self.viewer_is_playing = False
+
+    # =================================================================
+    # HDF5 TELEMETRY TAB
+    # =================================================================
+
+    # Timeseries categories and units for telemetry display
+    TELEMETRY_CATEGORIES = {
+        "Timing": [
+            "frame_drift", "cumulative_drift", "actual_intervals", "expected_intervals",
+        ],
+        "Environment": ["temperature", "humidity"],
+        "LED": [
+            "led_white_power_percent", "led_ir_power_percent", "led_power_percent",
+            "led_duration_ms", "led_sync_success",
+        ],
+        "Frame Stats": ["frame_mean", "frame_max", "frame_min", "frame_std"],
+    }
+
+    TIMESERIES_UNITS = {
+        "frame_drift": "s", "cumulative_drift": "s", "actual_intervals": "s",
+        "expected_intervals": "s", "temperature": "\u00b0C", "humidity": "%",
+        "led_white_power_percent": "%", "led_ir_power_percent": "%",
+        "led_power_percent": "%", "led_duration_ms": "ms",
+        "led_sync_success": "bool", "frame_mean": "px intensity",
+        "frame_max": "px intensity", "frame_min": "px intensity",
+        "frame_std": "px intensity",
+    }
+
+    def setup_telemetry_tab(self):
+        """Setup the HDF5 Telemetry tab for viewing file metadata and timeseries."""
+        layout = QVBoxLayout()
+        self.tab_telemetry.setLayout(layout)
+
+        # --- Section 1: File & Frame Metadata ---
+        meta_group = QGroupBox("File & Frame Metadata")
+        meta_layout = QVBoxLayout()
+        meta_group.setLayout(meta_layout)
+
+        # Load button
+        btn_row = QHBoxLayout()
+        self.btn_load_telemetry = QPushButton("Load Metadata")
+        self.btn_load_telemetry.setToolTip("Read metadata and timeseries info from the loaded HDF5 file")
+        self.btn_load_telemetry.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
+            "padding: 6px 16px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+        )
+        self.btn_load_telemetry.clicked.connect(self._load_telemetry_metadata)
+        btn_row.addWidget(self.btn_load_telemetry)
+        btn_row.addStretch()
+        meta_layout.addLayout(btn_row)
+
+        # Tree widget for metadata display
+        self.telemetry_tree = QTreeWidget()
+        self.telemetry_tree.setHeaderLabels(["Property", "Value"])
+        self.telemetry_tree.setAlternatingRowColors(True)
+        self.telemetry_tree.setMinimumHeight(200)
+        self.telemetry_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.telemetry_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        meta_layout.addWidget(self.telemetry_tree)
+
+        layout.addWidget(meta_group)
+
+        # --- Section 2: Timeseries Plots ---
+        ts_group = QGroupBox("Timeseries Data")
+        ts_layout = QVBoxLayout()
+        ts_group.setLayout(ts_layout)
+
+        # Top row: dataset selector (left) + controls (right)
+        selector_and_controls = QHBoxLayout()
+
+        # Left: multi-select list of individual timeseries
+        select_panel = QVBoxLayout()
+        select_panel.addWidget(QLabel("Select datasets to plot:"))
+
+        self.telemetry_list = QListWidget()
+        self.telemetry_list.setSelectionMode(QListWidget.MultiSelection)
+        self.telemetry_list.setMaximumHeight(160)
+        self.telemetry_list.setToolTip(
+            "Click to select/deselect individual timeseries. "
+            "Use the category buttons for quick selection."
+        )
+        select_panel.addWidget(self.telemetry_list)
+
+        # Quick-select buttons for categories
+        cat_btn_row = QHBoxLayout()
+        btn_sel_all = QPushButton("All")
+        btn_sel_all.setToolTip("Select all timeseries")
+        btn_sel_all.clicked.connect(lambda: self._select_telemetry_items(all_=True))
+        btn_sel_none = QPushButton("None")
+        btn_sel_none.setToolTip("Deselect all timeseries")
+        btn_sel_none.clicked.connect(lambda: self._select_telemetry_items(all_=False))
+        cat_btn_row.addWidget(btn_sel_all)
+        cat_btn_row.addWidget(btn_sel_none)
+
+        for cat_name in list(self.TELEMETRY_CATEGORIES.keys()) + ["Other"]:
+            btn = QPushButton(cat_name)
+            btn.setToolTip(f"Select only {cat_name} timeseries")
+            btn.clicked.connect(lambda checked, c=cat_name: self._select_telemetry_category(c))
+            cat_btn_row.addWidget(btn)
+        cat_btn_row.addStretch()
+        select_panel.addLayout(cat_btn_row)
+
+        selector_and_controls.addLayout(select_panel, stretch=1)
+
+        # Right: x-axis control
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel("X-Axis:"))
+        self.telemetry_xaxis_combo = QComboBox()
+        self.telemetry_xaxis_combo.addItems(["Frame Number", "Time (minutes)", "Time (hours)"])
+        self.telemetry_xaxis_combo.setCurrentIndex(1)
+        right_panel.addWidget(self.telemetry_xaxis_combo)
+        right_panel.addStretch()
+        selector_and_controls.addLayout(right_panel)
+
+        ts_layout.addLayout(selector_and_controls)
+
+        # Buttons row: Plot + Export
+        btn_row2 = QHBoxLayout()
+        self.btn_plot_telemetry = QPushButton("Plot Telemetry")
+        self.btn_plot_telemetry.setToolTip("Plot selected timeseries")
+        self.btn_plot_telemetry.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; "
+            "padding: 6px 16px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #388E3C; }"
+        )
+        self.btn_plot_telemetry.clicked.connect(self._plot_telemetry)
+        btn_row2.addWidget(self.btn_plot_telemetry)
+
+        self.btn_save_telemetry_plot = QPushButton("Save Current Plot")
+        self.btn_save_telemetry_plot.setToolTip("Save the current telemetry plot as PNG/PDF/SVG")
+        self.btn_save_telemetry_plot.clicked.connect(self._save_telemetry_plot)
+        btn_row2.addWidget(self.btn_save_telemetry_plot)
+
+        self.btn_export_all_telemetry = QPushButton("Export All Plots")
+        self.btn_export_all_telemetry.setToolTip(
+            "Save each timeseries as individual plot + one combined overview"
+        )
+        self.btn_export_all_telemetry.clicked.connect(self._export_all_telemetry_plots)
+        btn_row2.addWidget(self.btn_export_all_telemetry)
+
+        btn_row2.addStretch()
+        ts_layout.addLayout(btn_row2)
+
+        # Matplotlib canvas for timeseries plots
+        self.telemetry_figure = Figure(figsize=(10, 8), dpi=100)
+        self.telemetry_canvas = FigureCanvas(self.telemetry_figure)
+        self.telemetry_canvas.setMinimumHeight(500)
+        ts_layout.addWidget(self.telemetry_canvas)
+
+        layout.addWidget(ts_group)
+
+        # Storage for loaded telemetry data
+        self.telemetry_timeseries = {}
+        self.telemetry_frame_interval = None
+
+    def _load_telemetry_metadata(self):
+        """Load and display HDF5 file metadata in the telemetry tree."""
+        file_path = getattr(self, "file_path", None)
+        if not file_path:
+            self._log_message("No HDF5 file loaded. Please load a file first.")
+            return
+
+        try:
+            import h5py
+
+            self.telemetry_tree.clear()
+            self._log_message(f"Loading telemetry from: {os.path.basename(file_path)}")
+
+            with h5py.File(file_path, "r") as f:
+                # --- File Info ---
+                file_item = QTreeWidgetItem(self.telemetry_tree, ["File Info", ""])
+                file_item.setExpanded(True)
+                file_size = os.path.getsize(file_path)
+                QTreeWidgetItem(file_item, ["Filename", os.path.basename(file_path)])
+                QTreeWidgetItem(file_item, ["Size", f"{file_size / (1024*1024):.1f} MB"])
+                QTreeWidgetItem(file_item, ["HDF5 Driver", str(f.driver)])
+
+                # --- Root Attributes ---
+                if f.attrs:
+                    attr_item = QTreeWidgetItem(self.telemetry_tree, ["Root Attributes", f"({len(f.attrs)} entries)"])
+                    attr_item.setExpanded(True)
+                    for key in sorted(f.attrs.keys()):
+                        val = f.attrs[key]
+                        if isinstance(val, bytes):
+                            val = val.decode("utf-8", errors="replace")
+                        QTreeWidgetItem(attr_item, [str(key), str(val)])
+
+                # --- Datasets ---
+                datasets_item = QTreeWidgetItem(self.telemetry_tree, ["Datasets", ""])
+                datasets_item.setExpanded(True)
+                self._add_hdf5_items_to_tree(f, datasets_item)
+
+                # --- Timeseries: read arrays for plotting ---
+                self.telemetry_timeseries = {}
+                self.telemetry_frame_interval = None
+
+                if "timeseries" in f:
+                    ts_group = f["timeseries"]
+                    ts_tree_item = QTreeWidgetItem(self.telemetry_tree, [
+                        "Timeseries", f"({len(ts_group)} datasets)"
+                    ])
+                    ts_tree_item.setExpanded(True)
+
+                    # Read frame interval from root attrs
+                    for attr_name in ["frame_interval", "interval", "fps"]:
+                        if attr_name in f.attrs:
+                            val = float(f.attrs[attr_name])
+                            if attr_name == "fps" and val > 0:
+                                self.telemetry_frame_interval = 1.0 / val
+                            else:
+                                self.telemetry_frame_interval = val
+                            break
+
+                    for ds_name in sorted(ts_group.keys()):
+                        ds = ts_group[ds_name]
+                        if hasattr(ds, "shape"):
+                            # Store array data for plotting
+                            try:
+                                self.telemetry_timeseries[ds_name] = ds[:]
+                            except Exception:
+                                pass
+
+                            unit = self.TIMESERIES_UNITS.get(ds_name, "")
+                            unit_str = f" [{unit}]" if unit else ""
+                            shape_str = f"shape={ds.shape}, dtype={ds.dtype}"
+                            QTreeWidgetItem(ts_tree_item, [
+                                f"{ds_name}{unit_str}", shape_str
+                            ])
+
+                            # Show attributes of timeseries datasets
+                            if ds.attrs:
+                                ds_tree = ts_tree_item.child(ts_tree_item.childCount() - 1)
+                                for ak in ds.attrs:
+                                    av = ds.attrs[ak]
+                                    if isinstance(av, bytes):
+                                        av = av.decode("utf-8", errors="replace")
+                                    QTreeWidgetItem(ds_tree, [f"  @{ak}", str(av)])
+
+            n_ts = len(self.telemetry_timeseries)
+            self._log_message(f"Telemetry loaded: {n_ts} timeseries datasets found")
+
+            # Populate the dataset selector list
+            self._populate_telemetry_list()
+
+            # Auto-plot all loaded timeseries
+            if self.telemetry_timeseries:
+                self._plot_telemetry()
+
+        except Exception as e:
+            self._log_message(f"Error loading telemetry: {e}")
+            import traceback
+            self._log_message(traceback.format_exc())
+
+    def _add_hdf5_items_to_tree(self, h5_group, parent_item):
+        """Recursively add HDF5 groups and datasets to the tree widget."""
+        import h5py
+
+        for key in sorted(h5_group.keys()):
+            item = h5_group[key]
+            if isinstance(item, h5py.Group):
+                if key == "timeseries":
+                    continue  # Shown separately
+                group_node = QTreeWidgetItem(parent_item, [
+                    f"{key}/", f"(Group, {len(item)} items)"
+                ])
+                self._add_hdf5_items_to_tree(item, group_node)
+            elif isinstance(item, h5py.Dataset):
+                info_parts = [f"shape={item.shape}", f"dtype={item.dtype}"]
+                if item.compression:
+                    info_parts.append(f"compression={item.compression}")
+                QTreeWidgetItem(parent_item, [key, ", ".join(info_parts)])
+
+    def _get_category_for_dataset(self, ds_name: str) -> str:
+        """Return the category name for a given timeseries dataset name."""
+        for cat_name, ds_list in self.TELEMETRY_CATEGORIES.items():
+            if ds_name in ds_list:
+                return cat_name
+        return "Other"
+
+    def _populate_telemetry_list(self):
+        """Populate the dataset selector list with all available timeseries."""
+        self.telemetry_list.clear()
+        if not self.telemetry_timeseries:
+            return
+
+        # Group by category for ordered display
+        categorized = {}
+        for ds_name in self.telemetry_timeseries:
+            cat = self._get_category_for_dataset(ds_name)
+            categorized.setdefault(cat, []).append(ds_name)
+
+        # Add items in category order
+        cat_order = list(self.TELEMETRY_CATEGORIES.keys()) + ["Other"]
+        for cat_name in cat_order:
+            if cat_name not in categorized:
+                continue
+            for ds_name in categorized[cat_name]:
+                unit = self.TIMESERIES_UNITS.get(ds_name, "")
+                unit_str = f" [{unit}]" if unit else ""
+                item = QListWidgetItem(f"[{cat_name}]  {ds_name}{unit_str}")
+                item.setData(Qt.UserRole, ds_name)  # store raw name for lookup
+                item.setSelected(True)
+                self.telemetry_list.addItem(item)
+
+    def _select_telemetry_items(self, all_: bool):
+        """Select or deselect all items in the telemetry list."""
+        for i in range(self.telemetry_list.count()):
+            self.telemetry_list.item(i).setSelected(all_)
+
+    def _select_telemetry_category(self, category: str):
+        """Select only items belonging to the given category."""
+        for i in range(self.telemetry_list.count()):
+            item = self.telemetry_list.item(i)
+            ds_name = item.data(Qt.UserRole)
+            cat = self._get_category_for_dataset(ds_name)
+            item.setSelected(cat == category)
+
+    def _get_active_telemetry_series(self):
+        """Return list of (category, dataset_name) for all selected items in the list."""
+        active_series = []
+        for item in self.telemetry_list.selectedItems():
+            ds_name = item.data(Qt.UserRole)
+            if ds_name in self.telemetry_timeseries:
+                cat = self._get_category_for_dataset(ds_name)
+                active_series.append((cat, ds_name))
+        return active_series
+
+    def _build_telemetry_xaxis(self, n_points):
+        """Build x-axis array and label based on current x-axis mode selection."""
+        import numpy as np
+
+        xaxis_mode = self.telemetry_xaxis_combo.currentText()
+        if xaxis_mode == "Frame Number":
+            return np.arange(n_points), "Frame Number"
+        elif xaxis_mode == "Time (hours)":
+            interval = self.telemetry_frame_interval or 5.0
+            return np.arange(n_points) * interval / 3600.0, "Time (hours)"
+        else:  # Time (minutes)
+            interval = self.telemetry_frame_interval or 5.0
+            return np.arange(n_points) * interval / 60.0, "Time (minutes)"
+
+    # Category colors for telemetry plots
+    TELEMETRY_CAT_COLORS = {
+        "Timing": "#2196F3",
+        "Environment": "#FF9800",
+        "LED": "#9C27B0",
+        "Frame Stats": "#4CAF50",
+        "Other": "#795548",
+    }
+
+    def _plot_telemetry(self):
+        """Plot selected timeseries categories from the loaded HDF5 telemetry data."""
+        if not self.telemetry_timeseries:
+            self._log_message("No telemetry data loaded. Click 'Load Metadata' first.")
+            return
+
+        active_series = self._get_active_telemetry_series()
+        if not active_series:
+            self._log_message("No timeseries data available for selected categories.")
+            return
+
+        n_plots = len(active_series)
+
+        # Clear and create subplots
+        self.telemetry_figure.clear()
+
+        # Dynamically adjust figure height based on number of plots
+        height_per_plot = 1.5
+        min_height = 4.0
+        fig_height = max(min_height, n_plots * height_per_plot)
+        self.telemetry_figure.set_size_inches(10, fig_height)
+        self.telemetry_canvas.setMinimumHeight(int(fig_height * 100))
+
+        axes = self.telemetry_figure.subplots(n_plots, 1, sharex=True, squeeze=False)
+
+        x_label = "Frame Number"
+        for idx, (cat_name, ds_name) in enumerate(active_series):
+            ax = axes[idx, 0]
+            data = self.telemetry_timeseries[ds_name]
+            x, x_label = self._build_telemetry_xaxis(len(data))
+
+            color = self.TELEMETRY_CAT_COLORS.get(cat_name, "#666666")
+            unit = self.TIMESERIES_UNITS.get(ds_name, "")
+            unit_str = f" [{unit}]" if unit else ""
+
+            mean_val = float(np.mean(data))
+            std_val = float(np.std(data))
+            stat_label = f"μ = {mean_val:.3g}{' ' + unit if unit else ''},  σ = {std_val:.3g}"
+
+            ax.plot(x, data, color=color, linewidth=0.8, alpha=0.9, label=stat_label)
+            ax.legend(fontsize=7, loc="upper right", framealpha=0.7)
+
+            ax.set_ylabel(f"{ds_name}{unit_str}", fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.3)
+
+            # Category label on right side
+            ax.text(
+                1.01, 0.5, cat_name, transform=ax.transAxes,
+                fontsize=7, color=color, alpha=0.7, va="center", rotation=270,
+            )
+
+        # X-axis label on bottom plot only
+        if n_plots > 0:
+            axes[-1, 0].set_xlabel(x_label, fontsize=9)
+
+        self.telemetry_figure.suptitle(
+            f"HDF5 Telemetry — {os.path.basename(getattr(self, 'file_path', '') or '')}",
+            fontsize=10, y=1.0,
+        )
+        self.telemetry_figure.tight_layout()
+        self.telemetry_canvas.draw()
+        self._log_message(f"Plotted {n_plots} telemetry timeseries ({x_label})")
+
+    def _save_telemetry_plot(self):
+        """Save the current telemetry plot to a file."""
+        if not self.telemetry_timeseries:
+            self._log_message("No telemetry plot to save.")
+            return
+
+        try:
+            base_name = os.path.splitext(
+                os.path.basename(getattr(self, "file_path", "") or "telemetry")
+            )[0]
+            default_name = f"{base_name}_telemetry.png"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Telemetry Plot", default_name,
+                "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+            )
+            if file_path:
+                ext = os.path.splitext(file_path)[1].lower()
+                fmt = "pdf" if ext == ".pdf" else ("svg" if ext == ".svg" else "png")
+                self.telemetry_figure.savefig(
+                    file_path, format=fmt, dpi=300, bbox_inches="tight"
+                )
+                self._log_message(f"Telemetry plot saved: {file_path}")
+        except Exception as e:
+            self._log_message(f"Error saving telemetry plot: {e}")
+
+    def _export_all_telemetry_plots(self):
+        """Export individual plots for each timeseries + one combined overview."""
+        if not self.telemetry_timeseries:
+            self._log_message("No telemetry data loaded. Click 'Load Metadata' first.")
+            return
+
+        import numpy as np
+
+        # Ask for output directory
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory for Telemetry Plots"
+        )
+        if not out_dir:
+            return
+
+        base_name = os.path.splitext(
+            os.path.basename(getattr(self, "file_path", "") or "telemetry")
+        )[0]
+
+        saved_count = 0
+
+        try:
+            # Get all available series (ignore category filters for full export)
+            all_known = set()
+            for ds_list in self.TELEMETRY_CATEGORIES.values():
+                all_known.update(ds_list)
+
+            all_series = []
+            for cat_name, ds_names in self.TELEMETRY_CATEGORIES.items():
+                for ds_name in ds_names:
+                    if ds_name in self.telemetry_timeseries:
+                        all_series.append((cat_name, ds_name))
+            for ds_name in sorted(self.telemetry_timeseries.keys()):
+                if ds_name not in all_known:
+                    all_series.append(("Other", ds_name))
+
+            if not all_series:
+                self._log_message("No timeseries data to export.")
+                return
+
+            # 1. Individual plots for each timeseries
+            for cat_name, ds_name in all_series:
+                fig, ax = Figure(figsize=(10, 3), dpi=150), None
+                ax = fig.add_subplot(111)
+                data = self.telemetry_timeseries[ds_name]
+                x, x_label = self._build_telemetry_xaxis(len(data))
+
+                color = self.TELEMETRY_CAT_COLORS.get(cat_name, "#666666")
+                ax.plot(x, data, color=color, linewidth=0.8, alpha=0.9)
+
+                unit = self.TIMESERIES_UNITS.get(ds_name, "")
+                unit_str = f" [{unit}]" if unit else ""
+                ax.set_ylabel(f"{ds_name}{unit_str}", fontsize=9)
+                ax.set_xlabel(x_label, fontsize=9)
+                ax.set_title(f"{ds_name} ({cat_name})", fontsize=10)
+                ax.grid(True, alpha=0.3)
+                fig.tight_layout()
+
+                out_path = os.path.join(out_dir, f"{base_name}_{ds_name}.png")
+                fig.savefig(out_path, format="png", dpi=150, bbox_inches="tight")
+                fig.clear()
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+                saved_count += 1
+
+            # 2. Combined overview plot with all timeseries
+            n_plots = len(all_series)
+            height_per = 1.8
+            fig_h = max(6.0, n_plots * height_per)
+            fig_combined = Figure(figsize=(12, fig_h), dpi=150)
+            axes = fig_combined.subplots(n_plots, 1, sharex=True, squeeze=False)
+
+            x_label = "Frame Number"
+            for idx, (cat_name, ds_name) in enumerate(all_series):
+                ax = axes[idx, 0]
+                data = self.telemetry_timeseries[ds_name]
+                x, x_label = self._build_telemetry_xaxis(len(data))
+
+                color = self.TELEMETRY_CAT_COLORS.get(cat_name, "#666666")
+                ax.plot(x, data, color=color, linewidth=0.8, alpha=0.9)
+
+                unit = self.TIMESERIES_UNITS.get(ds_name, "")
+                unit_str = f" [{unit}]" if unit else ""
+                ax.set_ylabel(f"{ds_name}{unit_str}", fontsize=7)
+                ax.tick_params(labelsize=6)
+                ax.grid(True, alpha=0.3)
+                ax.text(
+                    1.01, 0.5, cat_name, transform=ax.transAxes,
+                    fontsize=6, color=color, alpha=0.7, va="center", rotation=270,
+                )
+
+            if n_plots > 0:
+                axes[-1, 0].set_xlabel(x_label, fontsize=9)
+            fig_combined.suptitle(
+                f"HDF5 Telemetry Overview — {base_name}", fontsize=11, y=1.0,
+            )
+            fig_combined.tight_layout()
+
+            combined_path = os.path.join(out_dir, f"{base_name}_telemetry_all.png")
+            fig_combined.savefig(
+                combined_path, format="png", dpi=150, bbox_inches="tight"
+            )
+            fig_combined.clear()
+            import matplotlib.pyplot as plt
+            plt.close(fig_combined)
+            saved_count += 1
+
+            self._log_message(
+                f"Exported {saved_count} telemetry plots to: {out_dir}"
+            )
+
+        except Exception as e:
+            self._log_message(f"Error exporting telemetry plots: {e}")
+            import traceback
+            self._log_message(traceback.format_exc())
 
     def debug_current_file_structure(self):
         """Debug the structure of the currently loaded file."""
@@ -2105,6 +3003,7 @@ class HDF5AnalysisWidget(QWidget):
         self.btn_validate_timing.clicked.connect(self.validate_hdf5_timing)
 
         # ===== SIMPLIFIED PLOTTING OPERATIONS =====
+        self.plot_type_combo.currentIndexChanged.connect(self._on_plot_type_changed)
         self.btn_plot.clicked.connect(self.generate_plot)
         self.btn_save_plot.clicked.connect(self.save_current_plot)
         self.btn_save_all_plots.clicked.connect(self.save_all_plots)
@@ -2113,6 +3012,9 @@ class HDF5AnalysisWidget(QWidget):
         )  # NEW CONSOLIDATED METHOD
         self.btn_save_with_metadata.clicked.connect(self.save_results_with_metadata)
         self.btn_apply_time_range.clicked.connect(self.apply_time_range)
+
+        # Amplitude mode toggle
+        self.show_real_amplitude.toggled.connect(self.generate_plot)
 
         # Y-Axis scaling controls
         self.auto_scale_y.toggled.connect(self._on_auto_scale_toggled)
@@ -2135,6 +3037,7 @@ class HDF5AnalysisWidget(QWidget):
         self.threshold_params_stack.currentChanged.connect(
             self._on_threshold_tab_changed
         )
+        self.chk_6well.toggled.connect(self._on_6well_toggled)
         self.chk_12well.toggled.connect(self._on_12well_toggled)
 
     # ===================================================================
@@ -2171,6 +3074,7 @@ class HDF5AnalysisWidget(QWidget):
                 return
 
         self.file_path = file_path
+        self.recording_start_datetime = _parse_recording_start_datetime(file_path)
         basename = os.path.basename(file_path)
 
         # === AUTOMATISCHE LEGACY-DETECTION BEIM LADEN ===
@@ -2263,12 +3167,16 @@ class HDF5AnalysisWidget(QWidget):
         self.update_end_time()
         self.check_hdf5_structure()
 
+        # Update frame viewer file selector
+        self._update_viewer_file_combo()
+
     def _load_single_avi(self, file_path: str):
         """Load a single AVI file (only first frame for ROI detection)."""
         try:
             from ._avi_reader import AVIVideoReader
 
             self.file_path = file_path
+            self.recording_start_datetime = _parse_recording_start_datetime(file_path)
             basename = os.path.basename(file_path)
 
             self._log_message(f"Loading AVI file: {basename}")
@@ -2340,6 +3248,9 @@ class HDF5AnalysisWidget(QWidget):
 
             # Update end time for analysis
             self.update_end_time()
+
+            # Update frame viewer file selector
+            self._update_viewer_file_combo()
 
         except ImportError:
             self._log_message(
@@ -2487,6 +3398,7 @@ class HDF5AnalysisWidget(QWidget):
 
             # Store file path (use first file as reference)
             self.file_path = file_paths[0]
+            self.recording_start_datetime = _parse_recording_start_datetime(file_paths[0])
 
             # Update UI - simplified message (full metadata calculated during analysis)
             self.lbl_file_info.setText(
@@ -2599,6 +3511,8 @@ class HDF5AnalysisWidget(QWidget):
             self._log_message("Calling _load_avi_batch()...")
             self._load_avi_batch(avi_paths)
             self._log_message("_load_avi_batch() completed")
+            # Update frame viewer file selector
+            self._update_viewer_file_combo()
             return
 
         # Otherwise, use HDF5 reader for directory
@@ -2626,6 +3540,9 @@ class HDF5AnalysisWidget(QWidget):
                 self.viewer.add_image(data, name=name, **kwargs)
             elif layer_type == "labels":
                 self.viewer.add_labels(data, name=name, **kwargs)
+
+        # Update frame viewer file selector for directory
+        self._update_viewer_file_combo()
 
     def update_end_time(self):
         """Enhanced update_end_time method with dual structure support."""
@@ -2695,6 +3612,11 @@ class HDF5AnalysisWidget(QWidget):
                 self.plot_end_time.setValue(total_duration_minutes)
                 self.plot_start_time.setRange(0.0, total_duration_minutes)
                 self.plot_start_time.setValue(0.0)
+
+                # Initialize baseline duration spinbox to recording length at load time
+                if hasattr(self, "baseline_duration_minutes") and total_duration_minutes > 0:
+                    self.baseline_duration_minutes.setMaximum(total_duration_minutes)
+                    self.baseline_duration_minutes.setValue(total_duration_minutes)
 
                 self._log_message(
                     f"File contains {frame_count} frames, total duration: {total_duration_minutes:.1f} min"
@@ -2976,8 +3898,53 @@ class HDF5AnalysisWidget(QWidget):
             self.lbl_file_info.setText(result_msg)
             self._log_message(result_msg)
 
+            # Persist the parameters that led to a successful detection
+            self._save_roi_settings()
+
+            # Populate ROI selection checkboxes
+            if dataset_type == "MAIN":
+                self._populate_roi_checkboxes(len(masks))
+
         except Exception as e:
             self._log_message(f"ERROR in ROI detection: {e}")
+
+    # ------------------------------------------------------------------
+    # ROI detection settings persistence (QSettings → Windows registry)
+    # ------------------------------------------------------------------
+    _ROI_SETTINGS_ORG = "napari-hdf5-activity"
+    _ROI_SETTINGS_APP = "HDF5AnalysisWidget"
+
+    def _save_roi_settings(self):
+        """Persist current ROI detection parameters via QSettings."""
+        s = QSettings(self._ROI_SETTINGS_ORG, self._ROI_SETTINGS_APP)
+        s.setValue("roi/min_radius", self.min_radius.value())
+        s.setValue("roi/max_radius", self.max_radius.value())
+        s.setValue("roi/dp_param", self.dp_param.value())
+        s.setValue("roi/min_dist", self.min_dist.value())
+        s.setValue("roi/param1", self.param1.value())
+        s.setValue("roi/param2", self.param2.value())
+        s.setValue("roi/roi_scale", self.roi_scale.value())
+        preset = "6well" if self.chk_6well.isChecked() else (
+            "12well" if self.chk_12well.isChecked() else "none"
+        )
+        s.setValue("roi/preset", preset)
+        s.sync()
+
+    def _load_roi_settings(self):
+        """Restore ROI detection parameters saved by a previous session."""
+        s = QSettings(self._ROI_SETTINGS_ORG, self._ROI_SETTINGS_APP)
+        if not s.contains("roi/min_radius"):
+            return  # No saved settings yet → keep widget defaults
+        self.min_radius.setValue(int(s.value("roi/min_radius", 100)))
+        self.max_radius.setValue(int(s.value("roi/max_radius", 145)))
+        self.dp_param.setValue(float(s.value("roi/dp_param", 1.0)))
+        self.min_dist.setValue(int(s.value("roi/min_dist", 300)))
+        self.param1.setValue(int(s.value("roi/param1", 30)))
+        self.param2.setValue(int(s.value("roi/param2", 60)))
+        self.roi_scale.setValue(float(s.value("roi/roi_scale", 1.0)))
+        preset = s.value("roi/preset", "6well")
+        self.chk_6well.setChecked(preset == "6well")
+        self.chk_12well.setChecked(preset == "12well")
 
     def reset_for_new_analysis(self):
         """Reset all analysis data and UI state for a new analysis."""
@@ -3941,11 +4908,23 @@ class HDF5AnalysisWidget(QWidget):
             self._log_message(f"ERROR: {error_msg}")
             return
 
+        # Stop any previously running worker before starting new one
+        if hasattr(self, "current_worker") and self.current_worker is not None:
+            self._cancel_requested = True
+            try:
+                self.current_worker.returned.disconnect()
+                self.current_worker.errored.disconnect()
+                self.current_worker.finished.disconnect()
+            except Exception:
+                pass
+            self.current_worker = None
+
         # UI state management
         self._cancel_requested = False
         self.analysis_start_time = time.time()
         self.btn_analyze.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.btn_plot.setEnabled(False)  # Disable until analysis fully completes
         self.progress_bar.setValue(0)
         self.status_label.setText("Initializing analysis...")
         self.performance_timer.start()
@@ -4458,7 +5437,13 @@ class HDF5AnalysisWidget(QWidget):
                 masks_to_use = getattr(self, "main_masks", [])
             else:
                 file_to_process = self.file_path
-                masks_to_use = self.masks
+                masks_to_use = self._get_active_masks()
+
+            # Log excluded ROIs
+            excluded = self._get_excluded_roi_indices()
+            if excluded:
+                excluded_names = [f"ROI {i+1}" for i in excluded]
+                self._log_message(f"Excluding {len(excluded)} ROI(s): {', '.join(excluded_names)}")
 
             if not file_to_process or not masks_to_use:
                 raise RuntimeError("No file or masks available for processing")
@@ -4491,7 +5476,19 @@ class HDF5AnalysisWidget(QWidget):
                     self.num_processes.value(),
                 )
 
+            # Remap ROI indices to preserve original numbering when ROIs are excluded
+            roi_mapping = self._get_roi_index_mapping()
+            if any(k != v for k, v in roi_mapping.items()):
+                merged_results = {roi_mapping.get(k, k): v for k, v in merged_results.items()}
+                self._log_message(f"ROI index mapping applied: {roi_mapping}")
+
+            # Store raw data as fallback (will be overwritten with normalized
+            # data in _analysis_finished if the calc step succeeds)
             self.merged_results = merged_results
+
+            # Signal that reader is done but calc is still running
+            self.status_updated.emit("Computing thresholds & movement detection...")
+            self.progress_updated.emit(95)  # Not 100% yet - calc step still pending
 
             # Apply timing correction
             merged_results, _ = self._apply_automatic_timing_fix(merged_results)
@@ -4582,17 +5579,41 @@ class HDF5AnalysisWidget(QWidget):
             # Capture start time immediately before it can be cleared by _analysis_done()
             start_time = self.analysis_start_time
 
-            # Store results from _calc.py - USE CORRECT KEY
-            self.merged_results = result.get(
-                "processed_data", {}
-            )  # Changed from 'detrended_data'
+            # Store normalized [0,1] data (default for display)
+            self.merged_results = result.get("processed_data", {})
             self.roi_baseline_means = result.get("baseline_means", {})
             self.roi_upper_thresholds = result.get("upper_thresholds", {})
             self.roi_lower_thresholds = result.get("lower_thresholds", {})
+            # Store raw amplitude data (pre-MinMax, for real amplitude view)
+            self.merged_results_raw = result.get("processed_data_raw", {})
+            self.roi_baseline_means_raw = result.get("baseline_means_raw", {})
+            self.roi_upper_thresholds_raw = result.get("upper_thresholds_raw", {})
+            self.roi_lower_thresholds_raw = result.get("lower_thresholds_raw", {})
             self.roi_statistics = result.get("roi_statistics", {})
             self.movement_data = result.get("movement_data", {})
             self.fraction_data = result.get("fraction_data", {})
             self.sleep_data = result.get("sleep_data", {})
+            # Cache LED data from HDF5 for lighting overlay in plots
+            self.led_data = self._extract_led_data_from_hdf5() or {}
+            # Pixel count per ROI for sum-mode amplitude display (sum = mean × n_pixels)
+            masks = getattr(self, "masks", [])
+            self.roi_pixel_counts = {
+                i + 1: int(np.sum(m > 0)) for i, m in enumerate(masks)
+            }
+            # Normalization factor: 255 for uint8, 65535 for uint16 cameras
+            # Used to convert back to raw pixel units (MATLAB-equivalent values)
+            if DUAL_STRUCTURE_AVAILABLE and getattr(self, "file_path", None):
+                self.frame_norm_factor = get_frame_norm_factor(self.file_path)
+            else:
+                self.frame_norm_factor = 1.0
+            self._log_message(f"  Frame normalization factor: {self.frame_norm_factor:.0f} (bit depth)")
+
+            # Log inactive ROIs (MinMax normalization is now applied in _calc.py)
+            roi_active = result.get("roi_active", {})
+            inactive_rois = [roi for roi, active in roi_active.items() if not active]
+            if inactive_rois:
+                self._log_message(f"⚠️ {len(inactive_rois)} inactive ROI(s) detected (low amplitude): {inactive_rois}")
+            self.roi_active = roi_active
 
             # Get ROI colors from calc results
             self.roi_colors = result.get("roi_colors", {})
@@ -4600,8 +5621,8 @@ class HDF5AnalysisWidget(QWidget):
             # Fallback if no ROI colors provided
             if not self.roi_colors and self.merged_results:
                 self.roi_colors = {
-                    roi: f"C{i}"
-                    for i, roi in enumerate(sorted(self.merged_results.keys()))
+                    roi: f"C{(roi - 1) % 10}"
+                    for roi in sorted(self.merged_results.keys())
                 }
 
             self._log_message(f"✅ ROI colors set: {self.roi_colors}")
@@ -4612,7 +5633,15 @@ class HDF5AnalysisWidget(QWidget):
                     self.fraction_data, self.quiescence_threshold.value()
                 )
 
-            # Calculate band widths for plotting compatibility
+            # Calculate sleep quality metrics (MATLAB-compatible hourly analysis)
+            if self.sleep_data:
+                from ._calc import calculate_sleep_quality_hourly
+                self.sleep_quality_data = calculate_sleep_quality_hourly(
+                    self.sleep_data
+                )
+                self._log_message("✅ Sleep quality metrics calculated (min/h, transitions/h, bout length/h)")
+
+            # Calculate band widths for plotting compatibility (normalized)
             self.roi_band_widths = {}
             for roi in self.roi_baseline_means:
                 if (
@@ -4622,6 +5651,16 @@ class HDF5AnalysisWidget(QWidget):
                     upper = self.roi_upper_thresholds[roi]
                     lower = self.roi_lower_thresholds[roi]
                     self.roi_band_widths[roi] = (upper - lower) / 2
+            # Also for raw amplitude mode
+            self.roi_band_widths_raw = {}
+            for roi in self.roi_baseline_means_raw:
+                if (
+                    roi in self.roi_upper_thresholds_raw
+                    and roi in self.roi_lower_thresholds_raw
+                ):
+                    upper = self.roi_upper_thresholds_raw[roi]
+                    lower = self.roi_lower_thresholds_raw[roi]
+                    self.roi_band_widths_raw[roi] = (upper - lower) / 2
 
             # Update plot time range based on actual data duration
             if self.merged_results:
@@ -4644,7 +5683,28 @@ class HDF5AnalysisWidget(QWidget):
                     self.plot_start_time.setRange(0.0, max_time_minutes)
                     self.plot_start_time.setValue(0.0)
                     self._log_message(
-                        f"📊 Plot time range updated: 0.0 - {max_time_minutes:.1f} minutes ({max_time_minutes/60:.2f} hours)"
+                        f"Plot time range updated: 0.0 - {max_time_minutes:.1f} minutes ({max_time_minutes/60:.2f} hours)"
+                    )
+
+                # Cap baseline duration spinbox to recording length
+                if hasattr(self, "baseline_duration_minutes") and max_time_minutes > 0:
+                    current_val = self.baseline_duration_minutes.value()
+                    self.baseline_duration_minutes.setMaximum(max_time_minutes)
+                    if current_val > max_time_minutes:
+                        self.baseline_duration_minutes.setValue(max_time_minutes)
+                        self._log_message(
+                            f"⚠️ Baseline duration capped to recording length: {max_time_minutes:.1f} min"
+                        )
+
+                # Update Extended Analysis time range to match recording duration
+                max_time_hours = max_time_seconds / 3600.0
+                if hasattr(self, "cycle_end_time") and max_time_hours > 0:
+                    self.cycle_end_time.setRange(0.0, max_time_hours)
+                    self.cycle_end_time.setValue(max_time_hours)
+                    self.cycle_start_time.setRange(0.0, max_time_hours)
+                    self.cycle_start_time.setValue(0.0)
+                    self._log_message(
+                        f"Extended Analysis time range updated: 0.0 - {max_time_hours:.1f} hours"
                     )
 
             # Calculate performance metrics using _calc.py
@@ -4683,15 +5743,29 @@ class HDF5AnalysisWidget(QWidget):
                     f"Timing correction: {timing_info.get('needs_hdf5_correction', False)}"
                 )
 
+            # Re-enable Generate Plot button and set progress to 100%
+            self.btn_plot.setEnabled(True)
+            self.progress_bar.setValue(100)
+
+            # Auto-generate plot so user doesn't have to click manually
+            self.generate_plot()
+
         except Exception as e:
             self._log_message(f"Error in analysis completion: {str(e)}")
             import traceback
 
             self._log_message(f"Full traceback: {traceback.format_exc()}")
+        finally:
+            # Always re-enable Generate Plot button
+            self.btn_plot.setEnabled(True)
+            self.progress_bar.setValue(100)
 
     def _analysis_errored(self, exc):
         """Handle analysis errors."""
         self.performance_timer.stop()
+        import traceback
+        self._log_message(f"ANALYSIS ERROR: {exc}")
+        self._log_message(f"Traceback: {''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}")
         if "canceled" in str(exc).lower():
             self.status_label.setText("Analysis canceled by user.")
             self._log_message("Analysis CANCELED by user")
@@ -4702,6 +5776,7 @@ class HDF5AnalysisWidget(QWidget):
         # Reset UI state
         self.btn_analyze.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.btn_plot.setEnabled(True)  # Re-enable even on error
         self.progress_bar.setValue(0)
 
     def _analysis_done(self):
@@ -4773,6 +5848,20 @@ class HDF5AnalysisWidget(QWidget):
     # PLOTTING METHODS - NOW USING _plot.py MODULE
     # ===================================================================
 
+    def _on_plot_bin_changed(self):
+        """Refresh plot when plot bin size changes."""
+        if hasattr(self, "merged_results") and self.merged_results:
+            self.generate_plot()
+
+    def _on_plot_type_changed(self):
+        """Handle plot type dropdown change - show/hide sub-selectors."""
+        plot_type = self.plot_type_combo.currentText()
+        # Show sleep quality metric selector only for Sleep Quality
+        if hasattr(self, "sleep_quality_metric_combo"):
+            self.sleep_quality_metric_combo.setVisible(plot_type == "Sleep Quality")
+        # Generate plot
+        self.generate_plot()
+
     def generate_plot(self):
         """Generate plot using PlotGenerator."""
         if not hasattr(self, "merged_results") or not self.merged_results:
@@ -4783,7 +5872,7 @@ class HDF5AnalysisWidget(QWidget):
         if not hasattr(self, "roi_colors") or not self.roi_colors:
             self._log_message("No ROI colors from analysis, creating fallback")
             self.roi_colors = {
-                roi: f"C{i}" for i, roi in enumerate(sorted(self.merged_results.keys()))
+                roi: f"C{(roi - 1) % 10}" for roi in sorted(self.merged_results.keys())
             }
 
         # Force clear the canvas to prevent artifacts
@@ -4815,30 +5904,117 @@ class HDF5AnalysisWidget(QWidget):
         plot_type = self.plot_type_combo.currentText()
 
         try:
+            # Check amplitude mode toggle
+            use_real_amplitude = (
+                hasattr(self, "show_real_amplitude")
+                and self.show_real_amplitude.isChecked()
+            )
+
+            # ZT mode and lighting overlay settings
+            zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+            show_lighting = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+            led_data_for_plot = getattr(self, "led_data", None) if show_lighting else None
+
             # Get data based on plot type
             if plot_type == "Raw Intensity Changes":
-                data_dict = self.merged_results
+                pixel_sum_scales = {}  # {roi: scale_factor} — used to scale thresholds too
+                if use_real_amplitude and getattr(self, "merged_results_raw", {}):
+                    divide_by_pixels = (
+                        hasattr(self, "chk_divide_by_pixels")
+                        and self.chk_divide_by_pixels.isChecked()
+                    )
+                    pixel_counts = getattr(self, "roi_pixel_counts", {})
+                    norm_factor = getattr(self, "frame_norm_factor", 1.0)
+                    if not divide_by_pixels and pixel_counts:
+                        # MATLAB-equivalent pixel sum:
+                        # mean × n_pixels × norm_factor = Σ|ΔPixel_raw| per ROI
+                        pixel_sum_scales = {
+                            roi: pixel_counts.get(roi, 1) * norm_factor
+                            for roi in self.merged_results_raw
+                        }
+                        data_dict = {
+                            roi: [(t, v * pixel_sum_scales[roi]) for t, v in data]
+                            for roi, data in self.merged_results_raw.items()
+                        }
+                        self._log_message(f"Plot mode: Pixel Sum MATLAB (×{norm_factor:.0f})")
+                    else:
+                        # Per-pixel mean mode: sum(|Δpixel|) ÷ n_pixels
+                        data_dict = self.merged_results_raw
+                        self._log_message("Plot mode: Per-pixel mean")
+                else:
+                    data_dict = self.merged_results
+                    self._log_message("Plot mode: Normalized [0-1]")
+
                 from ._plot import create_hysteresis_kwargs
 
-                kwargs = create_hysteresis_kwargs(widget_instance=self)
+                kwargs = create_hysteresis_kwargs(
+                    widget_instance=self, use_real_amplitude=use_real_amplitude
+                )
                 # Remove merged_results from kwargs to avoid duplicate argument
                 kwargs.pop("merged_results", None)
 
+                # Scale threshold lines to match pixel sum mode
+                if pixel_sum_scales:
+                    for thresh_key in ("roi_baseline_means", "roi_upper_thresholds",
+                                       "roi_lower_thresholds", "roi_band_widths"):
+                        if thresh_key in kwargs and kwargs[thresh_key]:
+                            kwargs[thresh_key] = {
+                                roi: val * pixel_sum_scales.get(roi, 1.0)
+                                for roi, val in kwargs[thresh_key].items()
+                            }
+
+                # ZT mode and lighting overlay
+                kwargs["zt_mode"] = zt_mode
+                kwargs["led_data"] = led_data_for_plot
+
             elif plot_type == "Movement":
                 data_dict = getattr(self, "movement_data", {})
-                kwargs = {}
+                kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
 
             elif plot_type == "Fraction Movement":
-                data_dict = getattr(self, "fraction_data", {})
-                kwargs = {}
+                plot_bin_value = getattr(self, "plot_bin_minutes", None)
+                bin_minutes = plot_bin_value.value() if plot_bin_value else 0
+                data_dict, _, _ = self._get_rebinned_behavioral_data(bin_minutes)
+                if bin_minutes > 0:
+                    original_bin = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+                    new_bin_seconds = bin_minutes * 60
+                    if new_bin_seconds > original_bin:
+                        self._log_message(f"Fraction Movement re-binned: {original_bin}s → {new_bin_seconds}s")
+                kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
 
             elif plot_type == "Quiescence":
-                data_dict = getattr(self, "quiescence_data", {})
-                kwargs = {}
+                plot_bin_value = getattr(self, "plot_bin_minutes", None)
+                bin_minutes = plot_bin_value.value() if plot_bin_value else 0
+                _, data_dict, _ = self._get_rebinned_behavioral_data(bin_minutes)
+                if bin_minutes > 0:
+                    original_bin = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+                    new_bin_seconds = bin_minutes * 60
+                    if new_bin_seconds > original_bin:
+                        self._log_message(f"Quiescence re-derived from {new_bin_seconds}s rebinned fraction data")
+                kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
 
             elif plot_type == "Sleep":
-                data_dict = getattr(self, "sleep_data", {})
-                kwargs = {}
+                plot_bin_value = getattr(self, "plot_bin_minutes", None)
+                bin_minutes = plot_bin_value.value() if plot_bin_value else 0
+                _, _, data_dict = self._get_rebinned_behavioral_data(bin_minutes)
+                if bin_minutes > 0:
+                    original_bin = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+                    new_bin_seconds = bin_minutes * 60
+                    if new_bin_seconds > original_bin:
+                        self._log_message(f"Sleep re-derived from {new_bin_seconds}s rebinned fraction data")
+                kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
+
+            elif plot_type == "Sleep Quality":
+                data_dict = getattr(self, "sleep_quality_data", {})
+                # Get metric from sub-selector if available
+                sleep_metric = "sleep_minutes"
+                if hasattr(self, "sleep_quality_metric_combo"):
+                    metric_text = self.sleep_quality_metric_combo.currentText()
+                    if "Transitions" in metric_text:
+                        sleep_metric = "transitions"
+                    elif "Bout" in metric_text:
+                        sleep_metric = "bout_length"
+                kwargs = {"sleep_metric": sleep_metric}
 
             elif plot_type == "Lighting Conditions (dark IR)":
                 data_dict = getattr(self, "fraction_data", {})
@@ -5013,10 +6189,22 @@ class HDF5AnalysisWidget(QWidget):
 
     def save_current_plot(self):
         """Save the current plot using _plot.py module."""
+        # Build a meaningful default filename
+        try:
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+        except Exception:
+            base = "analysis"
+        plot_type = (
+            self.plot_type_combo.currentText().replace(" ", "_").lower()
+            if hasattr(self, "plot_type_combo")
+            else "plot"
+        )
+        default_name = f"{base}_{plot_type}.png"
+
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Plot",
-            "",
+            default_name,
             "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
         )
 
@@ -5042,9 +6230,27 @@ class HDF5AnalysisWidget(QWidget):
             return
 
         try:
+            # Extract current display settings so saved plots match what is shown
+            zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+            show_lighting = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+            led_data_for_plot = getattr(self, "led_data", None) if show_lighting else None
+
+            # Apply pixel-sum mode to raw intensity data if the toggle is off (= sum mode)
+            divide_by_pixels = hasattr(self, "chk_divide_by_pixels") and self.chk_divide_by_pixels.isChecked()
+            pixel_counts = getattr(self, "roi_pixel_counts", {})
+            norm_factor = getattr(self, "frame_norm_factor", 1.0)
+            raw_results = getattr(self, "merged_results_raw", {})
+            if not divide_by_pixels and pixel_counts and raw_results:
+                merged_for_plot = {
+                    roi: [(t, v * pixel_counts.get(roi, 1) * norm_factor) for t, v in data]
+                    for roi, data in raw_results.items()
+                }
+            else:
+                merged_for_plot = getattr(self, "merged_results", {})
+
             # Prepare all data sets
             data_sets = {
-                "merged_results": getattr(self, "merged_results", {}),
+                "merged_results": merged_for_plot,
                 "movement_data": getattr(self, "movement_data", {}),
                 "fraction_data": getattr(self, "fraction_data", {}),
                 "quiescence_data": getattr(self, "quiescence_data", {}),
@@ -5065,6 +6271,8 @@ class HDF5AnalysisWidget(QWidget):
                 plot_config,
                 directory,
                 timestamp,
+                zt_mode=zt_mode,
+                led_data=led_data_for_plot,
             )
 
             if saved_files:
@@ -5933,7 +7141,11 @@ class HDF5AnalysisWidget(QWidget):
                     summary_data.append(row_data)
 
                 summary_df = pd.DataFrame(summary_data)
-                summary_df.to_excel(writer, sheet_name="Summary", index=False)
+                summary_df.to_excel(writer, sheet_name="Summary", index=False, startrow=1)
+                writer.sheets["Summary"].cell(row=1, column=1).value = (
+                    "Summary of ROI statistics: movement events, sleep bins, and detection "
+                    "thresholds per ROI. One row per ROI."
+                )
 
                 # === SHEET 2: RAW INTENSITY ===
                 if hasattr(self, "merged_results") and self.merged_results:
@@ -5944,7 +7156,12 @@ class HDF5AnalysisWidget(QWidget):
                         convert_to_minutes=True,
                     )
                     intensity_df.to_excel(
-                        writer, sheet_name="Raw_Intensity", index=False
+                        writer, sheet_name="Raw_Intensity", index=False, startrow=1
+                    )
+                    writer.sheets["Raw_Intensity"].cell(row=1, column=1).value = (
+                        "MinMax-normalized [0–1] raw intensity per ROI (per-pixel mean, "
+                        "after MinMax scaling). See 'Real_Amplitude_MATLAB' sheet for "
+                        "MATLAB-equivalent pixel sum values. Time column in minutes."
                     )
 
                 # === SHEET 3: MOVEMENT ===
@@ -5955,7 +7172,12 @@ class HDF5AnalysisWidget(QWidget):
                         "Movement",
                         convert_to_minutes=True,
                     )
-                    movement_df.to_excel(writer, sheet_name="Movement", index=False)
+                    movement_df.to_excel(writer, sheet_name="Movement", index=False, startrow=1)
+                    writer.sheets["Movement"].cell(row=1, column=1).value = (
+                        "Binary movement detection per ROI (1=moving, 0=stationary). "
+                        "Based on hysteresis threshold crossing of raw intensity signal. "
+                        "Time column in minutes."
+                    )
 
                 # === SHEET 4: FRACTION MOVEMENT ===
                 if hasattr(self, "fraction_data") and self.fraction_data:
@@ -5966,7 +7188,12 @@ class HDF5AnalysisWidget(QWidget):
                         convert_to_minutes=True,
                     )
                     fraction_df.to_excel(
-                        writer, sheet_name="Fraction_Movement", index=False
+                        writer, sheet_name="Fraction_Movement", index=False, startrow=1
+                    )
+                    writer.sheets["Fraction_Movement"].cell(row=1, column=1).value = (
+                        "Fraction of time bins with movement per ROI (0–1 scale). "
+                        "Derived from binary movement data, binned over the analysis bin size. "
+                        "Time column in minutes."
                     )
 
                 # === SHEET 5: SLEEP ===
@@ -5974,7 +7201,12 @@ class HDF5AnalysisWidget(QWidget):
                     sleep_df = self._create_time_series_dataframe(
                         self.sleep_data, sorted_rois, "Sleep", convert_to_minutes=True
                     )
-                    sleep_df.to_excel(writer, sheet_name="Sleep", index=False)
+                    sleep_df.to_excel(writer, sheet_name="Sleep", index=False, startrow=1)
+                    writer.sheets["Sleep"].cell(row=1, column=1).value = (
+                        "Binary sleep state per ROI (1=sleeping, 0=not sleeping). "
+                        "Sleep = continuous quiescence exceeding the minimum sleep duration threshold. "
+                        "Time column in minutes."
+                    )
 
                 # === SHEET 6: LIGHTING CONDITIONS ===
                 if hasattr(self, "fraction_data") and self.fraction_data:
@@ -5995,14 +7227,41 @@ class HDF5AnalysisWidget(QWidget):
                                 convert_to_minutes=True,
                             )
                             lighting_df.to_excel(
-                                writer, sheet_name="Lighting_Conditions", index=False
+                                writer, sheet_name="Lighting_Conditions", index=False, startrow=1
+                            )
+                            writer.sheets["Lighting_Conditions"].cell(row=1, column=1).value = (
+                                "Fraction movement binned in 30-minute intervals per ROI. "
+                                "Suitable for circadian rhythm and lighting condition analysis. "
+                                "Time column in minutes."
                             )
                     except Exception as e:
                         self._log_message(
                             f"Warning: Could not create lighting conditions sheet: {e}"
                         )
 
-                # === SHEET 7: PARAMETERS ===
+                # === SHEET 7: REAL AMPLITUDE (MATLAB-EQUIVALENT) ===
+                if hasattr(self, "merged_results_raw") and self.merged_results_raw:
+                    _norm_factor = getattr(self, "frame_norm_factor", 1.0)
+                    _pixel_counts = getattr(self, "roi_pixel_counts", {})
+                    _dtype_label = "uint8" if _norm_factor == 255.0 else "uint16"
+                    matlab_data = {}
+                    for roi, data in self.merged_results_raw.items():
+                        _scale = _pixel_counts.get(roi, 1) * _norm_factor
+                        matlab_data[roi] = [(t, v * _scale) for t, v in data]
+                    matlab_df = self._create_time_series_dataframe(
+                        matlab_data, sorted_rois, "Amplitude_raw", convert_to_minutes=True
+                    )
+                    matlab_df.to_excel(
+                        writer, sheet_name="Real_Amplitude_MATLAB", index=False, startrow=1
+                    )
+                    writer.sheets["Real_Amplitude_MATLAB"].cell(row=1, column=1).value = (
+                        f"MATLAB-equivalent pixel sum amplitude: per-pixel-mean x n_pixels x "
+                        f"norm_factor (norm_factor={_norm_factor:.0f}, {_dtype_label}). "
+                        "Units: sum of absolute pixel differences per frame per ROI "
+                        "(equivalent to MATLAB diffs.sum()). Time column in minutes."
+                    )
+
+                # === SHEET 8: PARAMETERS ===
                 # Determine source type (HDF5 or AVI)
                 is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
                 source_label = "AVI Batch" if is_avi else "HDF5"
@@ -6117,8 +7376,33 @@ class HDF5AnalysisWidget(QWidget):
                         ]
                     )
 
+                # Add normalization / pixel-count parameters
+                _p_norm = getattr(self, "frame_norm_factor", 1.0)
+                _p_pixels = getattr(self, "roi_pixel_counts", {})
+                _p_pixel_str = (
+                    "; ".join(f"{roi}: {px}" for roi, px in sorted(_p_pixels.items()))
+                    if _p_pixels else "N/A"
+                )
+                params_data["Parameter"].extend(
+                    ["Frame Norm Factor", "ROI Pixel Counts"]
+                )
+                params_data["Value"].extend(
+                    [f"{_p_norm:.0f}", _p_pixel_str]
+                )
+                params_data["Description"].extend(
+                    [
+                        "Pixel intensity normalization factor (255 for uint8 / 65535 for uint16). "
+                        "Used to compute MATLAB-equivalent pixel sum in 'Real_Amplitude_MATLAB' sheet.",
+                        "Number of pixels per ROI used for MATLAB-equivalent pixel sum scaling.",
+                    ]
+                )
+
                 params_df = pd.DataFrame(params_data)
-                params_df.to_excel(writer, sheet_name="Parameters", index=False)
+                params_df.to_excel(writer, sheet_name="Parameters", index=False, startrow=1)
+                writer.sheets["Parameters"].cell(row=1, column=1).value = (
+                    "Analysis parameters and settings used to generate this dataset. "
+                    "Refer to these values to reproduce the analysis."
+                )
 
         except Exception as e:
             raise Exception(f"Complete Excel save error: {e}")
@@ -8200,6 +9484,26 @@ class HDF5AnalysisWidget(QWidget):
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
 
+    def _on_6well_toggled(self, checked: bool):
+        """Enable/disable ROI spinboxes when 6-well preset is toggled."""
+        if checked:
+            self.min_radius.setValue(100)
+            self.max_radius.setValue(145)
+            self.dp_param.setValue(1.0)
+            self.min_dist.setValue(300)
+            self.param1.setValue(30)
+            self.param2.setValue(60)
+
+        for widget in (
+            self.min_radius,
+            self.max_radius,
+            self.dp_param,
+            self.min_dist,
+            self.param1,
+            self.param2,
+        ):
+            widget.setEnabled(not checked)
+
     def _on_12well_toggled(self, checked: bool):
         """Enable/disable and populate ROI controls when preset is toggled."""
         # 12-well plate preset values
@@ -8368,7 +9672,7 @@ class HDF5AnalysisWidget(QWidget):
     def _on_fisher_method_changed(self, index):
         """Handle change in analysis method selection."""
         methods = [
-            "Fisher Z-Transformation",
+            "Chi² Periodogram",
             "FFT Power Spectrum",
             "Cosinor Analysis",
             "ROI Similarity Matrix",
@@ -8383,46 +9687,29 @@ class HDF5AnalysisWidget(QWidget):
     def _update_data_source_for_method(self, method_index):
         """Update data source dropdown based on selected analysis method.
 
-        Cosinor analysis requires Fraction Movement (0-1) data for sinusoidal fitting.
-        Other methods can use either Fraction Movement or Raw Movement data.
+        All methods (Fisher, FFT, Cosinor, etc.) can operate on either
+        Fraction Movement or Raw Intensity data.
         """
         if not hasattr(self, "data_source_combo"):
             return
 
-        # Block signals to prevent triggering _on_data_source_changed during update
         self.data_source_combo.blockSignals(True)
 
-        # Store current selection if possible
         current_index = self.data_source_combo.currentIndex()
-
-        # Clear and repopulate based on method
         self.data_source_combo.clear()
-
-        if method_index == 2:  # Cosinor Analysis
-            # Only Fraction Movement is valid for Cosinor
-            self.data_source_combo.addItems(["Fraction Movement (0-1)"])
-            self.data_source_combo.setCurrentIndex(0)
-            self.data_source_combo.setEnabled(False)
-            self.data_source_combo.setToolTip(
-                "Cosinor analysis requires Fraction Movement data (0-1 range)\n"
-                "for sinusoidal curve fitting. Raw Movement data is not suitable."
-            )
+        self.data_source_combo.addItems(
+            ["Fraction Movement (0-1)", "Raw Intensity (continuous)"]
+        )
+        if current_index < self.data_source_combo.count():
+            self.data_source_combo.setCurrentIndex(current_index)
         else:
-            # All other methods can use either data source
-            self.data_source_combo.addItems(
-                ["Fraction Movement (0-1)", "Raw Movement (binary)"]
-            )
-            # Restore previous selection if valid
-            if current_index < self.data_source_combo.count():
-                self.data_source_combo.setCurrentIndex(current_index)
-            else:
-                self.data_source_combo.setCurrentIndex(0)
-            self.data_source_combo.setEnabled(True)
-            self.data_source_combo.setToolTip(
-                "Choose data source for extended analysis:\n"
-                "• Fraction Movement: Binned activity ratio (0-1), smoother\n"
-                "• Raw Movement: Binary movement detection, more detail"
-            )
+            self.data_source_combo.setCurrentIndex(0)
+        self.data_source_combo.setEnabled(True)
+        self.data_source_combo.setToolTip(
+            "Choose data source for analysis:\n"
+            "• Fraction Movement: Binned activity ratio (0-1), smoother signal\n"
+            "• Raw Intensity: Continuous per-pixel intensity changes (MinMax 0-1)"
+        )
 
         self.data_source_combo.blockSignals(False)
 
@@ -8561,8 +9848,13 @@ class HDF5AnalysisWidget(QWidget):
 
     def _on_data_source_changed(self, index):
         """Handle change in data source selection."""
-        source_names = ["Fraction Movement (0-1)", "Raw Movement (binary)"]
-        self._log_message(f"Data source changed to: {source_names[index]}")
+        source_names = [
+            "Fraction Movement (0-1)",
+            "Raw Intensity (continuous)",
+            "Normalized Movement (0-1)",
+        ]
+        if index < len(source_names):
+            self._log_message(f"Data source changed to: {source_names[index]}")
 
     def _rebin_timeseries_data(
         self,
@@ -8616,6 +9908,35 @@ class HDF5AnalysisWidget(QWidget):
 
         return rebinned_data
 
+    def _get_rebinned_behavioral_data(self, bin_minutes: int):
+        """Rebin fraction data and recompute quiescence and sleep consistently.
+
+        Returns (fraction_data, quiescence_data, sleep_data) all at the same
+        bin resolution. When bin_minutes=0 the stored originals are returned.
+        """
+        from ._calc import bin_quiescence, define_sleep_periods
+
+        fraction = getattr(self, "fraction_data", {})
+        original_bin = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+
+        if bin_minutes > 0:
+            new_bin_seconds = bin_minutes * 60
+            if new_bin_seconds > original_bin:
+                fraction = self._rebin_timeseries_data(fraction, new_bin_seconds, original_bin)
+                bin_seconds = new_bin_seconds
+            else:
+                bin_seconds = original_bin
+        else:
+            bin_seconds = original_bin
+
+        quiescence = bin_quiescence(fraction, self.quiescence_threshold.value())
+        sleep = define_sleep_periods(
+            quiescence,
+            self.sleep_threshold_minutes.value(),
+            bin_seconds,
+        )
+        return fraction, quiescence, sleep
+
     def _load_results_from_hdf5(self):
         """Load ALL analysis results from HDF5 file (core + extended analysis)."""
         from qtpy.QtWidgets import QFileDialog
@@ -8643,11 +9964,23 @@ class HDF5AnalysisWidget(QWidget):
             if "core_analysis" in loaded_data:
                 core = loaded_data["core_analysis"]
 
-                # Restore movement data
-                if "movement_data" in core:
+                # Restore raw signal (merged_results) — new key name
+                if "merged_results" in core:
+                    self.merged_results = core["merged_results"]
+                    self._log_message(
+                        f"  ✓ Loaded raw signal for {len(self.merged_results)} ROIs"
+                    )
+                elif "movement_data" in core:  # backward compat with old saves
                     self.merged_results = core["movement_data"]
                     self._log_message(
-                        f"  ✓ Loaded movement data for {len(self.merged_results)} ROIs"
+                        f"  ✓ Loaded raw signal (legacy key) for {len(self.merged_results)} ROIs"
+                    )
+
+                # Restore binary movement data
+                if "movement_data" in core:
+                    self.movement_data = core["movement_data"]
+                    self._log_message(
+                        f"  ✓ Loaded binary movement data for {len(self.movement_data)} ROIs"
                     )
 
                 # Restore fraction data
@@ -8655,6 +9988,43 @@ class HDF5AnalysisWidget(QWidget):
                     self.fraction_data = core["fraction_data"]
                     self._log_message(
                         f"  ✓ Loaded fraction data for {len(self.fraction_data)} ROIs"
+                    )
+
+                # Restore quiescence data
+                if "quiescence_data" in core:
+                    self.quiescence_data = core["quiescence_data"]
+                    self._log_message(
+                        f"  ✓ Loaded quiescence data for {len(self.quiescence_data)} ROIs"
+                    )
+
+                # Restore sleep data
+                if "sleep_data" in core:
+                    self.sleep_data = core["sleep_data"]
+                    self._log_message(
+                        f"  ✓ Loaded sleep data for {len(self.sleep_data)} ROIs"
+                    )
+                    # Recompute sleep quality metrics from restored sleep data
+                    try:
+                        from ._calc import calculate_sleep_quality_hourly
+                        self.sleep_quality_data = calculate_sleep_quality_hourly(
+                            self.sleep_data
+                        )
+                        self._log_message("  ✓ Sleep quality metrics recomputed")
+                    except Exception:
+                        pass
+
+                # Restore ROI colors
+                if "roi_colors" in core:
+                    self.roi_colors = core["roi_colors"]
+                    self._log_message(
+                        f"  ✓ Loaded ROI colors for {len(self.roi_colors)} ROIs"
+                    )
+
+                # Restore ROI statistics
+                if "roi_statistics" in core:
+                    self.roi_statistics = core["roi_statistics"]
+                    self._log_message(
+                        f"  ✓ Loaded ROI statistics for {len(self.roi_statistics)} ROIs"
                     )
 
                 # Restore thresholds
@@ -8704,7 +10074,7 @@ class HDF5AnalysisWidget(QWidget):
                         )
 
                     # Generate and display summary
-                    if method_idx == 0:  # Fisher Z-Transformation
+                    if method_idx == 0:  # Chi² Periodogram
                         from ._fisher_analysis import generate_circadian_summary
 
                         summary = generate_circadian_summary(
@@ -8835,6 +10205,22 @@ class HDF5AnalysisWidget(QWidget):
 
             self._log_message("✓ Successfully loaded comprehensive results")
 
+            # Compute pixel counts per ROI for Real Amplitude (sum) display mode.
+            # Uses current self.masks if they are loaded (from ROI detection step).
+            masks = getattr(self, "masks", [])
+            if masks:
+                self.roi_pixel_counts = {
+                    i + 1: int(np.sum(m > 0)) for i, m in enumerate(masks)
+                }
+                self._log_message(
+                    f"  ✓ Pixel counts computed for {len(self.roi_pixel_counts)} ROIs"
+                )
+            else:
+                self.roi_pixel_counts = {}
+                self._log_message(
+                    "  ⚠ No masks available — Real Amplitude (pixel sum) mode not available"
+                )
+
             # Only show summary in text widget if no extended analysis was loaded
             # (if extended analysis was loaded, its summary is already shown above)
             if not (
@@ -8897,20 +10283,33 @@ class HDF5AnalysisWidget(QWidget):
 
             # Collect core analysis results
             core_results = {
-                "movement_data": self.merged_results,
+                "merged_results": self.merged_results,        # raw frame differences
+                "movement_data_binary": getattr(self, "movement_data", {}),  # binary per bin
                 "fraction_data": getattr(self, "fraction_data", {}),
+                "quiescence_data": getattr(self, "quiescence_data", {}),
+                "sleep_data": getattr(self, "sleep_data", {}),
+                "roi_colors": getattr(self, "roi_colors", {}),
+                "roi_statistics": getattr(self, "roi_statistics", {}),
                 "roi_summary": {},
                 "thresholds": {},
             }
 
-            # Add threshold information if available
+            # Add threshold information (core values + extra stats from roi_statistics)
             if hasattr(self, "roi_baseline_means"):
                 for roi_id in self.roi_baseline_means:
-                    core_results["thresholds"][roi_id] = {
+                    thresh_dict = {
                         "baseline_mean": self.roi_baseline_means.get(roi_id, 0.0),
                         "upper_threshold": self.roi_upper_thresholds.get(roi_id, 0.0),
                         "lower_threshold": self.roi_lower_thresholds.get(roi_id, 0.0),
                     }
+                    # Append extra stats if available
+                    if hasattr(self, "roi_statistics") and roi_id in self.roi_statistics:
+                        stats = self.roi_statistics[roi_id]
+                        for key in ("std", "threshold_band", "min_baseline",
+                                    "multiplier", "mean"):
+                            if key in stats:
+                                thresh_dict[key] = float(stats[key])
+                    core_results["thresholds"][roi_id] = thresh_dict
 
             # Collect extended analysis results if available
             extended_results = None
@@ -8934,7 +10333,7 @@ class HDF5AnalysisWidget(QWidget):
 
                 # Map method index to expected key names
                 results_data = self.fisher_analysis_results
-                if method_index == 0:  # Fisher Z-Transformation
+                if method_index == 0:  # Chi² Periodogram
                     # Filter to ROI data only (integers), format for save
                     fisher_data = {}
                     for roi_id, roi_result in results_data.items():
@@ -8987,7 +10386,7 @@ class HDF5AnalysisWidget(QWidget):
                                 period: {
                                     "mesor": best.get("mesor", 0),
                                     "amplitude": best.get("amplitude", 0),
-                                    "acrophase": best.get("acrophase", 0),
+                                    "peak_time": best.get("peak_time", 0),
                                     "r_squared": best.get("r_squared", 0),
                                     "p_value": best.get("p_value", 1),
                                     "significant": best.get("significant", False),
@@ -9178,7 +10577,7 @@ class HDF5AnalysisWidget(QWidget):
                     return
                 source_data = self.fraction_data
                 data_type_name = "Fraction Movement (0-1)"
-            else:
+            elif data_source_index == 1:
                 # Raw movement data
                 if not hasattr(self, "merged_results") or not self.merged_results:
                     self.fisher_results_text.setPlainText(
@@ -9190,7 +10589,29 @@ class HDF5AnalysisWidget(QWidget):
                     )
                     return
                 source_data = self.merged_results
-                data_type_name = "Raw Movement (binary)"
+                data_type_name = "Raw Intensity (continuous)"
+            else:
+                # Normalized movement (min/max per ROI, comparable to literature)
+                if not hasattr(self, "merged_results") or not self.merged_results:
+                    self.fisher_results_text.setPlainText(
+                        "ERROR: No movement data available.\n\n"
+                        "Please run the main analysis first."
+                    )
+                    self._log_message(
+                        "⚠️ No movement data available for rhythmic pattern analysis"
+                    )
+                    return
+                from ._calc import bin_and_normalize_movement
+
+                norm_bin_size = (
+                    self.analysis_bin_size.value()
+                    if hasattr(self, "analysis_bin_size")
+                    else self.bin_size_seconds.value()
+                )
+                source_data = bin_and_normalize_movement(
+                    self.merged_results, norm_bin_size
+                )
+                data_type_name = "Normalized Movement (min/max, 0-1)"
 
             # Get bin sizes
             original_bin_size = self.bin_size_seconds.value()
@@ -9204,7 +10625,13 @@ class HDF5AnalysisWidget(QWidget):
             )
 
             # Apply re-binning if needed
-            if analysis_bin_size > original_bin_size:
+            # (Normalized Movement already binned at analysis_bin_size)
+            if data_source_index == 2:
+                bin_size = norm_bin_size
+                self._log_message(
+                    f"  Normalized Movement binned at {bin_size}s"
+                )
+            elif analysis_bin_size > original_bin_size:
                 self._log_message(
                     f"  Re-binning data: {original_bin_size}s → {analysis_bin_size}s"
                 )
@@ -9221,9 +10648,6 @@ class HDF5AnalysisWidget(QWidget):
                 hasattr(self, "enable_cycle_selection")
                 and self.enable_cycle_selection.isChecked()
             ):
-                # Apply time range filtering
-                from ._results_io import extract_subset_by_time_range
-
                 start_hours = self.cycle_start_time.value()
                 end_hours = self.cycle_end_time.value()
 
@@ -9231,18 +10655,16 @@ class HDF5AnalysisWidget(QWidget):
                 start_time = start_hours * 3600.0
                 end_time = end_hours * 3600.0
 
-                # Create a temporary results dict with the data we need to filter
-                # Use appropriate key based on data source
-                data_key = (
-                    "fraction_data" if data_source_index == 0 else "movement_data"
-                )
-                temp_results = {"core_analysis": {data_key: source_data}}
-
-                # Extract subset
-                filtered_results = extract_subset_by_time_range(
-                    temp_results, start_time, end_time
-                )
-                analysis_data = filtered_results["core_analysis"][data_key]
+                # Filter data to time range
+                filtered_data = {}
+                for roi_id, data in source_data.items():
+                    filtered = [
+                        (t, v) for t, v in data
+                        if start_time <= t <= end_time
+                    ]
+                    if filtered:
+                        filtered_data[roi_id] = filtered
+                analysis_data = filtered_data
 
                 self._log_message(
                     f"  ✓ Time range filter applied: {start_hours:.1f}h - {end_hours:.1f}h"
@@ -9254,7 +10676,7 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message("  Using full recording for analysis")
 
             # Route to appropriate analysis method
-            if method_index == 0:  # Fisher Z-Transformation
+            if method_index == 0:  # Chi² Periodogram
                 results, summary = self._run_fisher_method(
                     min_period,
                     max_period,
@@ -9273,30 +10695,8 @@ class HDF5AnalysisWidget(QWidget):
                     analysis_data,
                 )
             elif method_index == 2:  # Cosinor Analysis
-                # Cosinor requires fraction movement data (0-1 range) for sinusoidal fitting
-                if data_source_index != 0:
-                    self.fisher_results_text.setPlainText(
-                        "ERROR: Cosinor analysis requires Fraction Movement data.\n\n"
-                        "Please select 'Fraction Movement (0-1)' as data source.\n"
-                        "Raw Movement data is not suitable for sinusoidal curve fitting."
-                    )
-                    self._log_message(
-                        "⚠️ Cosinor requires Fraction Movement data source"
-                    )
-                    return
-                if not hasattr(self, "fraction_data") or not self.fraction_data:
-                    self.fisher_results_text.setPlainText(
-                        "ERROR: No fraction movement data available for Cosinor.\n\n"
-                        "Cosinor analysis requires fraction movement data.\n"
-                        "Please run the main analysis first."
-                    )
-                    self._log_message(
-                        "⚠️ No fraction movement data for Cosinor analysis"
-                    )
-                    return
-                # Use analysis_data which has rebinning and time range applied
                 self._log_message(
-                    "  Using Fraction Movement data (with rebinning/time range if set)"
+                    f"  Using {data_type_name} (with rebinning/time range if set)"
                 )
                 results, summary = self._run_cosinor_method(
                     min_period,
@@ -9304,7 +10704,7 @@ class HDF5AnalysisWidget(QWidget):
                     significance,
                     sampling_interval,
                     bin_size,
-                    analysis_data,  # Now uses rebinned/filtered data instead of raw fraction_data
+                    analysis_data,
                 )
             elif method_index == 3:  # ROI Similarity Matrix
                 results, summary = self._run_similarity_method(
@@ -9326,40 +10726,71 @@ class HDF5AnalysisWidget(QWidget):
             # sinusoidal data, not binary sleep states
             sleep_results = None
             sleep_summary = ""
+            sleep_source_name = ""
             if self.chk_calculate_sleep_phase.isChecked() and method_index in [
                 0,
                 1,
             ]:  # Fisher, FFT only (not Cosinor)
-                # Use actual sleep_data (requires 8 min continuous quiescence)
-                if hasattr(self, "sleep_data") and self.sleep_data:
-                    sleep_threshold = self.sleep_threshold_minutes.value()
-                    # Check if sleep_data has actual sleep events
-                    total_sleep_points = sum(
-                        sum(1 for t, v in data if v == 1)
-                        for data in self.sleep_data.values()
-                    )
-                    self._log_message(
-                        f"  Analyzing sleep rhythms (from sleep_data, "
-                        f"threshold: {sleep_threshold} min, {total_sleep_points} sleep points)..."
-                    )
-                    sleep_analysis_data = self.sleep_data
-                elif hasattr(self, "quiescence_data") and self.quiescence_data:
-                    # Fallback to quiescence data if sleep_data not available
-                    total_quiescence_points = sum(
-                        sum(1 for t, v in data if v == 1)
-                        for data in self.quiescence_data.values()
-                    )
-                    self._log_message(
-                        f"  Analyzing sleep rhythms (from quiescence_data, "
-                        f"{total_quiescence_points} quiescence points)..."
-                    )
-                    sleep_analysis_data = self.quiescence_data
+                # Determine sleep data source from user selection
+                sleep_source_index = (
+                    self.sleep_source_combo.currentIndex()
+                    if hasattr(self, "sleep_source_combo")
+                    else 1
+                )
+
+                sleep_analysis_data = None
+                if sleep_source_index == 0:
+                    # Quiescence data (same temporal resolution as activity)
+                    if hasattr(self, "quiescence_data") and self.quiescence_data:
+                        total_points = sum(
+                            sum(1 for t, v in data if v == 1)
+                            for data in self.quiescence_data.values()
+                        )
+                        sleep_source_name = "quiescence_data (binary rest state)"
+                        self._log_message(
+                            f"  Analyzing sleep rhythms from quiescence_data "
+                            f"({total_points} quiescence points, same resolution as activity)..."
+                        )
+                        sleep_analysis_data = self.quiescence_data
+                    else:
+                        self._log_message(
+                            "  WARNING: No quiescence data available. "
+                            "Run main analysis first."
+                        )
                 else:
-                    self._log_message(
-                        "  WARNING: No sleep/quiescence data available. "
-                        "Run main analysis first."
-                    )
-                    sleep_analysis_data = None
+                    # Sleep data (≥8min sustained quiescence)
+                    if hasattr(self, "sleep_data") and self.sleep_data:
+                        sleep_threshold = self.sleep_threshold_minutes.value()
+                        total_points = sum(
+                            sum(1 for t, v in data if v == 1)
+                            for data in self.sleep_data.values()
+                        )
+                        sleep_source_name = (
+                            f"sleep_data (≥{sleep_threshold}min sustained quiescence)"
+                        )
+                        self._log_message(
+                            f"  Analyzing sleep rhythms from sleep_data "
+                            f"(≥{sleep_threshold}min, {total_points} sleep points, "
+                            f"low-pass filtered)..."
+                        )
+                        sleep_analysis_data = self.sleep_data
+                    elif hasattr(self, "quiescence_data") and self.quiescence_data:
+                        # Fallback to quiescence data
+                        total_points = sum(
+                            sum(1 for t, v in data if v == 1)
+                            for data in self.quiescence_data.values()
+                        )
+                        sleep_source_name = "quiescence_data (fallback)"
+                        self._log_message(
+                            f"  No sleep_data available, falling back to quiescence_data "
+                            f"({total_points} quiescence points)..."
+                        )
+                        sleep_analysis_data = self.quiescence_data
+                    else:
+                        self._log_message(
+                            "  WARNING: No sleep/quiescence data available. "
+                            "Run main analysis first."
+                        )
 
                 if sleep_analysis_data:
                     # Apply same time range filter if enabled
@@ -9367,22 +10798,22 @@ class HDF5AnalysisWidget(QWidget):
                         hasattr(self, "enable_cycle_selection")
                         and self.enable_cycle_selection.isChecked()
                     ):
-                        from ._results_io import extract_subset_by_time_range
-
                         start_hours = self.cycle_start_time.value()
                         end_hours = self.cycle_end_time.value()
                         start_time = start_hours * 3600.0
                         end_time = end_hours * 3600.0
-                        temp_results = {
-                            "core_analysis": {"sleep_data": sleep_analysis_data}
-                        }
-                        filtered = extract_subset_by_time_range(
-                            temp_results, start_time, end_time
-                        )
-                        sleep_analysis_data = filtered["core_analysis"]["sleep_data"]
+                        filtered_sleep = {}
+                        for roi_id, data in sleep_analysis_data.items():
+                            filtered = [
+                                (t, v) for t, v in data
+                                if start_time <= t <= end_time
+                            ]
+                            if filtered:
+                                filtered_sleep[roi_id] = filtered
+                        sleep_analysis_data = filtered_sleep
 
                     # Run the same analysis on sleep data
-                    if method_index == 0:  # Fisher Z-Transformation
+                    if method_index == 0:  # Chi² Periodogram
                         sleep_results, sleep_summary = self._run_fisher_method(
                             min_period,
                             max_period,
@@ -9427,12 +10858,30 @@ class HDF5AnalysisWidget(QWidget):
                     # Combine results
                     results["sleep_phase_results"] = sleep_results
                     summary = self._combine_activity_sleep_summary(
-                        summary, sleep_summary, results, sleep_results
+                        summary, sleep_summary, results, sleep_results,
+                        sleep_source_name=sleep_source_name,
                     )
 
-            # Store results
+            # Store results + data context for plot functions
             self.fisher_analysis_results = results
             self.current_fisher_method = method_index
+            self.fisher_data_type_name = data_type_name    # e.g. "Fraction Movement (0-1)"
+            self.fisher_analysis_data = analysis_data      # the actual data that was analysed
+
+            # Warn if period range was capped by recording duration
+            if method_index in [0, 1]:
+                for roi_id, roi_result in results.items():
+                    if not isinstance(roi_id, int):
+                        continue
+                    peri = roi_result.get("periodogram", roi_result)
+                    if peri.get("period_capped", False):
+                        actual_max = peri.get("actual_max_period", max_period)
+                        self._log_message(
+                            f"  ⚠️ Max period capped at {actual_max:.1f}h "
+                            f"(recording duration / 2). Your setting of {max_period:.1f}h "
+                            f"requires a recording ≥ {max_period * 2:.0f}h."
+                        )
+                        break  # one warning is enough
 
             # Display results
             self.fisher_results_text.setPlainText(summary)
@@ -9462,7 +10911,7 @@ class HDF5AnalysisWidget(QWidget):
         bin_size,
         fraction_data=None,
     ):
-        """Run Fisher Z-Transformation analysis."""
+        """Run Chi² Periodogram analysis."""
         from ._fisher_analysis import (
             analyze_roi_circadian_patterns,
             generate_circadian_summary,
@@ -9518,7 +10967,8 @@ class HDF5AnalysisWidget(QWidget):
         return inverted_data
 
     def _combine_activity_sleep_summary(
-        self, activity_summary, sleep_summary, activity_results, sleep_results
+        self, activity_summary, sleep_summary, activity_results, sleep_results,
+        sleep_source_name="",
     ):
         """Combine activity and sleep phase summaries into one comprehensive report."""
         combined = []
@@ -9527,8 +10977,10 @@ class HDF5AnalysisWidget(QWidget):
         data_source_index = self.data_source_combo.currentIndex()
         if data_source_index == 0:
             data_source_name = "Fraction Movement"
+        elif data_source_index == 1:
+            data_source_name = "Raw Intensity"
         else:
-            data_source_name = "Raw Movement"
+            data_source_name = "Normalized Movement (min/max)"
 
         combined.append("=" * 60)
         combined.append("ACTIVITY & SLEEP RHYTHM ANALYSIS RESULTS")
@@ -9562,20 +11014,20 @@ class HDF5AnalysisWidget(QWidget):
                     z_score = periodogram.get(
                         "dominant_z_score", periodogram.get("max_power", "N/A")
                     )
-                    acrophase = (
-                        "N/A (use Cosinor)"  # Fisher doesn't calculate acrophase
+                    peak_time = (
+                        "N/A (use Cosinor)"  # Fisher doesn't calculate peak time
                     )
                 elif "best_result" in roi_data:
                     # Cosinor structure: best_period at top, details in best_result
                     period = roi_data.get("best_period", "N/A")
                     best_result = roi_data.get("best_result", {})
-                    acrophase = best_result.get("acrophase", "N/A")
+                    peak_time = best_result.get("peak_time", "N/A")
                     significant = best_result.get("significant", False)
                     z_score = None
                 elif "dominant_period" in roi_data:
                     # FFT direct structure
                     period = roi_data.get("dominant_period", "N/A")
-                    acrophase = "N/A"
+                    peak_time = "N/A"
                     significant = roi_data.get("is_significant", False)
                     z_score = roi_data.get("dominant_power", None)
                 else:
@@ -9588,10 +11040,10 @@ class HDF5AnalysisWidget(QWidget):
                 else:
                     period_str = str(period)
 
-                if isinstance(acrophase, (int, float)):
-                    acrophase_str = f"{acrophase:.1f}h"
+                if isinstance(peak_time, (int, float)):
+                    peak_time_str = f"{peak_time:.1f}h"
                 else:
-                    acrophase_str = str(acrophase)
+                    peak_time_str = str(peak_time)
 
                 if z_score is not None and isinstance(z_score, (int, float)):
                     combined.append(
@@ -9599,21 +11051,21 @@ class HDF5AnalysisWidget(QWidget):
                     )
                 else:
                     combined.append(
-                        f"  ROI {roi_id}: Period={period_str}, Acrophase={acrophase_str} {sig_str}"
+                        f"  ROI {roi_id}: Period={period_str}, Peak Time={peak_time_str} {sig_str}"
                     )
 
         combined.append("")
 
         # Sleep Phase Section
-        sleep_threshold = (
-            self.sleep_threshold_minutes.value()
-            if hasattr(self, "sleep_threshold_minutes")
-            else 8
-        )
+        if not sleep_source_name:
+            sleep_threshold = (
+                self.sleep_threshold_minutes.value()
+                if hasattr(self, "sleep_threshold_minutes")
+                else 8
+            )
+            sleep_source_name = f"sleep_data (≥{sleep_threshold}min quiescence)"
         combined.append("─" * 40)
-        combined.append(
-            f"SLEEP RHYTHMS (from sleep_data, ≥{sleep_threshold}min quiescence)"
-        )
+        combined.append(f"SLEEP RHYTHMS (from {sleep_source_name})")
         combined.append("─" * 40)
 
         # Handle both structures for sleep results
@@ -9643,7 +11095,7 @@ class HDF5AnalysisWidget(QWidget):
                     # Cosinor structure: best_period at top, details in best_result
                     period = roi_data.get("best_period", "N/A")
                     best_result = roi_data.get("best_result", {})
-                    sleep_phase = best_result.get("acrophase", "N/A")
+                    sleep_phase = best_result.get("peak_time", "N/A")
                     significant = best_result.get("significant", False)
                     z_score = None
                 elif "dominant_period" in roi_data:
@@ -9708,19 +11160,19 @@ class HDF5AnalysisWidget(QWidget):
                 else:
                     slp_period = slp_data.get("dominant_period")
 
-                # Also try to get acrophase for Cosinor
-                act_phase = act_data.get("acrophase_hours")
-                slp_phase = slp_data.get("acrophase_hours")
+                # Also try to get peak_time for Cosinor
+                act_phase = act_data.get("peak_time")
+                slp_phase = slp_data.get("peak_time")
 
                 if act_period is not None and slp_period is not None:
                     if act_phase is not None and slp_phase is not None:
-                        # Cosinor: show phase comparison
+                        # Cosinor: show fitted peak time comparison
                         diff = abs(act_phase - slp_phase)
                         if diff > 12:
                             diff = 24 - diff
                         combined.append(
-                            f"  ROI {roi_id}: Act Phase={act_phase:.1f}h, "
-                            f"Sleep Phase={slp_phase:.1f}h, Δ={diff:.1f}h"
+                            f"  ROI {roi_id}: Act Peak={act_phase:.1f}h, "
+                            f"Sleep Peak={slp_phase:.1f}h, Δ={diff:.1f}h"
                         )
                     else:
                         # Fisher/FFT: show period comparison
@@ -9732,9 +11184,6 @@ class HDF5AnalysisWidget(QWidget):
         combined.append("")
         combined.append("=" * 60)
         combined.append("Legend: ✓ = significant rhythm, ✗ = not significant")
-        combined.append(
-            "NOTE: For actual acrophase (time of peak), use Cosinor Analysis"
-        )
         combined.append("=" * 60)
 
         return "\n".join(combined)
@@ -9777,9 +11226,9 @@ class HDF5AnalysisWidget(QWidget):
         significance,
         sampling_interval,
         bin_size,
-        fraction_data=None,
+        data=None,
     ):
-        """Run Cosinor analysis."""
+        """Run Cosinor analysis on any time-series data (fraction movement or raw intensity)."""
         from ._cosinor_analysis import (
             multi_period_cosinor,
             population_cosinor,
@@ -9802,35 +11251,55 @@ class HDF5AnalysisWidget(QWidget):
 
         test_periods = sorted(test_periods)
 
-        # Use provided fraction_data or default to self.fraction_data
+        # Use provided data or fall back to fraction_data
         data_to_analyze = (
-            fraction_data if fraction_data is not None else self.fraction_data
+            data if data is not None else self.fraction_data
         )
+
+        # Compute recording duration for cycle-count warnings / plot annotation
+        recording_duration_h = 0.0
+        for _dl in data_to_analyze.values():
+            if _dl:
+                _ts = [t for t, _ in _dl]
+                recording_duration_h = max(
+                    recording_duration_h, (max(_ts) - min(_ts)) / 3600.0
+                )
+
+        # Warn for every test period that yields < 2 complete cycles
+        for _tp in test_periods:
+            _n_cyc = recording_duration_h / _tp if _tp > 0 else 0
+            if _n_cyc < 2.0:
+                self._log_message(
+                    f"⚠️ Cosinor: period {_tp:.1f} h → only {_n_cyc:.1f} complete cycle(s) "
+                    f"in {recording_duration_h:.1f} h recording — result unreliable (need ≥ 2 cycles)"
+                )
 
         # Analyze each ROI with cosinor
         roi_results = {}
         population_time_series = []
+        population_timestamps = []
 
         for roi_id, data_list in data_to_analyze.items():
             if not data_list:
                 continue
 
-            # Extract values only (consistent with Fisher Z and FFT approach)
-            # Both Fisher and FFT assume uniform sampling with sampling_interval
+            # Use actual timestamps from the data — critical for correct period detection.
+            # Passing timestamps=None would cause the cosinor to invent synthetic timestamps
+            # using bin_size, which is wrong for raw intensity data (5s intervals ≠ 60s bins).
+            timestamps_s = np.array([t for t, _ in data_list])  # seconds
             values = np.array([v for _, v in data_list])
 
-            # Multi-period cosinor for each ROI
-            # Pass timestamps=None to use uniform sampling (same as Fisher Z and FFT)
             multi_result = multi_period_cosinor(
                 time_series=values,
-                timestamps=None,  # Use uniform sampling like Fisher Z and FFT
+                timestamps=timestamps_s,
                 test_periods=test_periods,
-                sampling_interval=sampling_interval,
+                sampling_interval=bin_size,
                 alpha=significance,
             )
 
             roi_results[roi_id] = multi_result
             population_time_series.append(values)
+            population_timestamps.append(timestamps_s)
 
         # Population-level cosinor for best period across all ROIs
         if population_time_series:
@@ -9844,8 +11313,9 @@ class HDF5AnalysisWidget(QWidget):
 
                 pop_result = population_cosinor(
                     time_series_list=population_time_series,
+                    timestamps_list=population_timestamps,
                     period_hours=population_period,
-                    sampling_interval=sampling_interval,
+                    sampling_interval=bin_size,
                     alpha=significance,
                 )
             else:
@@ -9859,6 +11329,7 @@ class HDF5AnalysisWidget(QWidget):
             "population_result": pop_result,
             "test_periods": test_periods,
             "sampling_interval": sampling_interval,
+            "recording_duration_h": recording_duration_h,
         }
 
         # Generate summary
@@ -9868,22 +11339,23 @@ class HDF5AnalysisWidget(QWidget):
 
     def _generate_cosinor_summary(self, results):
         """Generate text summary for cosinor analysis results."""
+        data_type_name = getattr(self, "fisher_data_type_name", "Fraction Movement (0-1)")
         lines = [
             "=" * 70,
             "COSINOR ANALYSIS - Circadian Rhythm Quantification",
             "=" * 70,
             "",
-            "Data source: Fraction Movement (binned activity, 0-1 range)",
-            "Note: Fraction movement represents the proportion of time with",
-            "      detected movement per time bin - suitable for cosinor fitting.",
+            f"Data source: {data_type_name}",
             "",
-            "Cosinor analysis fits a cosine curve to activity data:",
-            "  y(t) = MESOR + Amplitude × cos(2πt/τ + Acrophase)",
+            "Cosinor analysis fits a cosine curve to the signal:",
+            "  y(t) = MESOR + Amplitude × cos(2πt/τ + φ)",
             "",
             "Parameters:",
             "  • MESOR: Midline Estimating Statistic of Rhythm (mean level)",
             "  • Amplitude: Half the difference between peak and trough",
-            "  • Acrophase: Time of peak activity (phase angle)",
+            "  • φ (phase angle): phase offset of the fitted cosine (radians)",
+            "  • Peak Time: time from recording start to first fitted cosine peak",
+            "    NOTE: not the biological acrophase without a known ZT reference",
             "  • Period (τ): Duration of one complete cycle",
             "",
         ]
@@ -9985,9 +11457,9 @@ class HDF5AnalysisWidget(QWidget):
                     f"  Best-fit period: {best_period:.2f} hours{boundary_marker}",
                     f"  MESOR (mean level): {best_result.get('mesor', 0):.4f}",
                     f"  Amplitude: {best_result.get('amplitude', 0):.4f}",
-                    f"  Acrophase (peak time): {best_result.get('acrophase', 0):.2f} hours",
+                    f"  Peak Time (fitted cosine peak): {best_result.get('peak_time', 0):.2f} h from start",
                     f"  R²: {best_result.get('r_squared', 0):.3f}",
-                    f"  p-value: {best_result.get('p_value', 1):.4f} {'***' if best_result.get('p_value', 1) < 0.001 else '**' if best_result.get('p_value', 1) < 0.01 else '*' if best_result.get('p_value', 1) < 0.05 else 'ns'}",
+                    f"  p-value: {_fmt_p(best_result.get('p_value', 1))} {'***' if best_result.get('p_value', 1) < 0.001 else '**' if best_result.get('p_value', 1) < 0.01 else '*' if best_result.get('p_value', 1) < 0.05 else 'ns'}",
                     f"  Significant: {'YES' if best_result.get('significant', False) else 'NO'}",
                 ]
             )
@@ -9995,11 +11467,11 @@ class HDF5AnalysisWidget(QWidget):
             # Add confidence intervals if available
             if "ci_amplitude" in best_result:
                 ci_amp = best_result["ci_amplitude"]
-                ci_acro = best_result["ci_acrophase"]
+                ci_pt = best_result.get("ci_peak_time", (float("nan"), float("nan")))
                 lines.extend(
                     [
                         f"  95% CI Amplitude: [{ci_amp[0]:.4f}, {ci_amp[1]:.4f}]",
-                        f"  95% CI Acrophase: [{ci_acro[0]:.2f}h, {ci_acro[1]:.2f}h]",
+                        f"  95% CI Peak Time: [{ci_pt[0]:.2f}h, {ci_pt[1]:.2f}h]",
                     ]
                 )
 
@@ -10015,7 +11487,7 @@ class HDF5AnalysisWidget(QWidget):
                         f"    [{sig_marker}] {res.get('test_period', 0):.1f}h: "
                         f"R²={res.get('r_squared', 0):.3f}, "
                         f"Amp={res.get('amplitude', 0):.4f}, "
-                        f"p={res.get('p_value', 1):.4f}"
+                        f"p={_fmt_p(res.get('p_value', 1))}"
                     )
                 lines.append("")
 
@@ -10030,9 +11502,9 @@ class HDF5AnalysisWidget(QWidget):
                     "",
                     f"Population MESOR: {pop_result.get('population_mesor', 0):.4f}",
                     f"Population Amplitude: {pop_result.get('population_amplitude', 0):.4f}",
-                    f"Population Acrophase: {pop_result.get('population_acrophase', 0):.2f} hours",
+                    f"Population Peak Time (circular mean): {pop_result.get('population_peak_time', 0):.2f} h from start",
                     f"Test period: {pop_result.get('period', 0):.2f} hours",
-                    f"p-value: {pop_result.get('p_value', 1):.4f}",
+                    f"p-value: {_fmt_p(pop_result.get('p_value', 1))}",
                     f"Significant rhythm: {'YES' if pop_result.get('significant', False) else 'NO'}",
                     "",
                     f"Individual ROIs analyzed: {pop_result.get('n_individuals', 0)}",
@@ -10205,7 +11677,7 @@ class HDF5AnalysisWidget(QWidget):
 
     def _create_circadian_plot(self, results: Dict, method_index: int):
         """Create and display plot based on selected analysis method."""
-        if method_index == 0:  # Fisher Z-Transformation
+        if method_index == 0:  # Chi² Periodogram
             self._create_fisher_plot(results)
         elif method_index == 1:  # FFT Power Spectrum
             self._create_fft_plot(results)
@@ -10231,7 +11703,7 @@ class HDF5AnalysisWidget(QWidget):
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
-                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+                "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
 
             # Check if sleep phase results are available
@@ -10259,17 +11731,28 @@ class HDF5AnalysisWidget(QWidget):
                 total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
             )
 
+            # Check if max period was capped for any ROI
+            cap_note = ""
+            requested_max = self.fisher_max_period.value()
+            for _roi_id, _roi_res in roi_only_results.items():
+                _periods = _roi_res.get("relevant_periods", [])
+                if len(_periods) > 0:
+                    _actual_max = max(_periods)
+                    if _actual_max < requested_max * 0.95:  # capped by >5%
+                        cap_note = f"  (max period capped at {_actual_max:.1f}h = recording / 2)"
+                    break
+
             if has_sleep:
                 fig.suptitle(
-                    f"FFT Power Spectrum  —  Data source: {data_source}",
-                    fontsize=13,
+                    f"FFT Power Spectrum  —  Data source: {data_source}{cap_note}{self._get_recording_start_str()}",
+                    fontsize=11,
                     fontweight="bold",
                     y=0.99,
                 )
             else:
                 fig.suptitle(
-                    f"FFT Power Spectrum  —  Activity from {data_source}",
-                    fontsize=13,
+                    f"FFT Power Spectrum  —  Activity from {data_source}{cap_note}{self._get_recording_start_str()}",
+                    fontsize=11,
                     fontweight="bold",
                     y=0.99,
                 )
@@ -10347,6 +11830,34 @@ class HDF5AnalysisWidget(QWidget):
                             )
                             ax.legend(fontsize=7)
 
+                            # Stats box: period, peak time (phase), p-value
+                            peak_t = result.get("dominant_peak_time_hours", None)
+                            p_val  = result.get("p_value", 1.0)
+                            sig_marker = " *" if result.get("is_significant", False) else ""
+                            if peak_t is not None and not np.isnan(peak_t):
+                                stats_text = (
+                                    f"Period: {dominant_period:.2f}h\n"
+                                    f"Peak time: {peak_t:.1f}h\n"
+                                    f"p: {_fmt_p(p_val)}{sig_marker}"
+                                )
+                            else:
+                                stats_text = (
+                                    f"Period: {dominant_period:.2f}h\n"
+                                    f"p: {_fmt_p(p_val)}{sig_marker}"
+                                )
+                            ax.text(
+                                0.97, 0.97, stats_text,
+                                transform=ax.transAxes, fontsize=8,
+                                verticalalignment="top",
+                                horizontalalignment="right",
+                                bbox=dict(boxstyle="round", facecolor="wheat",
+                                          alpha=0.5, pad=0.5),
+                            )
+
+                        # Set x-axis to actual data range (analysis caps max at duration/2)
+                        if len(periods) > 0:
+                            ax.set_xlim(min(periods), max(periods))
+
                 # Hide unused subplots in this section
                 for idx in range(n_rois, n_rows_per_section * n_cols):
                     row = start_row + (idx // n_cols)
@@ -10388,6 +11899,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create FFT plot: {e}")
@@ -10421,25 +11934,71 @@ class HDF5AnalysisWidget(QWidget):
 
             n_cols = min(3, n_rois)
             n_rows_per_section = (n_rois + n_cols - 1) // n_cols
-            total_rows = n_rows_per_section
-            fig_height = 4.5 * total_rows + 1
 
-            fig, axes = plt.subplots(
-                total_rows, n_cols, figsize=(13, fig_height), squeeze=False
+            show_population = (
+                hasattr(self, "chk_cosinor_population")
+                and self.chk_cosinor_population.isChecked()
             )
+            pop_result = cosinor_results.get("population_result", {})
+            has_population = show_population and "error" not in pop_result
 
+            fig_height = 4.5 * n_rows_per_section + 1 + (3.5 if has_population else 0)
+            fig = plt.figure(figsize=(13, fig_height))
+
+            if has_population:
+                gs = fig.add_gridspec(
+                    n_rows_per_section + 1, n_cols,
+                    hspace=0.45,
+                    height_ratios=[1] * n_rows_per_section + [0.8],
+                )
+                axes = np.array(
+                    [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
+                     for r in range(n_rows_per_section)]
+                )
+                ax_pop = fig.add_subplot(gs[n_rows_per_section, :])
+            else:
+                gs = fig.add_gridspec(n_rows_per_section, n_cols, hspace=0.45)
+                axes = np.array(
+                    [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
+                     for r in range(n_rows_per_section)]
+                )
+                ax_pop = None
+
+            data_type_name = getattr(self, "fisher_data_type_name", "Fraction Movement (0-1)")
             fig.suptitle(
-                "Cosinor Analysis  —  Fraction Movement Data",
+                f"Cosinor Analysis  —  {data_type_name}{self._get_recording_start_str()}",
                 fontsize=13,
                 fontweight="bold",
                 y=0.99,
             )
 
-            # Cosinor uses fraction movement data (binned, 0-1 range)
-            activity_data_dict = (
-                self.fraction_data if hasattr(self, "fraction_data") else {}
-            )
-            activity_y_label = "Fraction Movement (0-1)"
+            # Figure-level warning if recording < 2× any test period
+            test_periods_plot = cosinor_results.get("test_periods", [])
+            short_periods = [
+                tp for tp in test_periods_plot
+                if _recording_dur_h > 0 and _recording_dur_h / tp < 2.0
+            ]
+            if short_periods:
+                warn_txt = (
+                    f"⚠  Recording ({_recording_dur_h:.1f} h) < 2× period — "
+                    f"result(s) unreliable for: "
+                    + ", ".join(f"{p:.1f} h" for p in short_periods)
+                )
+                fig.text(
+                    0.5, 0.005, warn_txt,
+                    ha="center", va="bottom", fontsize=8,
+                    color="#B71C1C",
+                    bbox=dict(boxstyle="round", fc="#FFEBEE", ec="#EF9A9A", alpha=0.9),
+                )
+
+            # Use the data that was actually analysed (stored by run_fisher_analysis)
+            activity_data_dict = getattr(self, "fisher_analysis_data", None)
+            if not activity_data_dict:
+                activity_data_dict = self.fraction_data if hasattr(self, "fraction_data") else {}
+            activity_y_label = data_type_name
+
+            # Recording duration (hours) for n_cycles annotation in each ROI plot
+            _recording_dur_h = cosinor_results.get("recording_duration_h", 0.0)
 
             # Helper function to plot ROI results
             def plot_section(
@@ -10482,12 +12041,12 @@ class HDF5AnalysisWidget(QWidget):
                         )
                         values = np.array([v for _, v in raw_data_dict[roi_id]])
 
-                        # Plot actual data
-                        ax.scatter(
+                        # Plot actual data as a continuous line
+                        ax.plot(
                             times_hours,
                             values,
-                            alpha=0.3,
-                            s=10,
+                            alpha=0.6,
+                            linewidth=0.8,
                             color=roi_color,
                             label=f"{section_label} data",
                         )
@@ -10497,12 +12056,15 @@ class HDF5AnalysisWidget(QWidget):
                         period = best_result.get("period", 0)
                         amplitude = best_result.get("amplitude", 0)
                         mesor = best_result.get("mesor", 0)
-                        acrophase = best_result.get("acrophase", 0)
+                        peak_time = best_result.get("peak_time", 0)
+                        phase_angle_rad = best_result.get("phase_angle_rad", 0)
 
                         if period > 0 and not np.isnan(period):
                             omega = 2 * np.pi / period
+                            # Reconstruct using the phase angle φ:
+                            # y(t) = MESOR + A·cos(ω·t + φ)
                             fitted_curve = mesor + amplitude * np.cos(
-                                omega * (times_hours - acrophase)
+                                omega * times_hours + phase_angle_rad
                             )
                             ax.plot(
                                 times_hours,
@@ -10522,29 +12084,33 @@ class HDF5AnalysisWidget(QWidget):
                                 label=f"MESOR={mesor:.3f}",
                             )
 
-                            # Acrophase marker
+                            # Peak time marker
                             peak_value = mesor + amplitude
                             if (
-                                isinstance(acrophase, (int, float))
-                                and acrophase < times_hours[-1]
+                                isinstance(peak_time, (int, float))
+                                and peak_time < times_hours[-1]
                             ):
                                 ax.plot(
-                                    acrophase,
+                                    peak_time,
                                     peak_value,
                                     "^",
                                     color="red",
                                     markersize=10,
                                     markeredgecolor="black",
                                     markeredgewidth=0.5,
-                                    label=f"Acrophase={acrophase:.1f}h",
+                                    label=f"Peak Time={peak_time:.1f}h",
                                 )
 
                         textstr = f"MESOR: {best_result.get('mesor', 0):.3f}\n"
                         textstr += f"Amplitude: {best_result.get('amplitude', 0):.3f}\n"
                         textstr += f"R²: {best_result.get('r_squared', 0):.3f}\n"
-                        textstr += f"p: {best_result.get('p_value', 1):.4f}"
+                        textstr += f"p: {_fmt_p(best_result.get('p_value', 1))}"
                         if best_result.get("significant", False):
                             textstr += " *"
+                        if period > 0 and _recording_dur_h > 0:
+                            n_cycles = _recording_dur_h / period
+                            warn_flag = "⚠ " if n_cycles < 2.0 else ""
+                            textstr += f"\n{warn_flag}cycles: {n_cycles:.1f}"
 
                         ax.text(
                             0.95,
@@ -10601,16 +12167,93 @@ class HDF5AnalysisWidget(QWidget):
                     if row < total_rows:
                         axes[row, col].axis("off")
 
-            # Plot Activity section (Cosinor uses fraction movement data)
+            # Plot Activity section — use a short label derived from data_type_name
+            # e.g. "Fraction Movement (0-1)" → "Fraction Movement"
+            section_label = data_type_name.split("(")[0].strip()
             plot_section(
                 roi_results,
                 activity_data_dict,
                 0,
-                "Fraction Movement",
+                section_label,
                 activity_y_label,
             )
 
-            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.5, w_pad=1.0)
+            # --- Optional population mean subplot ---
+            if has_population and ax_pop is not None:
+                # Build common time grid from union of all ROI time ranges
+                all_times_h = []
+                for data_list in activity_data_dict.values():
+                    if data_list:
+                        all_times_h.extend(t / 3600.0 for t, _ in data_list)
+                t_min = min(all_times_h) if all_times_h else 0.0
+                t_max = max(all_times_h) if all_times_h else 24.0
+                t_grid = np.linspace(t_min, t_max, 500)
+
+                # Faint individual fitted curves
+                for idx, (roi_id, roi_data) in enumerate(sorted(roi_results.items())):
+                    best = roi_data.get("best_result", {})
+                    period = best.get("period", 0)
+                    amplitude = best.get("amplitude", 0)
+                    mesor = best.get("mesor", 0)
+                    phi = best.get("phase_angle_rad", 0)
+                    if period > 0 and not np.isnan(period):
+                        omega = 2 * np.pi / period
+                        fitted = mesor + amplitude * np.cos(omega * t_grid + phi)
+                        roi_color = (
+                            self.roi_colors.get(roi_id, f"C{idx}")
+                            if hasattr(self, "roi_colors") else f"C{idx}"
+                        )
+                        ax_pop.plot(t_grid, fitted, color=roi_color,
+                                    alpha=0.25, linewidth=1)
+
+                # Population mean fit
+                pop_period = pop_result.get("period", 24.0)
+                pop_amplitude = pop_result.get("population_amplitude", 0)
+                pop_mesor = pop_result.get("population_mesor", 0)
+                pop_peak_time = pop_result.get("population_peak_time", 0)
+
+                if pop_period > 0:
+                    omega_pop = 2 * np.pi / pop_period
+                    phase_pop = -omega_pop * pop_peak_time
+                    pop_curve = pop_mesor + pop_amplitude * np.cos(
+                        omega_pop * t_grid + phase_pop
+                    )
+                    ax_pop.plot(t_grid, pop_curve, color="black", linewidth=2.5,
+                                label=f"Population mean ({pop_period:.1f}h)", zorder=5)
+                    ax_pop.axhline(y=pop_mesor, color="gray", linestyle="--",
+                                   linewidth=1, alpha=0.5,
+                                   label=f"Pop. MESOR={pop_mesor:.3f}")
+
+                p_val = pop_result.get("p_value", 1.0)
+                sig_marker = " *" if pop_result.get("significant", False) else ""
+                n_sig = pop_result.get("n_significant", 0)
+                n_ind = pop_result.get("n_individuals", 0)
+                stats_text = (
+                    f"MESOR: {pop_mesor:.3f}\n"
+                    f"Amplitude: {pop_amplitude:.3f}\n"
+                    f"Peak time: {pop_peak_time:.1f}h\n"
+                    f"p: {_fmt_p(p_val)}{sig_marker}\n"
+                    f"n={n_ind} ROIs  ({n_sig} significant)"
+                )
+                ax_pop.text(
+                    0.97, 0.05, stats_text, transform=ax_pop.transAxes,
+                    fontsize=8, verticalalignment="bottom",
+                    horizontalalignment="right",
+                    bbox=dict(boxstyle="round", facecolor="wheat",
+                              alpha=0.5, pad=0.5),
+                )
+                ax_pop.set_title("Population Mean", fontsize=10,
+                                 fontweight="bold", loc="left")
+                ax_pop.set_xlabel("Time (h)", fontsize=9)
+                ax_pop.set_ylabel(activity_y_label, fontsize=9)
+                ax_pop.legend(fontsize=7, loc="upper left")
+                ax_pop.grid(True, alpha=0.3)
+                ax_pop.tick_params(axis="both", labelsize=8)
+
+            # subplots_adjust instead of tight_layout: the latter does not
+            # support axes that span multiple columns (population subplot).
+            fig.subplots_adjust(top=0.94, left=0.07, right=0.97,
+                                bottom=0.04, hspace=0.50, wspace=0.30)
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
@@ -10632,6 +12275,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create Cosinor plot: {e}")
@@ -10655,7 +12300,7 @@ class HDF5AnalysisWidget(QWidget):
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
-                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+                "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
             fig.suptitle(
                 f"ROI Similarity Analysis\n(Activity from {data_source})",
@@ -10735,6 +12380,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create similarity plot: {e}")
@@ -10757,7 +12404,7 @@ class HDF5AnalysisWidget(QWidget):
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
-                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+                "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
 
             coherence_matrix = coherence_results["coherence_matrix"]
@@ -10795,6 +12442,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create coherence plot: {e}")
@@ -10857,7 +12506,7 @@ class HDF5AnalysisWidget(QWidget):
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
-                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+                "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
             ax.set_title(
                 f"ROI Activity Phases\n(Activity from {data_source})",
@@ -10889,6 +12538,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
         except Exception as e:
             self._log_message(f"⚠️ Could not create phase plot: {e}")
@@ -10942,7 +12593,7 @@ class HDF5AnalysisWidget(QWidget):
 
         try:
             # Route to appropriate export method based on analysis type
-            if self.current_fisher_method == 0:  # Fisher Z-Transformation
+            if self.current_fisher_method == 0:  # Chi² Periodogram
                 self._export_fisher_method_results(base_path)
             elif self.current_fisher_method == 1:  # FFT Power Spectrum
                 self._export_fft_method_results(base_path)
@@ -10977,7 +12628,7 @@ class HDF5AnalysisWidget(QWidget):
             traceback.print_exc()
 
     def _export_fisher_method_results(self, base_path):
-        """Export Fisher Z-Transformation results to CSV and Excel."""
+        """Export Chi² Periodogram results to CSV and Excel."""
         # Export to CSV
         csv_path = f"{base_path}.csv"
         self._export_fisher_to_csv(csv_path)
@@ -11012,6 +12663,10 @@ class HDF5AnalysisWidget(QWidget):
 
     def _export_cosinor_method_results(self, base_path):
         """Export Cosinor Analysis results to CSV and Excel."""
+        csv_path = f"{base_path}.csv"
+        self._export_cosinor_to_csv(csv_path)
+        self._log_message(f"✓ Exported Cosinor results to CSV: {csv_path}")
+
         try:
             import pandas as pd
 
@@ -11048,7 +12703,8 @@ class HDF5AnalysisWidget(QWidget):
                     {
                         "ROI": roi_id,
                         "Best Period (hours)": roi_data.get("best_period", "N/A"),
-                        "Acrophase (hours)": best_result.get("acrophase", "N/A"),
+                        "Peak Time (hours from start)": best_result.get("peak_time", "N/A"),
+                        "Phase Angle (rad)": best_result.get("phase_angle_rad", "N/A"),
                         "MESOR": best_result.get("mesor", "N/A"),
                         "Amplitude": best_result.get("amplitude", "N/A"),
                         "R-squared": best_result.get("r_squared", "N/A"),
@@ -11077,7 +12733,7 @@ class HDF5AnalysisWidget(QWidget):
                         {
                             "ROI": roi_id,
                             "Best Period (hours)": roi_data.get("best_period", "N/A"),
-                            "Sleep Phase (hours)": best_result.get("acrophase", "N/A"),
+                            "Sleep Peak Time (hours from start)": best_result.get("peak_time", "N/A"),
                             "MESOR": best_result.get("mesor", "N/A"),
                             "Amplitude": best_result.get("amplitude", "N/A"),
                             "R-squared": best_result.get("r_squared", "N/A"),
@@ -11102,14 +12758,14 @@ class HDF5AnalysisWidget(QWidget):
                     slp_roi = sleep_roi_results.get(roi_id, {})
                     slp_best = slp_roi.get("best_result", {})
 
-                    acrophase = act_row.get("Acrophase (hours)", 0)
-                    sleep_phase = slp_best.get("acrophase", 0)
+                    act_peak = act_row.get("Peak Time (hours from start)", 0)
+                    slp_peak = slp_best.get("peak_time", 0)
 
-                    # Calculate phase difference
-                    if isinstance(acrophase, (int, float)) and isinstance(
-                        sleep_phase, (int, float)
+                    # Calculate peak time difference
+                    if isinstance(act_peak, (int, float)) and isinstance(
+                        slp_peak, (int, float)
                     ):
-                        phase_diff = abs(acrophase - sleep_phase)
+                        phase_diff = abs(act_peak - slp_peak)
                         if phase_diff > 12:
                             phase_diff = 24 - phase_diff
                     else:
@@ -11118,9 +12774,9 @@ class HDF5AnalysisWidget(QWidget):
                     comparison_data.append(
                         {
                             "ROI": roi_id,
-                            "Activity Acrophase (h)": acrophase,
-                            "Sleep Phase (h)": sleep_phase,
-                            "Phase Difference (h)": phase_diff,
+                            "Activity Peak Time (h)": act_peak,
+                            "Sleep Peak Time (h)": slp_peak,
+                            "Peak Time Difference (h)": phase_diff,
                             "Activity Period (h)": act_row.get(
                                 "Best Period (hours)", "N/A"
                             ),
@@ -11155,21 +12811,49 @@ class HDF5AnalysisWidget(QWidget):
             )
             params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
-    def _export_similarity_method_results(self, file_path):
-        """Export ROI Similarity results using module function."""
-        from ._circadian_similarity import export_similarity_to_excel
+    def _export_similarity_method_results(self, base_path):
+        """Export ROI Similarity results to CSV and Excel."""
+        csv_path = f"{base_path}.csv"
+        self._export_similarity_to_csv(csv_path)
+        self._log_message(f"✓ Exported Similarity results to CSV: {csv_path}")
 
-        export_similarity_to_excel(file_path, self.fisher_analysis_results)
-        self._log_message(f"✓ Exported Similarity results to: {file_path}")
+        try:
+            from ._circadian_similarity import export_similarity_to_excel
+            excel_path = f"{base_path}.xlsx"
+            export_similarity_to_excel(excel_path, self.fisher_analysis_results)
+            self._log_message(f"✓ Exported Similarity results to Excel: {excel_path}")
+        except Exception as e:
+            self._log_message(f"⚠️ Similarity Excel export error: {e}")
 
-    def _export_coherence_method_results(self, file_path):
-        """Export Coherence Analysis results using module function."""
-        from ._circadian_coherence import export_coherence_to_excel
+    def _export_coherence_method_results(self, base_path):
+        """Export Coherence Analysis results to CSV and Excel."""
+        csv_path = f"{base_path}.csv"
+        self._export_coherence_to_csv(csv_path)
+        self._log_message(f"✓ Exported Coherence results to CSV: {csv_path}")
 
-        export_coherence_to_excel(file_path, self.fisher_analysis_results)
-        self._log_message(f"✓ Exported Coherence results to: {file_path}")
+        try:
+            from ._circadian_coherence import export_coherence_to_excel
+            excel_path = f"{base_path}.xlsx"
+            export_coherence_to_excel(excel_path, self.fisher_analysis_results)
+            self._log_message(f"✓ Exported Coherence results to Excel: {excel_path}")
+        except Exception as e:
+            self._log_message(f"⚠️ Coherence Excel export error: {e}")
 
-    def _export_phase_clustering_method_results(self, file_path):
+    def _export_phase_clustering_method_results(self, base_path):
+        """Export Phase Clustering results to CSV and Excel."""
+        csv_path = f"{base_path}.csv"
+        self._export_phase_clustering_to_csv(csv_path)
+        self._log_message(f"✓ Exported Phase Clustering results to CSV: {csv_path}")
+
+        try:
+            import pandas as pd
+            excel_path = f"{base_path}.xlsx"
+            self._export_phase_clustering_to_excel(excel_path)
+            self._log_message(f"✓ Exported Phase Clustering results to Excel: {excel_path}")
+        except Exception as e:
+            self._log_message(f"⚠️ Phase Clustering Excel export error: {e}")
+
+    def _export_phase_clustering_to_excel(self, file_path):
         """Export Phase Clustering results to Excel."""
         import pandas as pd
 
@@ -11235,7 +12919,224 @@ class HDF5AnalysisWidget(QWidget):
             )
             params_df.to_excel(writer, sheet_name="Parameters", index=False)
 
-        self._log_message(f"✓ Exported Phase Clustering results to: {file_path}")
+        self._log_message(f"✓ Exported Phase Clustering results to Excel: {file_path}")
+
+    def _export_cosinor_to_csv(self, file_path: str):
+        """Export Cosinor Analysis results to CSV format."""
+        import csv
+
+        results = self.fisher_analysis_results
+        roi_results = results.get("roi_results", {})
+        sleep_results = results.get("sleep_phase_results", {})
+        sleep_roi_results = sleep_results.get("roi_results", {}) if sleep_results else {}
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow(["Cosinor Analysis Results"])
+            writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+            writer.writerow([])
+
+            # Activity Summary
+            writer.writerow(["Activity Summary"])
+            writer.writerow(["ROI", "Best Period (h)", "Peak Time (h)", "Phase Angle (rad)",
+                             "MESOR", "Amplitude", "R-squared", "P-value", "Significant"])
+            for roi_id, roi_data in sorted(
+                {k: v for k, v in roi_results.items() if isinstance(k, int)}.items()
+            ):
+                best = roi_data.get("best_result", {})
+                if "error" in best:
+                    writer.writerow([roi_id, "Error", best["error"]])
+                    continue
+                writer.writerow([
+                    roi_id,
+                    f"{roi_data.get('best_period', 'N/A')}",
+                    f"{best.get('peak_time', 'N/A')}",
+                    f"{best.get('phase_angle_rad', 'N/A')}",
+                    f"{best.get('mesor', 'N/A')}",
+                    f"{best.get('amplitude', 'N/A')}",
+                    f"{best.get('r_squared', 'N/A')}",
+                    f"{best.get('p_value', 'N/A')}",
+                    str(best.get("significant", False)),
+                ])
+
+            if sleep_roi_results:
+                writer.writerow([])
+                writer.writerow(["Sleep Summary"])
+                writer.writerow(["ROI", "Best Period (h)", "Sleep Peak Time (h)",
+                                 "MESOR", "Amplitude", "R-squared", "P-value", "Significant"])
+                for roi_id, roi_data in sorted(
+                    {k: v for k, v in sleep_roi_results.items() if isinstance(k, int)}.items()
+                ):
+                    best = roi_data.get("best_result", {})
+                    if "error" in best:
+                        writer.writerow([roi_id, "Error", best["error"]])
+                        continue
+                    writer.writerow([
+                        roi_id,
+                        f"{roi_data.get('best_period', 'N/A')}",
+                        f"{best.get('peak_time', 'N/A')}",
+                        f"{best.get('mesor', 'N/A')}",
+                        f"{best.get('amplitude', 'N/A')}",
+                        f"{best.get('r_squared', 'N/A')}",
+                        f"{best.get('p_value', 'N/A')}",
+                        str(best.get("significant", False)),
+                    ])
+
+            writer.writerow([])
+            writer.writerow(["Parameters"])
+            writer.writerow(["Parameter", "Value"])
+            writer.writerow(["Minimum Period", f"{self.fisher_min_period.value():.1f} hours"])
+            writer.writerow(["Maximum Period", f"{self.fisher_max_period.value():.1f} hours"])
+            writer.writerow(["Significance Level", f"{self.fisher_significance.value():.3f}"])
+            writer.writerow(["Sampling Interval", f"{self.frame_interval.value():.1f} seconds"])
+            writer.writerow(["Sleep Phase Calculated", "Yes" if sleep_roi_results else "No"])
+
+    def _export_similarity_to_csv(self, file_path: str):
+        """Export ROI Similarity (correlation matrix) results to CSV format."""
+        import csv
+
+        results = self.fisher_analysis_results
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow(["ROI Similarity Analysis Results"])
+            writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+            writer.writerow([])
+
+            # Correlation matrix
+            corr_matrix = results.get("correlation_matrix", None)
+            roi_ids = results.get("roi_ids", [])
+            if corr_matrix is not None and len(roi_ids) > 0:
+                writer.writerow(["Correlation Matrix"])
+                writer.writerow(["ROI"] + [f"ROI {r}" for r in roi_ids])
+                for i, roi_id in enumerate(roi_ids):
+                    row = [f"ROI {roi_id}"]
+                    for j in range(len(roi_ids)):
+                        row.append(f"{corr_matrix[i, j]:.4f}")
+                    writer.writerow(row)
+            else:
+                writer.writerow(["No correlation matrix available"])
+
+            # Lag matrix
+            lag_matrix = results.get("lag_matrix", None)
+            if lag_matrix is not None and len(roi_ids) > 0:
+                writer.writerow([])
+                writer.writerow(["Lag Matrix (hours)"])
+                writer.writerow(["ROI"] + [f"ROI {r}" for r in roi_ids])
+                for i, roi_id in enumerate(roi_ids):
+                    row = [f"ROI {roi_id}"]
+                    for j in range(len(roi_ids)):
+                        row.append(f"{lag_matrix[i, j]:.2f}")
+                    writer.writerow(row)
+
+            # Cluster assignments
+            clusters = results.get("clusters", None)
+            if clusters is not None and len(roi_ids) > 0:
+                writer.writerow([])
+                writer.writerow(["Cluster Assignments"])
+                writer.writerow(["ROI", "Cluster"])
+                for roi_id, cluster in zip(roi_ids, clusters):
+                    writer.writerow([roi_id, cluster])
+
+    def _export_coherence_to_csv(self, file_path: str):
+        """Export Coherence Analysis results to CSV format."""
+        import csv
+
+        results = self.fisher_analysis_results
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow(["Coherence Analysis Results"])
+            writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+            writer.writerow([])
+
+            # Pairwise coherence summary
+            coherence_data = results.get("coherence_results", {})
+            if coherence_data:
+                writer.writerow(["Pairwise Coherence Summary"])
+                writer.writerow(["ROI Pair", "Mean Coherence", "Peak Frequency (Hz)",
+                                 "Peak Period (h)"])
+                for pair_key, pair_data in coherence_data.items():
+                    if isinstance(pair_data, dict):
+                        freqs = pair_data.get("frequencies", [])
+                        coh = pair_data.get("coherence", [])
+                        mean_coh = float(np.mean(coh)) if len(coh) > 0 else 0.0
+                        if len(freqs) > 0 and len(coh) > 0:
+                            peak_idx = int(np.argmax(coh))
+                            peak_freq = freqs[peak_idx]
+                            peak_period = (1.0 / peak_freq / 3600.0) if peak_freq > 0 else 0.0
+                        else:
+                            peak_freq = 0.0
+                            peak_period = 0.0
+                        writer.writerow([pair_key, f"{mean_coh:.4f}",
+                                         f"{peak_freq:.6f}", f"{peak_period:.2f}"])
+
+                # Detailed frequency-by-frequency data per pair
+                writer.writerow([])
+                writer.writerow(["Detailed Coherence per Pair"])
+                for pair_key, pair_data in coherence_data.items():
+                    if isinstance(pair_data, dict):
+                        freqs = pair_data.get("frequencies", [])
+                        coh = pair_data.get("coherence", [])
+                        if len(freqs) > 0:
+                            writer.writerow([])
+                            writer.writerow([f"Pair: {pair_key}"])
+                            writer.writerow(["Frequency (Hz)", "Period (h)", "Coherence"])
+                            for f, c in zip(freqs, coh):
+                                period_h = (1.0 / f / 3600.0) if f > 0 else 0.0
+                                writer.writerow([f"{f:.6f}", f"{period_h:.2f}", f"{c:.4f}"])
+            else:
+                writer.writerow(["No coherence data available"])
+
+    def _export_phase_clustering_to_csv(self, file_path: str):
+        """Export Phase Clustering results to CSV format."""
+        import csv
+
+        results = self.fisher_analysis_results
+
+        with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+
+            writer.writerow(["Phase Clustering Results"])
+            writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+            writer.writerow([])
+
+            # Parameters
+            writer.writerow(["Parameters"])
+            writer.writerow(["Number of Clusters",
+                             len(results.get("phase_clusters", {}))])
+            writer.writerow(["Number of ROIs", results.get("n_rois", 0)])
+            writer.writerow(["Dominant Period (h)",
+                             f"{results.get('dominant_period_hours', 0):.1f}"])
+            writer.writerow([])
+
+            # Cluster assignments
+            phase_clusters = results.get("phase_clusters", {})
+            if phase_clusters:
+                writer.writerow(["Cluster Assignments"])
+                writer.writerow(["ROI", "Cluster", "Cluster Size"])
+                for cluster_name, roi_list in phase_clusters.items():
+                    label = cluster_name.replace("_", " ").title()
+                    for roi in sorted(roi_list):
+                        writer.writerow([roi, label, len(roi_list)])
+
+            # Phase values per ROI
+            roi_phases = results.get("roi_phases", {})
+            if roi_phases:
+                writer.writerow([])
+                writer.writerow(["Phase Values per ROI"])
+                writer.writerow(["ROI", "Phase (rad)", "Phase (deg)", "Phase (h)", "Amplitude"])
+                for roi_id, phase_info in sorted(roi_phases.items()):
+                    writer.writerow([
+                        roi_id,
+                        f"{phase_info.get('phase_radians', 0):.4f}",
+                        f"{np.degrees(phase_info.get('phase_radians', 0)):.2f}",
+                        f"{phase_info.get('phase_hours', 0):.2f}",
+                        f"{phase_info.get('amplitude', 0):.4f}",
+                    ])
 
     def _export_fft_to_csv(self, file_path: str):
         """Export FFT Power Spectrum results to CSV format."""
@@ -11864,7 +13765,7 @@ class HDF5AnalysisWidget(QWidget):
             # Get data source name for titles
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
-                "Fraction Movement" if data_source_index == 0 else "Raw Movement"
+                "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
 
             # Check if sleep phase results are available
@@ -11894,17 +13795,26 @@ class HDF5AnalysisWidget(QWidget):
                 total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
             )
 
+            # Check if max period was capped for any ROI
+            cap_note = ""
+            for _roi_id, _roi_res in roi_only_results.items():
+                _peri = _roi_res.get("periodogram", {})
+                if _peri.get("period_capped", False):
+                    _actual = _peri.get("actual_max_period", 0)
+                    cap_note = f"  (max period capped at {_actual:.1f}h = recording / 2)"
+                    break
+
             if has_sleep:
                 fig.suptitle(
-                    f"Fisher Z-Transformation Periodogram  —  {data_source}",
-                    fontsize=13,
+                    f"Chi² Periodogram  —  {data_source}{cap_note}{self._get_recording_start_str()}",
+                    fontsize=11,
                     fontweight="bold",
                     y=0.99,
                 )
             else:
                 fig.suptitle(
-                    f"Fisher Z-Transformation Periodogram  —  Activity from {data_source}",
-                    fontsize=13,
+                    f"Chi² Periodogram  —  Activity from {data_source}{cap_note}{self._get_recording_start_str()}",
+                    fontsize=11,
                     fontweight="bold",
                     y=0.99,
                 )
@@ -12012,6 +13922,10 @@ class HDF5AnalysisWidget(QWidget):
                                 ),
                             )
 
+                        # Set x-axis to actual data range (analysis caps max at duration/2)
+                        if len(periods) > 0:
+                            ax.set_xlim(min(periods), max(periods))
+
                 # Hide unused subplots in this section
                 for idx in range(n_rois, n_rows_per_section * n_cols):
                     row = start_row + (idx // n_cols)
@@ -12056,6 +13970,8 @@ class HDF5AnalysisWidget(QWidget):
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
                 self.btn_popout_plot.setEnabled(True)
+                if hasattr(self, "btn_save_fisher_plot"):
+                    self.btn_save_fisher_plot.setEnabled(True)
 
             # Note: Don't close fig - we need it for export
 
@@ -12184,25 +14100,114 @@ class HDF5AnalysisWidget(QWidget):
 
             traceback.print_exc()
 
+    def _save_fisher_plot(self):
+        """Save the currently displayed periodogram / analysis plot as an image file."""
+        if not hasattr(self, "fisher_plot_figure") or self.fisher_plot_figure is None:
+            self._log_message("⚠️ No plot to save — run an analysis first.")
+            return
+
+        # Build a default filename from the HDF5 file and current method
+        try:
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+        except Exception:
+            base = "analysis"
+        method_names = {0: "fisher", 1: "fft", 2: "cosinor", 3: "similarity",
+                        4: "coherence", 5: "phase_clustering"}
+        method_idx = getattr(self, "current_fisher_method", 0)
+        method_tag = method_names.get(method_idx, "plot")
+        default_name = f"{base}_{method_tag}_plot.png"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Plot",
+            default_name,
+            "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            dpi = self.plot_dpi_spin.value() if hasattr(self, "plot_dpi_spin") else 150
+            self.fisher_plot_figure.savefig(
+                file_path, dpi=dpi, bbox_inches="tight", facecolor="white"
+            )
+            self._log_message(f"✓ Plot saved: {os.path.basename(file_path)}")
+        except Exception as e:
+            self._log_message(f"⚠️ Could not save plot: {e}")
+
     # ===================================================================
     # FRAME VIEWER METHODS
     # ===================================================================
 
+    def _update_viewer_file_combo(self):
+        """Update the file selector combo box with all available files."""
+        if not hasattr(self, "viewer_file_combo"):
+            return
+
+        self.viewer_file_combo.blockSignals(True)
+        self.viewer_file_combo.clear()
+
+        files_added = set()
+
+        # Add current HDF5 file
+        if hasattr(self, "file_path") and self.file_path and self.file_path not in files_added:
+            self.viewer_file_combo.addItem(
+                os.path.basename(self.file_path), self.file_path
+            )
+            files_added.add(self.file_path)
+
+        # Add all AVI batch files
+        if hasattr(self, "avi_batch_paths") and self.avi_batch_paths:
+            for avi_path in self.avi_batch_paths:
+                if avi_path not in files_added:
+                    self.viewer_file_combo.addItem(
+                        os.path.basename(avi_path), avi_path
+                    )
+                    files_added.add(avi_path)
+
+        # Add HDF5 files from directory
+        if hasattr(self, "directory") and self.directory:
+            try:
+                for f in sorted(os.listdir(self.directory)):
+                    full_path = os.path.join(self.directory, f)
+                    if f.lower().endswith((".h5", ".hdf5")) and full_path not in files_added:
+                        self.viewer_file_combo.addItem(f, full_path)
+                        files_added.add(full_path)
+            except Exception:
+                pass
+
+        self.viewer_file_combo.blockSignals(False)
+
+        if self.viewer_file_combo.count() > 0:
+            self._log_message(
+                f"Frame Viewer: {self.viewer_file_combo.count()} file(s) available"
+            )
+
     def _viewer_load_data(self):
-        """Load the current dataset into the frame viewer."""
-        # Check if we have a loaded file
-        if not hasattr(self, "file_path") or not self.file_path:
+        """Load the selected file into the frame viewer."""
+        # Use file from combo box if available
+        selected_path = None
+        if hasattr(self, "viewer_file_combo") and self.viewer_file_combo.count() > 0:
+            selected_path = self.viewer_file_combo.currentData()
+
+        # Fallback to self.file_path
+        if not selected_path:
+            selected_path = getattr(self, "file_path", None)
+
+        if not selected_path:
             self.viewer_status_label.setText(
                 "⚠️ No file loaded. Please load a file in the Input tab first."
             )
             self._log_message("⚠️ Frame viewer: No file loaded")
             return
 
-        try:
+        # Set file_path to the selected file for viewer loading
+        self.file_path = selected_path
 
+        try:
             # Check if HDF5 or AVI
-            is_hdf5 = self.file_path.lower().endswith((".h5", ".hdf5"))
-            is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
+            is_hdf5 = selected_path.lower().endswith((".h5", ".hdf5"))
+            is_avi = selected_path.lower().endswith(".avi")
 
             if is_avi:
                 # Load AVI batch
@@ -12307,9 +14312,7 @@ class HDF5AnalysisWidget(QWidget):
 
         self.export_end_frame.setEnabled(True)
         self.export_end_frame.setMaximum(self.viewer_n_frames - 1)
-        self.export_end_frame.setValue(
-            min(99, self.viewer_n_frames - 1)
-        )  # Default to first 100 frames
+        self.export_end_frame.setValue(self.viewer_n_frames - 1)  # Default to all frames
 
         self.btn_export_video.setEnabled(True)
         self.btn_export_gif.setEnabled(True)
@@ -12328,72 +14331,179 @@ class HDF5AnalysisWidget(QWidget):
         self._viewer_show_frame(0)
 
     def _viewer_load_avi_batch(self):
-        """Load AVI batch frames into viewer."""
+        """Load AVI batch as one continuous video (same sampling as analysis)."""
+        import numpy as np
+        import cv2
+        from qtpy.QtWidgets import QProgressDialog
+
+        avi_paths = getattr(self, "avi_batch_paths", [])
+        if not avi_paths:
+            raise ValueError("No AVI batch paths available.")
+
+        target_interval = getattr(self, "avi_batch_interval", 5.0)
+        self.viewer_frame_interval = target_interval
 
         self._log_message(
-            f"Loading AVI batch into frame viewer: {len(self.avi_batch_paths)} files"
+            f"Loading AVI batch into frame viewer: {len(avi_paths)} files, "
+            f"sampling interval={target_interval}s"
         )
 
-        # Get frame interval from AVI metadata if available
-        if hasattr(self, "avi_metadata") and self.avi_metadata:
-            self.viewer_frame_interval = self.avi_metadata.get("frame_interval", 5.0)
-        else:
-            self.viewer_frame_interval = 5.0
+        # First pass: count total sampled frames
+        total_sampled = 0
+        video_infos = []
+        for path in avi_paths:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                self._log_message(f"Cannot open: {path}")
+                continue
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            frames_per_sample = max(1, int(fps * target_interval))
+            sampled = len(range(0, n_frames, frames_per_sample))
+            video_infos.append((path, fps, n_frames, frames_per_sample, sampled))
+            total_sampled += sampled
 
-        # For AVI, we'll use napari layers if available
-        if len(self.viewer.layers) > 0:
-            layer = self.viewer.layers[0]
-            if hasattr(layer, "data"):
-                self.viewer_frames = layer.data
-                self.viewer_n_frames = (
-                    layer.data.shape[0] if layer.data.ndim >= 3 else 1
-                )
-                self.viewer_file_handle = None
-                self.viewer_is_sequence = False
+        if total_sampled == 0:
+            raise ValueError("No frames found in AVI batch.")
 
-                # Update UI
-                self.viewer_current_frame = 0
-                self.viewer_frame_slider.setMaximum(self.viewer_n_frames - 1)
-                self.viewer_frame_slider.setValue(0)
-                self.viewer_frame_slider.setEnabled(True)
+        self._log_message(
+            f"Total sampled frames across all videos: {total_sampled}"
+        )
 
-                # Enable controls
-                self.btn_viewer_first.setEnabled(True)
-                self.btn_viewer_prev.setEnabled(True)
-                self.btn_viewer_play.setEnabled(True)
-                self.btn_viewer_next.setEnabled(True)
-                self.btn_viewer_last.setEnabled(True)
+        # Second pass: load sampled frames with progress
+        progress = QProgressDialog(
+            f"Loading {total_sampled} sampled frames from {len(video_infos)} videos...",
+            "Cancel", 0, total_sampled, self,
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(500)
 
-                # Enable export controls
-                self.export_start_frame.setEnabled(True)
-                self.export_start_frame.setMaximum(self.viewer_n_frames - 1)
-                self.export_start_frame.setValue(0)
+        # Pre-estimate memory: get frame size from first video
+        _h, _w = 0, 0
+        _probe = cv2.VideoCapture(video_infos[0][0])
+        if _probe.isOpened():
+            _h = int(_probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            _w = int(_probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        _probe.release()
+        est_bytes = total_sampled * _h * _w  # grayscale = 1 byte/pixel
+        est_gb = est_bytes / 1024**3
+        if est_gb > 4.0:
+            self._log_message(
+                f"⚠️ AVI batch too large to load ({total_sampled} frames × "
+                f"{_h}×{_w} ≈ {est_gb:.1f} GB). "
+                f"Use a shorter time range or increase the frame interval."
+            )
+            progress.close()
+            return
 
-                self.export_end_frame.setEnabled(True)
-                self.export_end_frame.setMaximum(self.viewer_n_frames - 1)
-                self.export_end_frame.setValue(
-                    min(99, self.viewer_n_frames - 1)
-                )  # Default to first 100 frames
+        all_frames = []
+        loaded = 0
+        oom_hit = False
 
-                self.btn_export_video.setEnabled(True)
-                self.btn_export_gif.setEnabled(True)
+        for path, fps, n_frames, frames_per_sample, sampled in video_infos:
+            if oom_hit:
+                break
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                continue
+            for frame_idx in range(0, n_frames, frames_per_sample):
+                if progress.wasCanceled():
+                    cap.release()
+                    self._log_message("AVI batch loading canceled.")
+                    return
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                try:
+                    ret, frame = cap.read()
+                except (SystemError, MemoryError):
+                    oom_hit = True
+                    break
+                if ret and frame is not None:
+                    try:
+                        # Convert to grayscale
+                        if len(frame.shape) == 3:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        all_frames.append(frame)
+                    except MemoryError:
+                        oom_hit = True
+                        break
+                loaded += 1
+                if loaded % 20 == 0:
+                    progress.setValue(loaded)
+            cap.release()
 
-                self.viewer_status_label.setText(
-                    f"✓ Loaded AVI: {self.viewer_n_frames} frames (Interval: {self.viewer_frame_interval}s)"
-                )
-                self._log_message(
-                    f"✓ Frame viewer: Loaded {self.viewer_n_frames} frames from AVI batch (interval: {self.viewer_frame_interval}s)"
-                )
+        if oom_hit:
+            self._log_message(
+                f"⚠️ Out of memory after loading {len(all_frames)} frames — "
+                f"showing partial batch. Use a shorter time range."
+            )
 
-                # Pre-load frames into cache for smooth playback
-                self._viewer_preload_frames()
+        progress.setValue(total_sampled)
 
-                # Display first frame
-                self._viewer_show_frame(0)
-            else:
-                raise ValueError("No image data in viewer layer")
-        else:
-            raise ValueError("No layers in viewer. Please load AVI batch first.")
+        if not all_frames:
+            raise ValueError("No frames loaded from AVI batch.")
+
+        try:
+            self.viewer_frames = np.stack(all_frames, axis=0)
+        except MemoryError:
+            self._log_message(
+                f"⚠️ Cannot stack {len(all_frames)} frames into memory. "
+                f"Reduce the number of videos or increase frame interval."
+            )
+            return
+        self.viewer_n_frames = len(all_frames)
+        self.viewer_file_handle = None
+        self.viewer_is_sequence = False
+
+        # Update UI controls
+        self.viewer_current_frame = 0
+        self.viewer_frame_slider.setMaximum(self.viewer_n_frames - 1)
+        self.viewer_frame_slider.setValue(0)
+        self.viewer_frame_slider.setEnabled(True)
+
+        self.btn_viewer_first.setEnabled(True)
+        self.btn_viewer_prev.setEnabled(True)
+        self.btn_viewer_play.setEnabled(True)
+        self.btn_viewer_next.setEnabled(True)
+        self.btn_viewer_last.setEnabled(True)
+
+        self.export_start_frame.setEnabled(True)
+        self.export_start_frame.setMaximum(self.viewer_n_frames - 1)
+        self.export_start_frame.setValue(0)
+        self.export_end_frame.setEnabled(True)
+        self.export_end_frame.setMaximum(self.viewer_n_frames - 1)
+        self.export_end_frame.setValue(self.viewer_n_frames - 1)
+        self.btn_export_video.setEnabled(True)
+        self.btn_export_gif.setEnabled(True)
+
+        # Build per-frame video source info for status display
+        self._viewer_avi_video_boundaries = []
+        frame_offset = 0
+        for path, fps, n_frames, frames_per_sample, sampled in video_infos:
+            self._viewer_avi_video_boundaries.append(
+                (frame_offset, frame_offset + sampled - 1, os.path.basename(path))
+            )
+            frame_offset += sampled
+
+        total_duration = self.viewer_n_frames * target_interval
+        self.viewer_status_label.setText(
+            f"AVI Batch: {self.viewer_n_frames} frames from {len(video_infos)} videos "
+            f"({total_duration/60:.1f} min, interval={target_interval}s)"
+        )
+        self._log_message(
+            f"Frame viewer: Loaded {self.viewer_n_frames} sampled frames "
+            f"from {len(video_infos)} AVI files as continuous video"
+        )
+        for start, end, name in self._viewer_avi_video_boundaries:
+            self._log_message(f"  {name}: frames {start}-{end}")
+
+        # Pre-process for display cache
+        self.viewer_frame_cache = [
+            self._prepare_frame_for_display(f) for f in all_frames
+        ]
+
+        # Display first frame
+        self._viewer_show_frame(0)
 
     def _viewer_preload_frames(self):
         """Pre-load all frames into memory cache for smooth playback."""
@@ -12543,6 +14653,103 @@ class HDF5AnalysisWidget(QWidget):
 
         return frame
 
+    def _draw_roi_overlay(self, frame):
+        """Draw ROI circles and numbers on a frame (in-place).
+
+        Uses the stored circle positions from ROI detection. Falls back to
+        computing circle approximations from masks if circles aren't available.
+        """
+        import cv2
+        import numpy as np
+
+        # Get ROI exclusion info
+        excluded = set()
+        if hasattr(self, "roi_checkboxes") and self.roi_checkboxes:
+            excluded = {
+                i for i, cb in enumerate(self.roi_checkboxes) if not cb.isChecked()
+            }
+
+        # Try to use stored circle positions (most accurate)
+        circles = getattr(self, "_original_circles", None)
+        scale = getattr(self, "roi_scale", None)
+        scale_val = scale.value() if scale is not None else 1.0
+
+        if circles is not None:
+            for idx, circle in enumerate(circles):
+                cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2] * scale_val)
+                is_excluded = idx in excluded
+
+                # Green for active, red for excluded
+                color = (0, 0, 255) if is_excluded else (0, 255, 0)
+                cv2.circle(frame, (cx, cy), r, color, 2)
+
+                # ROI number label
+                label = f"{idx + 1}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1.8
+                thickness = 3
+                (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                text_x = cx - tw // 2
+                text_y = cy + th // 2
+                # Dark background for readability
+                cv2.rectangle(
+                    frame,
+                    (text_x - 4, text_y - th - 4),
+                    (text_x + tw + 4, text_y + 4),
+                    (0, 0, 0),
+                    -1,
+                )
+                text_color = (100, 100, 255) if is_excluded else (255, 100, 100)
+                cv2.putText(
+                    frame, label, (text_x, text_y),
+                    font, font_scale, text_color, thickness, cv2.LINE_AA,
+                )
+            return
+
+        # Fallback: derive circles from masks
+        masks = getattr(self, "masks", [])
+        if not masks:
+            return
+
+        for idx, mask in enumerate(masks):
+            if mask is None or mask.size == 0:
+                continue
+            is_excluded = idx in excluded
+            ys, xs = np.where(mask > 0)
+            if len(xs) == 0:
+                continue
+            cx = int(np.mean(xs))
+            cy = int(np.mean(ys))
+            r = int(np.sqrt(len(xs) / np.pi))
+
+            color = (0, 0, 255) if is_excluded else (0, 255, 0)
+            cv2.circle(frame, (cx, cy), r, color, 2)
+
+            label = f"{idx + 1}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.8
+            thickness = 3
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            text_x = cx - tw // 2
+            text_y = cy + th // 2
+            cv2.rectangle(
+                frame,
+                (text_x - 4, text_y - th - 4),
+                (text_x + tw + 4, text_y + 4),
+                (0, 0, 0),
+                -1,
+            )
+            text_color = (100, 100, 255) if is_excluded else (255, 100, 100)
+            cv2.putText(
+                frame, label, (text_x, text_y),
+                font, font_scale, text_color, thickness, cv2.LINE_AA,
+            )
+
+    def _on_viewer_roi_overlay_changed(self, enabled):
+        """Re-render the current frame when the ROI overlay toggle changes."""
+        if hasattr(self, "viewer_current_frame"):
+            self._viewer_show_frame(self.viewer_current_frame)
+
     def _viewer_show_frame(self, frame_idx):
         """Display a specific frame in the napari viewer."""
         try:
@@ -12609,6 +14816,13 @@ class HDF5AnalysisWidget(QWidget):
                 cv2.LINE_AA,
             )
 
+            # Draw ROI overlay if enabled
+            if (
+                hasattr(self, "viewer_show_roi_overlay")
+                and self.viewer_show_roi_overlay.isChecked()
+            ):
+                self._draw_roi_overlay(frame_with_text)
+
             # Create or update napari layer
             layer_name = "Frame Viewer"
 
@@ -12649,6 +14863,372 @@ class HDF5AnalysisWidget(QWidget):
     def _on_viewer_frame_changed(self, value):
         """Handle slider value change."""
         self._viewer_show_frame(value)
+        # Update synchronized plot time marker
+        if hasattr(self, "sync_plots_enabled") and self.sync_plots_enabled.isChecked():
+            self._update_sync_time_marker(value)
+
+    def _toggle_sync_plots(self, enabled):
+        """Toggle synchronized plots visibility."""
+        self.sync_canvas.setVisible(enabled)
+        if enabled:
+            self._update_sync_plot()
+
+    def _get_sync_plot_data(self):
+        """Return (plot_type, data_dict) for the current sync plot settings, with rebinning applied."""
+        sync_type = self.sync_plot_type.currentText()
+        sync_bin = self.sync_plot_bin.value() if hasattr(self, "sync_plot_bin") else 0
+        original_bin = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
+        new_bin_seconds = sync_bin * 60
+
+        def maybe_rebin(dd):
+            if dd and new_bin_seconds > original_bin:
+                return self._rebin_timeseries_data(dd, new_bin_seconds, original_bin)
+            return dd
+
+        if "Raw Intensity" in sync_type:
+            return "Raw Intensity Changes", self.merged_results
+        elif "Movement (binary)" in sync_type:
+            return "Movement", maybe_rebin(getattr(self, "movement_data", {}))
+        elif "Fraction Movement" in sync_type:
+            return "Fraction Movement", maybe_rebin(getattr(self, "fraction_data", {}))
+        elif "Quiescence" in sync_type:
+            return "Quiescence", maybe_rebin(getattr(self, "quiescence_data", {}))
+        elif "Sleep Quality" in sync_type:
+            return "Sleep Quality", getattr(self, "sleep_quality_data", {})
+        elif "Sleep" in sync_type:
+            return "Sleep", maybe_rebin(getattr(self, "sleep_data", {}))
+        else:
+            return "Raw Intensity Changes", self.merged_results
+
+    def _update_sync_plot(self):
+        """Update the synchronized analysis plot (same style as Analysis tab)."""
+        if not hasattr(self, "sync_plots_enabled") or not self.sync_plots_enabled.isChecked():
+            return
+
+        # Check if we have analysis data
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("⚠️ No analysis data for synchronized plots")
+            return
+
+        from ._plot import PlotGenerator, create_plot_config, create_hysteresis_kwargs
+
+        plot_type, data_dict = self._get_sync_plot_data()
+
+        if not data_dict:
+            self._log_message(f"⚠️ No {self.sync_plot_type.currentText()} data available")
+            return
+
+        # Get ROI colors
+        roi_colors = getattr(self, "roi_colors", {})
+        n_rois = len(data_dict)
+        if n_rois == 0:
+            return
+
+        # Clear figure
+        self.sync_figure.clear()
+
+        # Dynamically adjust figure size based on canvas size and number of ROIs
+        canvas_height = self.sync_canvas.height()
+        canvas_width = self.sync_canvas.width()
+        dpi = self.sync_figure.get_dpi()
+
+        # Set figure size to match canvas
+        fig_width = max(10, canvas_width / dpi)
+        fig_height = max(4, canvas_height / dpi)
+        self.sync_figure.set_size_inches(fig_width, fig_height)
+
+        # Create plot configuration from widget settings (same as Analysis tab)
+        plot_config = create_plot_config(self)
+        # Calculate optimal height per ROI based on available space
+        plot_config["height_per_roi"] = max(0.6, fig_height / n_rois) if n_rois > 0 else 0.8
+        plot_config["fig_width"] = fig_width
+
+        # Get kwargs for specific plot types
+        if plot_type == "Raw Intensity Changes":
+            hysteresis_kwargs = create_hysteresis_kwargs(widget_instance=self)
+            hysteresis_kwargs.pop("merged_results", None)
+        elif plot_type == "Sleep Quality":
+            hysteresis_kwargs = {"sleep_metric": "sleep_minutes"}
+        else:
+            hysteresis_kwargs = {}
+
+        # Use PlotGenerator (same as Analysis tab)
+        plot_generator = PlotGenerator(self.sync_figure)
+        plot_generator.generate_plot(
+            plot_type, data_dict, roi_colors, plot_config, **hysteresis_kwargs
+        )
+
+        # Store time markers for each subplot
+        self.sync_time_markers = []
+        for ax in self.sync_figure.get_axes():
+            marker = ax.axvline(x=0, color="red", linewidth=2, linestyle="--", alpha=0.9, zorder=100)
+            self.sync_time_markers.append(marker)
+
+        # Adjust layout to maximize plot area (suppress warning for incompatible axes)
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # Use subplots_adjust for better space usage
+                self.sync_figure.subplots_adjust(
+                    left=0.08, right=0.92, top=0.95, bottom=0.08, hspace=0.15
+                )
+        except Exception:
+            pass
+
+        # Draw canvas
+        self.sync_canvas.draw()
+
+        # Update marker to current position
+        if hasattr(self, "viewer_current_frame"):
+            self._update_sync_time_marker(self.viewer_current_frame)
+
+    def _update_sync_time_marker(self, frame_idx):
+        """Update the time marker position in synchronized plots."""
+        if not hasattr(self, "sync_time_markers") or not self.sync_time_markers:
+            return
+
+        if not hasattr(self, "viewer_frame_interval"):
+            return
+
+        # Calculate time in minutes
+        time_minutes = (frame_idx * self.viewer_frame_interval) / 60.0
+
+        # Update all markers
+        for marker in self.sync_time_markers:
+            marker.set_xdata([time_minutes, time_minutes])
+
+        # Redraw canvas (use blit for performance if available)
+        try:
+            self.sync_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _export_video_with_plots(self):
+        """Export video with synchronized analysis plots (same style as Analysis tab)."""
+        import cv2
+        import numpy as np
+        from qtpy.QtWidgets import QFileDialog, QProgressDialog
+        from qtpy.QtCore import Qt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from ._plot import PlotGenerator, create_plot_config, create_hysteresis_kwargs
+
+        # Check prerequisites
+        if not hasattr(self, "viewer_n_frames") or self.viewer_n_frames == 0:
+            self._log_message("❌ No frames loaded. Load data into Frame Viewer first.")
+            return
+
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("❌ No analysis data. Run Main Analysis first.")
+            return
+
+        # Get frame range from export controls
+        start_frame = self.export_start_frame.value()
+        end_frame = self.export_end_frame.value()
+
+        if start_frame >= end_frame:
+            self._log_message("❌ Start frame must be less than end frame")
+            return
+
+        # Ask for save location
+        default_name = f"video_with_plots_{start_frame}-{end_frame}.mp4"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Video with Plots",
+            default_name,
+            "MP4 Video (*.mp4);;All Files (*)",
+        )
+
+        if not file_path:
+            return
+
+        export_fps = self.export_fps_spin.value()
+        n_frames = end_frame - start_frame
+
+        self._log_message(f"🎬 Exporting {n_frames} frames with plots at {export_fps} FPS...")
+
+        # Setup progress dialog
+        progress = QProgressDialog("Exporting video with plots...", "Cancel", 0, n_frames, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowTitle("Export Progress")
+        progress.show()
+
+        # Process events to show dialog
+        from qtpy.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        plot_type, data_dict = self._get_sync_plot_data()
+
+        if not data_dict:
+            self._log_message(f"❌ No {self.sync_plot_type.currentText()} data available")
+            return
+
+        roi_colors = getattr(self, "roi_colors", {})
+        n_rois = len(data_dict)
+
+        # Get first frame to determine dimensions
+        first_frame = self._get_viewer_frame(start_frame)
+        frame_height, frame_width = first_frame.shape[:2]
+
+        # Create plot figure dimensions matching Analysis tab style
+        plot_dpi = 100
+        plot_width = frame_width
+        height_per_roi = 60  # pixels per ROI
+        plot_height = max(200, height_per_roi * n_rois)
+        fig_width = plot_width / plot_dpi
+        fig_height = plot_height / plot_dpi
+
+        # Total output dimensions: frame on top, plots below
+        output_width = frame_width
+        output_height = frame_height + plot_height
+
+        # Initialize video writer
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(file_path, fourcc, export_fps, (output_width, output_height))
+
+        # Create plot configuration from widget settings (same as Analysis tab)
+        base_plot_config = create_plot_config(self)
+        base_plot_config["fig_width"] = fig_width
+        base_plot_config["height_per_roi"] = fig_height / n_rois if n_rois > 0 else 0.6
+        base_plot_config["dpi"] = plot_dpi
+
+        # Get extra kwargs for specific plot types
+        if plot_type == "Raw Intensity Changes":
+            hysteresis_kwargs = create_hysteresis_kwargs(widget_instance=self)
+            hysteresis_kwargs.pop("merged_results", None)
+        elif plot_type == "Sleep Quality":
+            sleep_metric = "sleep_minutes"
+            if hasattr(self, "sleep_quality_metric_combo"):
+                metric_text = self.sleep_quality_metric_combo.currentText()
+                if "Transitions" in metric_text:
+                    sleep_metric = "transitions"
+                elif "Bout" in metric_text:
+                    sleep_metric = "bout_length"
+            hysteresis_kwargs = {"sleep_metric": sleep_metric}
+        else:
+            hysteresis_kwargs = {}
+
+        try:
+            for i, frame_idx in enumerate(range(start_frame, end_frame)):
+                if progress.wasCanceled():
+                    self._log_message("⚠️ Export cancelled by user")
+                    break
+
+                progress.setValue(i)
+
+                # Log progress every 10 frames
+                if i % 10 == 0:
+                    self._log_message(f"   Processing frame {i + 1}/{n_frames}...")
+                    QApplication.processEvents()
+
+                # Get frame
+                frame = self._get_viewer_frame(frame_idx)
+
+                # Add time text to frame
+                time_seconds = frame_idx * self.viewer_frame_interval
+                time_minutes = time_seconds / 60.0
+                time_text = f"t = {time_seconds:.1f}s ({time_minutes:.2f}min)"
+
+                frame_bgr = frame.copy()
+                if len(frame_bgr.shape) == 2:
+                    frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_GRAY2BGR)
+                elif len(frame_bgr.shape) == 3:
+                    if frame_bgr.shape[2] == 4:
+                        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGBA2BGR)
+                    elif frame_bgr.shape[2] == 1:
+                        frame_bgr = cv2.cvtColor(frame_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
+                    # else: assume already BGR with 3 channels
+
+                cv2.putText(
+                    frame_bgr, time_text, (10, frame_height - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA
+                )
+
+                # Draw ROI overlay (circles + numbers) if enabled
+                if hasattr(self, "viewer_show_roi_overlay") and self.viewer_show_roi_overlay.isChecked():
+                    self._draw_roi_overlay(frame_bgr)
+
+                # Create plot using PlotGenerator (same as Analysis tab)
+                plot_fig = Figure(figsize=(fig_width, fig_height), dpi=plot_dpi)
+                plot_generator = PlotGenerator(plot_fig)
+
+                # Generate plot with same settings as Analysis tab
+                plot_generator.generate_plot(
+                    plot_type, data_dict, roi_colors, base_plot_config, **hysteresis_kwargs
+                )
+
+                # Add red time marker to all subplots
+                for ax in plot_fig.get_axes():
+                    ax.axvline(
+                        x=time_minutes, color="red", linewidth=2,
+                        linestyle="--", alpha=0.9, zorder=100
+                    )
+
+                # Render plot to image (suppress tight_layout warning)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    plot_fig.tight_layout()
+                plot_canvas = FigureCanvasAgg(plot_fig)
+                plot_canvas.draw()
+
+                # Get image from canvas
+                buf = plot_canvas.buffer_rgba()
+                plot_img = np.asarray(buf)
+                plot_img_bgr = cv2.cvtColor(plot_img, cv2.COLOR_RGBA2BGR)
+
+                # Resize plot to match frame width if needed
+                if plot_img_bgr.shape[1] != frame_width or plot_img_bgr.shape[0] != plot_height:
+                    plot_img_bgr = cv2.resize(plot_img_bgr, (frame_width, plot_height))
+
+                # Close figure to free memory
+                import matplotlib.pyplot as plt
+                plt.close(plot_fig)
+
+                # Combine frame and plot vertically
+                combined = np.vstack([frame_bgr, plot_img_bgr])
+
+                # Write frame
+                out.write(combined)
+
+            progress.setValue(n_frames)
+            out.release()
+
+            self._log_message(f"✅ Video with plots exported: {file_path}")
+            self._log_message(f"   Dimensions: {output_width}x{output_height}, {n_frames} frames at {export_fps} FPS")
+
+        except Exception as e:
+            out.release()
+            self._log_message(f"❌ Export failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _get_viewer_frame(self, frame_idx):
+        """Get a single frame from the viewer data source."""
+        import numpy as np
+
+        if hasattr(self, "viewer_frame_cache") and self.viewer_frame_cache:
+            return self.viewer_frame_cache[frame_idx].copy()
+
+        if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+            if hasattr(self, "viewer_frame_names"):
+                frame_name = self.viewer_frame_names[frame_idx]
+                frame = self.viewer_file_handle[f"{self.viewer_dataset_name}/{frame_name}"][()]
+            else:
+                frame = self.viewer_file_handle[self.viewer_dataset_name][frame_idx]
+        else:
+            frame = self.viewer_frames[frame_idx]
+
+        # Normalize to uint8 if needed
+        frame = np.array(frame)
+        if frame.dtype != np.uint8:
+            if frame.max() > 0:
+                frame = ((frame - frame.min()) / (frame.max() - frame.min()) * 255).astype(np.uint8)
+            else:
+                frame = np.zeros_like(frame, dtype=np.uint8)
+
+        return frame
 
     def _viewer_goto_frame(self, frame_idx):
         """Go to specific frame."""
@@ -12727,6 +15307,18 @@ class HDF5AnalysisWidget(QWidget):
                 f"🎬 Exporting frames {start_frame}-{end_frame} as video ({export_fps} FPS)..."
             )
 
+            n_frames = end_frame - start_frame + 1
+            from qtpy.QtWidgets import QProgressDialog
+            from qtpy.QtCore import Qt
+            progress_dlg = QProgressDialog(
+                f"Exporting video ({n_frames} frames)...", "Cancel", 0, n_frames, self
+            )
+            progress_dlg.setWindowModality(Qt.WindowModal)
+            progress_dlg.setWindowTitle("Export Progress")
+            progress_dlg.setMinimumDuration(0)
+            progress_dlg.setValue(0)
+            progress_dlg.show()
+
             # Get first frame to determine dimensions
             if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
                 if hasattr(self, "viewer_frame_names"):
@@ -12741,14 +15333,16 @@ class HDF5AnalysisWidget(QWidget):
             else:
                 first_frame = self.viewer_frames[start_frame]
 
-            # Prepare frame with text overlay
+            # Prepare frame with text overlay — use float32 to halve memory usage
             first_frame = np.array(first_frame, copy=True)
             if first_frame.dtype != np.uint8:
                 frame_min = first_frame.min()
                 frame_max = first_frame.max()
                 if frame_max > frame_min:
                     first_frame = (
-                        (first_frame - frame_min) / (frame_max - frame_min) * 255
+                        (first_frame.astype(np.float32) - frame_min)
+                        / (frame_max - frame_min)
+                        * 255
                     ).astype(np.uint8)
                 else:
                     first_frame = np.zeros_like(first_frame, dtype=np.uint8)
@@ -12770,8 +15364,12 @@ class HDF5AnalysisWidget(QWidget):
                 return
 
             # Process each frame
-            n_frames = end_frame - start_frame + 1
+            cancelled = False
             for idx, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+                if progress_dlg.wasCanceled():
+                    cancelled = True
+                    break
+
                 # Get frame data
                 if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
                     if hasattr(self, "viewer_frame_names"):
@@ -12786,14 +15384,16 @@ class HDF5AnalysisWidget(QWidget):
                 else:
                     frame_data = self.viewer_frames[frame_idx]
 
-                # Prepare frame
+                # Prepare frame — use float32 to halve memory usage
                 frame = np.array(frame_data, copy=True)
                 if frame.dtype != np.uint8:
                     frame_min = frame.min()
                     frame_max = frame.max()
                     if frame_max > frame_min:
                         frame = (
-                            (frame - frame_min) / (frame_max - frame_min) * 255
+                            (frame.astype(np.float32) - frame_min)
+                            / (frame_max - frame_min)
+                            * 255
                         ).astype(np.uint8)
                     else:
                         frame = np.zeros_like(frame, dtype=np.uint8)
@@ -12830,16 +15430,21 @@ class HDF5AnalysisWidget(QWidget):
 
                 # Write frame
                 out.write(frame)
-
-                # Progress update
-                if (idx + 1) % 10 == 0 or idx == n_frames - 1:
-                    progress = ((idx + 1) / n_frames) * 100
-                    self._log_message(
-                        f"   Progress: {idx + 1}/{n_frames} frames ({progress:.1f}%)"
-                    )
+                progress_dlg.setValue(idx + 1)
 
             # Finalize
+            progress_dlg.setValue(n_frames)
             out.release()
+
+            if cancelled:
+                import os as _os
+                try:
+                    _os.remove(file_path)
+                except OSError:
+                    pass
+                self._log_message("⚠️ Video export cancelled.")
+                return
+
             self._log_message(f"✅ Video exported successfully: {file_path}")
             self._log_message(
                 f"   {n_frames} frames at {export_fps} FPS ({n_frames/export_fps:.1f}s duration)"
@@ -12867,6 +15472,18 @@ class HDF5AnalysisWidget(QWidget):
                 self._log_message("❌ Start frame must be less than end frame")
                 return
 
+            # Pre-flight: GIF stores all frames in RAM simultaneously.
+            # 1024×1224 RGB uint8 ≈ 3.6 MB per frame → 200 frames ≈ 720 MB.
+            MAX_GIF_FRAMES = 200
+            n_frames_requested = end_frame - start_frame + 1
+            if n_frames_requested > MAX_GIF_FRAMES:
+                self._log_message(
+                    f"⚠️ GIF export blocked: {n_frames_requested} frames requested, "
+                    f"maximum is {MAX_GIF_FRAMES} (GIF loads all frames into RAM at once). "
+                    f"Use 'Export as Video (MP4)' for long sequences."
+                )
+                return
+
             # Get export FPS
             export_fps = self.export_fps_spin.value()
             frame_duration = int(1000 / export_fps)  # Duration in milliseconds
@@ -12883,15 +15500,31 @@ class HDF5AnalysisWidget(QWidget):
             if not file_path:
                 return  # User cancelled
 
+            n_frames = end_frame - start_frame + 1
             self._log_message(
                 f"🎞️ Exporting frames {start_frame}-{end_frame} as GIF ({export_fps} FPS)..."
             )
 
+            from qtpy.QtWidgets import QProgressDialog
+            from qtpy.QtCore import Qt
+            progress_dlg = QProgressDialog(
+                f"Exporting GIF ({n_frames} frames)...", "Cancel", 0, n_frames, self
+            )
+            progress_dlg.setWindowModality(Qt.WindowModal)
+            progress_dlg.setWindowTitle("Export Progress")
+            progress_dlg.setMinimumDuration(0)
+            progress_dlg.setValue(0)
+            progress_dlg.show()
+
             frames_for_gif = []
-            n_frames = end_frame - start_frame + 1
+            cancelled = False
 
             # Process each frame
             for idx, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+                if progress_dlg.wasCanceled():
+                    cancelled = True
+                    break
+
                 # Get frame data
                 if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
                     if hasattr(self, "viewer_frame_names"):
@@ -12907,16 +15540,25 @@ class HDF5AnalysisWidget(QWidget):
                     frame_data = self.viewer_frames[frame_idx]
 
                 # Prepare frame
-                frame = np.array(frame_data, copy=True)
-                if frame.dtype != np.uint8:
-                    frame_min = frame.min()
-                    frame_max = frame.max()
-                    if frame_max > frame_min:
-                        frame = (
-                            (frame - frame_min) / (frame_max - frame_min) * 255
-                        ).astype(np.uint8)
-                    else:
-                        frame = np.zeros_like(frame, dtype=np.uint8)
+                try:
+                    frame = np.array(frame_data, copy=True)
+                    if frame.dtype != np.uint8:
+                        frame_min = frame.min()
+                        frame_max = frame.max()
+                        if frame_max > frame_min:
+                            frame = (
+                                (frame.astype(np.float32) - frame_min)
+                                / (frame_max - frame_min)
+                                * 255
+                            ).astype(np.uint8)
+                        else:
+                            frame = np.zeros_like(frame, dtype=np.uint8)
+                except MemoryError:
+                    self._log_message(
+                        f"⚠️ GIF export ran out of memory at frame {idx + 1}/{n_frames}. "
+                        f"Use 'Export as Video (MP4)' instead."
+                    )
+                    return
 
                 if frame.ndim == 3 and frame.shape[2] == 1:
                     frame = frame[:, :, 0]
@@ -12951,15 +15593,22 @@ class HDF5AnalysisWidget(QWidget):
 
                 # Convert BGR to RGB for PIL
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                frames_for_gif.append(pil_image)
-
-                # Progress update
-                if (idx + 1) % 10 == 0 or idx == n_frames - 1:
-                    progress = ((idx + 1) / n_frames) * 100
+                try:
+                    pil_image = Image.fromarray(frame_rgb)
+                    frames_for_gif.append(pil_image)
+                except MemoryError:
                     self._log_message(
-                        f"   Progress: {idx + 1}/{n_frames} frames ({progress:.1f}%)"
+                        f"⚠️ GIF export ran out of memory at frame {idx + 1}/{n_frames}. "
+                        f"Use 'Export as Video (MP4)' instead."
                     )
+                    return
+                progress_dlg.setValue(idx + 1)
+
+            progress_dlg.setValue(n_frames)
+
+            if cancelled:
+                self._log_message("⚠️ GIF export cancelled.")
+                return
 
             # Save as GIF
             self._log_message("   Saving GIF file...")
@@ -12987,9 +15636,232 @@ class HDF5AnalysisWidget(QWidget):
 
             traceback.print_exc()
 
+    def _export_gif_with_plots(self):
+        """Export animated GIF with synchronized analysis plots (same style as Analysis tab)."""
+        import cv2
+        import numpy as np
+        from qtpy.QtWidgets import QFileDialog, QProgressDialog
+        from qtpy.QtCore import Qt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from ._plot import PlotGenerator, create_plot_config, create_hysteresis_kwargs
+        from PIL import Image
+
+        # Check prerequisites
+        if not hasattr(self, "viewer_n_frames") or self.viewer_n_frames == 0:
+            self._log_message("❌ No frames loaded. Load data into Frame Viewer first.")
+            return
+
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("❌ No analysis data. Run Main Analysis first.")
+            return
+
+        # Get frame range from export controls
+        start_frame = self.export_start_frame.value()
+        end_frame = self.export_end_frame.value()
+
+        if start_frame >= end_frame:
+            self._log_message("❌ Start frame must be less than end frame")
+            return
+
+        # Ask for save location
+        default_name = f"gif_with_plots_{start_frame}-{end_frame}.gif"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export GIF with Plots",
+            default_name,
+            "GIF Animation (*.gif);;All Files (*)",
+        )
+
+        if not file_path:
+            return
+
+        export_fps = self.export_fps_spin.value()
+        frame_duration = int(1000 / export_fps)  # Duration in milliseconds
+        n_frames = end_frame - start_frame
+
+        self._log_message(f"🎞️ Exporting {n_frames} frames with plots as GIF at {export_fps} FPS...")
+
+        # Setup progress dialog
+        progress = QProgressDialog("Exporting GIF with plots...", "Cancel", 0, n_frames, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowTitle("Export Progress")
+        progress.show()
+
+        # Process events to show dialog
+        from qtpy.QtWidgets import QApplication
+        QApplication.processEvents()
+
+        plot_type, data_dict = self._get_sync_plot_data()
+
+        if not data_dict:
+            self._log_message(f"❌ No {self.sync_plot_type.currentText()} data available")
+            return
+
+        roi_colors = getattr(self, "roi_colors", {})
+        n_rois = len(data_dict)
+
+        # Get first frame to determine dimensions
+        first_frame = self._get_viewer_frame(start_frame)
+        frame_height, frame_width = first_frame.shape[:2]
+
+        # Create plot figure dimensions matching Analysis tab style
+        plot_dpi = 100
+        plot_width = frame_width
+        height_per_roi = 60  # pixels per ROI
+        plot_height = max(200, height_per_roi * n_rois)
+        fig_width = plot_width / plot_dpi
+        fig_height = plot_height / plot_dpi
+
+        # Total output dimensions: frame on top, plots below
+        output_width = frame_width
+        output_height = frame_height + plot_height
+
+        # Create plot configuration from widget settings (same as Analysis tab)
+        base_plot_config = create_plot_config(self)
+        base_plot_config["fig_width"] = fig_width
+        base_plot_config["height_per_roi"] = fig_height / n_rois if n_rois > 0 else 0.6
+        base_plot_config["dpi"] = plot_dpi
+
+        # Get extra kwargs for specific plot types
+        if plot_type == "Raw Intensity Changes":
+            hysteresis_kwargs = create_hysteresis_kwargs(widget_instance=self)
+            hysteresis_kwargs.pop("merged_results", None)
+        elif plot_type == "Sleep Quality":
+            sleep_metric = "sleep_minutes"
+            if hasattr(self, "sleep_quality_metric_combo"):
+                metric_text = self.sleep_quality_metric_combo.currentText()
+                if "Transitions" in metric_text:
+                    sleep_metric = "transitions"
+                elif "Bout" in metric_text:
+                    sleep_metric = "bout_length"
+            hysteresis_kwargs = {"sleep_metric": sleep_metric}
+        else:
+            hysteresis_kwargs = {}
+
+        frames_for_gif = []
+
+        try:
+            for i, frame_idx in enumerate(range(start_frame, end_frame)):
+                if progress.wasCanceled():
+                    self._log_message("⚠️ Export cancelled by user")
+                    return
+
+                progress.setValue(i)
+
+                # Log progress every 10 frames
+                if i % 10 == 0:
+                    self._log_message(f"   Processing frame {i + 1}/{n_frames}...")
+                    QApplication.processEvents()
+
+                # Get frame
+                frame = self._get_viewer_frame(frame_idx)
+
+                # Add time text to frame
+                time_seconds = frame_idx * self.viewer_frame_interval
+                time_minutes = time_seconds / 60.0
+                time_text = f"t = {time_seconds:.1f}s ({time_minutes:.2f}min)"
+
+                frame_bgr = frame.copy()
+                if len(frame_bgr.shape) == 2:
+                    frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_GRAY2BGR)
+                elif len(frame_bgr.shape) == 3:
+                    if frame_bgr.shape[2] == 4:
+                        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGBA2BGR)
+                    elif frame_bgr.shape[2] == 1:
+                        frame_bgr = cv2.cvtColor(frame_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
+                    # else: assume already BGR with 3 channels
+
+                cv2.putText(
+                    frame_bgr, time_text, (10, frame_height - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA
+                )
+
+                # Draw ROI overlay (circles + numbers) if enabled
+                if hasattr(self, "viewer_show_roi_overlay") and self.viewer_show_roi_overlay.isChecked():
+                    self._draw_roi_overlay(frame_bgr)
+
+                # Create plot using PlotGenerator (same as Analysis tab)
+                plot_fig = Figure(figsize=(fig_width, fig_height), dpi=plot_dpi)
+                plot_generator = PlotGenerator(plot_fig)
+
+                # Generate plot with same settings as Analysis tab
+                plot_generator.generate_plot(
+                    plot_type, data_dict, roi_colors, base_plot_config, **hysteresis_kwargs
+                )
+
+                # Add red time marker to all subplots
+                for ax in plot_fig.get_axes():
+                    ax.axvline(
+                        x=time_minutes, color="red", linewidth=2,
+                        linestyle="--", alpha=0.9, zorder=100
+                    )
+
+                # Render plot to image (suppress tight_layout warning)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    plot_fig.tight_layout()
+                plot_canvas = FigureCanvasAgg(plot_fig)
+                plot_canvas.draw()
+
+                # Get image from canvas
+                buf = plot_canvas.buffer_rgba()
+                plot_img = np.asarray(buf)
+                plot_img_bgr = cv2.cvtColor(plot_img, cv2.COLOR_RGBA2BGR)
+
+                # Resize plot to match frame width if needed
+                if plot_img_bgr.shape[1] != frame_width or plot_img_bgr.shape[0] != plot_height:
+                    plot_img_bgr = cv2.resize(plot_img_bgr, (frame_width, plot_height))
+
+                # Close figure to free memory
+                import matplotlib.pyplot as plt
+                plt.close(plot_fig)
+
+                # Combine frame and plot vertically
+                combined = np.vstack([frame_bgr, plot_img_bgr])
+
+                # Convert BGR to RGB for PIL
+                combined_rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(combined_rgb)
+                frames_for_gif.append(pil_image)
+
+            progress.setValue(n_frames)
+
+            # Save as GIF
+            self._log_message("   Saving GIF file...")
+            frames_for_gif[0].save(
+                file_path,
+                save_all=True,
+                append_images=frames_for_gif[1:],
+                duration=frame_duration,
+                loop=0,
+                optimize=False,
+            )
+
+            self._log_message(f"✅ GIF with plots exported: {file_path}")
+            self._log_message(f"   Dimensions: {output_width}x{output_height}, {n_frames} frames at {export_fps} FPS")
+
+        except ImportError as e:
+            if "PIL" in str(e) or "Pillow" in str(e):
+                self._log_message("❌ PIL (Pillow) is required for GIF export. Install with: pip install Pillow")
+            else:
+                self._log_message(f"❌ Import error: {e}")
+        except Exception as e:
+            self._log_message(f"❌ GIF export failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     # ===================================================================
     # UTILITY METHODS
     # ===================================================================
+
+    def _get_recording_start_str(self) -> str:
+        """Return formatted recording start datetime for plot titles, or empty string."""
+        dt = getattr(self, "recording_start_datetime", None)
+        if dt is None:
+            return ""
+        return f"  [{dt.strftime('%d.%m.%Y  %H:%M')}]"
 
     def _log_message(self, message: str):
         """Add message to analysis log with proper Qt handling."""

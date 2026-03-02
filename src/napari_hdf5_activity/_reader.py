@@ -1743,6 +1743,59 @@ def get_available_memory() -> int:
     return 2 * 1024 * 1024 * 1024  # 2 GB
 
 
+# Estimated memory overhead per worker process on Windows (napari + numba + llvmlite imports)
+WORKER_MEMORY_OVERHEAD_MB = 600  # ~500-700 MB per spawned process on Windows
+
+
+def calculate_safe_process_count(
+    requested: Optional[int] = None, extra_per_worker_mb: int = 0
+) -> int:
+    """
+    Calculate a safe number of worker processes based on available memory.
+
+    On Windows, each spawned worker process imports the full module tree
+    (including napari, numba, llvmlite) which consumes ~500-700 MB per worker.
+    This function checks available RAM and limits the process count to avoid
+    paging file exhaustion (OSError).
+
+    Args:
+        requested: User-requested number of processes, or None for auto-detection.
+        extra_per_worker_mb: Additional MB to budget per worker (e.g. for masks
+            passed via pool initializer).
+
+    Returns:
+        Safe number of processes (at least 1).
+    """
+    if os.name == "nt":
+        cpu_based = max(1, min(4, int(os.cpu_count() * 0.75)))
+    else:
+        cpu_based = max(1, min(6, int(os.cpu_count() * 0.85)))
+
+    target = requested if requested is not None else cpu_based
+
+    # Check available memory on Windows where worker memory is the bottleneck
+    if os.name == "nt" and PSUTIL_AVAILABLE:
+        try:
+            mem = psutil.virtual_memory()
+            available_mb = mem.available / (1024 * 1024)
+            # Reserve 2 GB for the main process and OS
+            usable_mb = max(0, available_mb - 2048)
+            per_worker_mb = WORKER_MEMORY_OVERHEAD_MB + extra_per_worker_mb
+            max_from_memory = max(1, int(usable_mb / per_worker_mb))
+
+            if max_from_memory < target:
+                logger.info(
+                    f"Reducing process count from {target} to {max_from_memory} "
+                    f"due to available memory ({available_mb:.0f} MB available, "
+                    f"~{per_worker_mb} MB per worker)"
+                )
+                target = max_from_memory
+        except Exception:
+            pass
+
+    return max(1, target)
+
+
 def calculate_optimal_chunk_size(
     frame_shape: Tuple[int, ...], dtype_size: int = 2
 ) -> int:
@@ -1968,17 +2021,38 @@ def detect_hdf5_structure_type(file_path: str) -> Dict[str, Any]:
             if "images" in h5_file:
                 images_group = h5_file["images"]
                 if len(images_group.keys()) > 0:
-                    first_key = sorted(images_group.keys())[0]
+                    all_keys = sorted(images_group.keys())
+                    first_key = all_keys[0]
                     first_image = images_group[first_key]
+                    frame_count = len(all_keys)
+
+                    # Detect key format so workers can reconstruct keys without
+                    # pickling the full list (e.g. 38 820 keys × 15 B = 580 KB per task).
+                    # Try common patterns: "frame_000000", "image_000000", plain integers.
+                    key_template = None
+                    if len(all_keys) >= 2:
+                        # Check if numeric suffix with zero-padding matches index
+                        import re as _re
+                        m = _re.match(r'^([a-zA-Z_]*)(\d+)$', first_key)
+                        if m:
+                            prefix = m.group(1)
+                            width  = len(m.group(2))
+                            # Verify second key follows same pattern
+                            expected_second = f"{prefix}{1:0{width}d}"
+                            if len(all_keys) > 1 and all_keys[1] == expected_second:
+                                key_template = f"{prefix}{{:0{width}d}}"
+
                     return {
                         "type": "individual_frames",
                         "group_name": "images",
-                        "frame_count": len(images_group.keys()),
+                        "frame_count": frame_count,
                         "frame_shape": first_image.shape,
                         "dtype": first_image.dtype,
                         "dtype_size": first_image.dtype.itemsize,
                         "data_location": "images",
-                        "frame_keys": sorted(images_group.keys()),
+                        # Only store keys if we cannot infer them from template
+                        "frame_keys": None if key_template else all_keys,
+                        "key_template": key_template,  # e.g. "frame_{:06d}"
                     }
 
             # Structure 3: Look for other potential datasets
@@ -2044,8 +2118,12 @@ def get_first_frame_enhanced(
             elif structure_info["type"] == "individual_frames":
                 # Handle individual frames in images/ group
                 images_group = f["images"]
-                frame_keys = structure_info["frame_keys"]
-                first_key = frame_keys[0]
+                key_template = structure_info.get("key_template")
+                if key_template:
+                    first_key = key_template.format(0)
+                else:
+                    frame_keys = structure_info["frame_keys"]
+                    first_key = frame_keys[0]
                 raw_frame = images_group[first_key][...].copy()
                 logger.info(
                     f"Loaded first frame from images group: key={first_key}, shape={raw_frame.shape}"
@@ -2112,10 +2190,16 @@ def read_chunk_data_dual_structure(
             elif structure_info["type"] == "individual_frames":
                 # Read individual frames from images/ group
                 images_group = f["images"]
-                frame_keys = structure_info["frame_keys"]
 
-                # Get the keys for this chunk
-                chunk_keys = frame_keys[start_idx:end_idx]
+                # Reconstruct keys for this chunk without pickling the full key list.
+                # If a key_template was detected (e.g. "frame_{:06d}"), generate keys
+                # mathematically; otherwise fall back to the stored list.
+                key_template = structure_info.get("key_template")
+                if key_template:
+                    chunk_keys = [key_template.format(i) for i in range(start_idx, end_idx)]
+                else:
+                    frame_keys = structure_info["frame_keys"]
+                    chunk_keys = frame_keys[start_idx:end_idx]
 
                 # Read each frame individually and stack them
                 frames = []
@@ -2996,26 +3080,15 @@ def process_chunk(
         logger.debug(
             f"Processing chunk shape: {chunk_data.shape}, dtype: {chunk_data.dtype}"
         )
-        validate_data_ranges(chunk_data[0], "Raw_Input")
 
-        # Data should already be grayscale from read_chunk_data_dual_structure
-        # No need for RGB conversion here
-        gray_frames = chunk_data.copy()
-
-        logger.debug(
-            f"Pre-normalization: dtype={gray_frames.dtype}, range={gray_frames.min()}-{gray_frames.max()}"
-        )
-
+        # Normalize entire stack to float32 in one vectorized operation.
+        # chunk_data is already grayscale from read_chunk_data_dual_structure;
+        # no copy needed — normalize_image_to_float32 always creates a new array.
         normalized_frames = normalize_image_to_float32(
-            gray_frames, target_range=(0.0, 1.0)
+            chunk_data, target_range=(0.0, 1.0)
         )
 
-        logger.debug(
-            f"Post-normalization: dtype={normalized_frames.dtype}, range={normalized_frames.min():.6f}-{normalized_frames.max():.6f}"
-        )
-        validate_data_ranges(normalized_frames[0], "Normalized_Output")
-
-        # === ROI Processing ===
+        # === ROI Processing — fully vectorized, no Python loops over frames ===
         for roi_idx, mask in enumerate(masks, start=1):
             try:
                 if mask.size == 0:
@@ -3030,48 +3103,25 @@ def process_chunk(
                     )
                     continue
 
-                roi_intensities = []
+                n_pixels = int(np.sum(mask_bool))
+                if n_pixels == 0:
+                    logger.warning(f"ROI {roi_idx} has 0 pixels in mask")
+                    continue
 
-                # Memory-efficient processing
-                if normalized_frames.nbytes > 500 * 1024 * 1024:  # 500MB threshold
-                    batch_size = max(1, min(50, len(normalized_frames) - 1))
+                # VECTORIZED: extract only the masked pixels for all frames at once.
+                # roi_frames shape: (N, n_pixels) — only ~5% of frame data for a well.
+                # This is far more memory-efficient than computing a full H×W diff first.
+                roi_frames = normalized_frames[:, mask_bool]          # (N, n_pixels)
+                diffs      = np.abs(np.diff(roi_frames, axis=0))      # (N-1, n_pixels)
+                roi_intensities = diffs.sum(axis=1) / n_pixels        # (N-1,)
 
-                    for batch_start in range(0, len(normalized_frames) - 1, batch_size):
-                        batch_end = min(
-                            batch_start + batch_size + 1, len(normalized_frames)
-                        )
-                        batch_frames = normalized_frames[batch_start:batch_end]
+                time_array = start_time + frame_interval * np.arange(len(roi_intensities))
+                roi_changes[roi_idx] = list(zip(time_array, roi_intensities.tolist()))
 
-                        for i in range(len(batch_frames) - 1):
-                            frame_curr = batch_frames[i]
-                            frame_next = batch_frames[i + 1]
-
-                            diff_masked = np.abs(
-                                frame_next[mask_bool] - frame_curr[mask_bool]
-                            )
-                            total_intensity = np.sum(diff_masked)
-                            roi_intensities.append(total_intensity)
-                else:
-                    for i in range(len(normalized_frames) - 1):
-                        frame_curr = normalized_frames[i]
-                        frame_next = normalized_frames[i + 1]
-
-                        diff_masked = np.abs(
-                            frame_next[mask_bool] - frame_curr[mask_bool]
-                        )
-                        total_intensity = np.sum(diff_masked)
-                        roi_intensities.append(total_intensity)
-
-                time_array = start_time + frame_interval * np.arange(
-                    len(roi_intensities)
-                )
-                roi_changes[roi_idx] = list(zip(time_array, roi_intensities))
-
-                if roi_idx == 1 and roi_intensities:
-                    roi_area = np.sum(mask_bool)
-                    logger.info(
-                        f"Enhanced ROI {roi_idx}: area={roi_area:,} pixels, "
-                        f"intensity_range={np.min(roi_intensities):.6f}-{np.max(roi_intensities):.6f}"
+                if roi_idx == 1 and len(roi_intensities):
+                    logger.debug(
+                        f"ROI {roi_idx}: area={n_pixels:,} px, "
+                        f"intensity range={roi_intensities.min():.6f}-{roi_intensities.max():.6f}"
                     )
 
             except Exception as e:
@@ -3084,9 +3134,38 @@ def process_chunk(
     return roi_changes
 
 
+def get_frame_norm_factor(file_path: str) -> float:
+    """Return the normalization factor applied when converting raw frames to float32 [0,1].
+
+    Used to convert our per-pixel-mean values back to MATLAB-equivalent raw pixel sums:
+        MATLAB_sum = our_per_pixel_mean × n_pixels × norm_factor
+
+    Returns:
+        255.0  for uint8 cameras
+        65535.0 for uint16 cameras
+        1.0    for float data or unknown formats
+    """
+    try:
+        info = detect_hdf5_structure_type(file_path)
+        dtype_size = info.get("dtype_size", 1)
+        return {1: 255.0, 2: 65535.0}.get(int(dtype_size), 1.0)
+    except Exception:
+        return 1.0
+
+
 # =============================================================================
 # PARALLEL PROCESSING FUNCTIONS WITH DUAL STRUCTURE SUPPORT
 # =============================================================================
+
+# Worker-local mask storage — populated once per worker via pool initializer,
+# so masks are NOT re-pickled and re-sent through the IPC pipe for every chunk.
+_worker_masks: Optional[List] = None
+
+
+def _worker_init_masks(masks: List) -> None:
+    """Pool initializer: store masks in the worker process once at startup."""
+    global _worker_masks
+    _worker_masks = masks
 
 
 def _process_single_chunk_dual_structure(
@@ -3094,9 +3173,11 @@ def _process_single_chunk_dual_structure(
 ) -> Tuple[int, Dict[int, List[Tuple[float, float]]]]:
     """
     Enhanced chunk processing that handles both HDF5 structures.
+    Masks are read from the worker-local global set by _worker_init_masks.
     """
     try:
-        file_path, masks, start_idx, end_idx, frame_interval, structure_info = args
+        file_path, start_idx, end_idx, frame_interval, structure_info = args
+        masks = _worker_masks  # set once per worker by pool initializer
 
         # Read chunk using dual structure reader - request grayscale for processing
         chunk = read_chunk_data_dual_structure(
@@ -3117,6 +3198,7 @@ def _process_single_chunk_dual_structure(
         logger.error(
             f"Error processing dual-structure chunk {start_idx}-{end_idx}: {e}"
         )
+        masks = _worker_masks or []
         return start_idx, {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
 
@@ -3149,37 +3231,65 @@ def process_single_file_in_parallel_dual_structure(
         logger.error(f"No frames found in {file_path}")
         return file_path, {}, 0.0
 
-    # Calculate optimal chunk size
+    # Determine process count FIRST so chunk size can be divided by worker count.
+    # Include mask size in the per-worker overhead: masks are pickled once per
+    # worker via the pool initializer, but still consume RAM in each worker.
     frame_shape = structure_info["frame_shape"]
-    dtype_size = structure_info["dtype_size"]
+    mask_size_mb = int(
+        sum(np.prod(m.shape) for m in masks) / (1024 * 1024)
+    ) if masks else 0
+    extra_per_worker_mb = max(0, mask_size_mb)
+    if num_processes is None:
+        num_processes = calculate_safe_process_count(
+            extra_per_worker_mb=extra_per_worker_mb
+        )
+    else:
+        num_processes = calculate_safe_process_count(
+            num_processes, extra_per_worker_mb=extra_per_worker_mb
+        )
+
+    # Calculate optimal chunk size per worker.
+    # All workers run simultaneously, so each worker's budget = total budget / num_processes.
+    # Each frame costs: uint16 raw (2 B/px) + float32 normalized (4 B/px) = ~6 B/px
+    # processing_overhead=4 in calculate_optimal_chunk_size already covers this.
+    dtype_size  = structure_info["dtype_size"]
     optimal_chunk_size = calculate_optimal_chunk_size(frame_shape, dtype_size)
-    actual_chunk_size = max(MIN_CHUNK_SIZE, min(chunk_size, optimal_chunk_size))
+    # Divide by num_processes so all workers together stay within memory budget
+    per_worker_optimal = max(MIN_CHUNK_SIZE, optimal_chunk_size // max(1, num_processes))
+
+    if structure_info["type"] == "individual_frames":
+        # Enforce a minimum of 50 frames to amortize HDF5 key-lookup overhead,
+        # but never exceed the per-worker memory limit.
+        actual_chunk_size = max(50, min(per_worker_optimal, MAX_CHUNK_SIZE))
+    else:
+        actual_chunk_size = max(MIN_CHUNK_SIZE, min(chunk_size, per_worker_optimal))
 
     logger.info(
-        f"Using chunk size: {actual_chunk_size} frames (structure: {structure_info['type']})"
+        f"Using chunk size: {actual_chunk_size} frames "
+        f"(structure: {structure_info['type']}, workers: {num_processes}, "
+        f"optimal/worker: {per_worker_optimal})"
     )
 
     total_chunks = (num_frames + actual_chunk_size - 1) // actual_chunk_size
     roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
-    if num_processes is None:
-        if os.name == "nt":  # Windows
-            num_processes = max(1, min(4, int(os.cpu_count() * 0.75)))
-        else:
-            num_processes = max(1, min(6, int(os.cpu_count() * 0.85)))
-
-    # Prepare tasks with structure information
+    # Prepare tasks — masks are excluded here and passed once via the pool
+    # initializer (_worker_init_masks) to avoid re-pickling them for every chunk.
     tasks = []
     for start_idx in range(0, num_frames, actual_chunk_size):
         end_idx = min(start_idx + actual_chunk_size, num_frames)
         tasks.append(
-            (file_path, masks, start_idx, end_idx, frame_interval, structure_info)
+            (file_path, start_idx, end_idx, frame_interval, structure_info)
         )
 
     completed = 0
 
     try:
-        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_processes,
+            initializer=_worker_init_masks,
+            initargs=(masks,),
+        ) as executor:
             # OPTIMIZED: Dynamic queue size based on available RAM
             # Systems with lots of RAM can process more chunks in parallel
             try:
@@ -3265,9 +3375,15 @@ def process_single_file_in_parallel_dual_structure(
                             pass  # No more tasks
 
     except Exception as e:
-        logger.error(f"ProcessPoolExecutor error (dual-structure): {e}")
-        # Fallback to single-threaded processing
-        logger.info("Falling back to single-threaded dual-structure processing")
+        # On Windows, workers often fail due to memory pressure from napari/numba imports.
+        # This is expected behavior — the single-threaded fallback works fine.
+        if "Auslagerungsdatei" in str(e) or "paging file" in str(e).lower() or "resource" in str(e).lower():
+            logger.info(
+                f"Multi-processing unavailable (insufficient memory for worker processes). "
+                f"Using single-threaded processing instead — this is normal on Windows."
+            )
+        else:
+            logger.warning(f"Multi-processing failed: {e}. Using single-threaded fallback.")
         return process_hdf5_file_dual_structure(
             file_path, masks, actual_chunk_size, progress_callback, frame_interval
         )
@@ -3275,6 +3391,17 @@ def process_single_file_in_parallel_dual_structure(
     # Sort results by time
     for roi_idx in roi_changes:
         roi_changes[roi_idx].sort(key=lambda x: x[0])
+
+    # Log raw value ranges (MinMax normalization is applied post-movement-detection in _calc.py)
+    for roi_idx, data in roi_changes.items():
+        if not data:
+            continue
+        values = [v for _, v in data]
+        min_val = min(values)
+        max_val = max(values)
+        logger.info(
+            f"ROI {roi_idx}: raw value range [{min_val:.6f}, {max_val:.6f}]"
+        )
 
     total_duration = (num_frames - 1) * frame_interval
     proc_time = time.time() - start_all
@@ -3390,6 +3517,17 @@ def process_hdf5_file_dual_structure(
     # Sort results by timestamp
     for roi_idx in roi_changes:
         roi_changes[roi_idx].sort(key=lambda x: x[0])
+
+    # Log raw value ranges (MinMax normalization is applied post-movement-detection in _calc.py)
+    for roi_idx, data in roi_changes.items():
+        if not data:
+            continue
+        values = [v for _, v in data]
+        min_val = min(values)
+        max_val = max(values)
+        logger.info(
+            f"ROI {roi_idx}: raw value range [{min_val:.6f}, {max_val:.6f}]"
+        )
 
     total_duration = (num_frames - 1) * frame_interval
     total_proc = time.time() - start_all
@@ -3527,13 +3665,12 @@ def process_hdf5_files(
 
     # Memory and performance optimization
     if num_processes is None:
-        available_memory_gb = get_available_memory() / (1024**3)
-        if available_memory_gb < 4:  # Less than 4GB RAM
-            num_processes = 1
-        elif available_memory_gb < 8:  # Less than 8GB RAM
-            num_processes = max(1, min(3, int(os.cpu_count() * 0.6)))
-        else:
-            num_processes = max(1, min(6, int(os.cpu_count() * 0.8)))
+        num_processes = calculate_safe_process_count()
+    else:
+        num_processes = calculate_safe_process_count(num_processes)
+    available_memory_gb = get_available_memory() / (1024**3)
+    if available_memory_gb < 4:
+        num_processes = 1
 
         logger.info(
             f"Auto-selected {num_processes} processes based on {available_memory_gb:.1f}GB available memory and {len(masks)} ROIs"
@@ -3644,9 +3781,13 @@ def process_hdf5_files(
                                     f"Error processing {os.path.basename(file_path)}: {e}",
                                 )
             except Exception as e:
-                logger.error(
-                    f"Multi-processing failed: {e}. Falling back to single-threaded processing."
-                )
+                if "Auslagerungsdatei" in str(e) or "paging file" in str(e).lower() or "resource" in str(e).lower():
+                    logger.info(
+                        f"Multi-processing unavailable (insufficient memory for worker processes). "
+                        f"Using single-threaded processing — this is normal on Windows."
+                    )
+                else:
+                    logger.warning(f"Multi-processing failed: {e}. Using single-threaded fallback.")
                 # Fallback to single-threaded
                 for file_idx, file_path in enumerate(h5_files, 1):
                     fp_callback = file_progress_callback(
@@ -3761,8 +3902,10 @@ def get_roi_colors(rois: List[int]) -> Dict[int, str]:
             "#17becf",
         ]
 
-    for i, roi_id in enumerate(rois):
-        roi_colors[roi_id] = color_cycle[i % len(color_cycle)]
+    for roi_id in rois:
+        # Use (roi_id - 1) so ROI 1 always gets color 0, ROI 2 gets color 1, etc.
+        # This keeps colors consistent even when some ROIs are excluded.
+        roi_colors[roi_id] = color_cycle[(roi_id - 1) % len(color_cycle)]
 
     return roi_colors
 

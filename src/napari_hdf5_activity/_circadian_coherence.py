@@ -1,8 +1,68 @@
 """
 _circadian_coherence.py - Coherence and phase synchronization analysis
 
-This module implements frequency-domain methods to analyze how well different ROIs
-synchronize at specific frequencies (especially circadian frequencies around 24h).
+Two frequency-domain methods to analyse inter-ROI synchronisation at a
+specific period of interest.
+
+─────────────────────────────────────────────────────
+Coherence Analysis  (calculate_coherence_matrix)
+─────────────────────────────────────────────────────
+Uses Welch's magnitude-squared coherence (scipy.signal.coherence) to measure
+how consistently two ROIs share the same oscillation at one target frequency.
+
+Target period = (min_period + max_period) / 2  (read from GUI spinboxes).
+
+Algorithm:
+  1. Re-bin signals to bin_size_seconds.
+  2. Auto-select nperseg = min(256, n // 8), minimum 16.
+  3. Compute coherence via Welch (50 % overlap).
+  4. Extract coherence within ±20 % of target period.
+  5. Significance threshold = 1 − α^(1 / (n_segments − 1)).
+
+⚠ Frequency resolution = fs / nperseg. For a 24 h recording at 5-min bins
+  (288 points), nperseg ≈ 36 → resolution ≈ 3 h. Use 30–60 min bins or
+  longer recordings (≥ 3× target period) for reliable results.
+
+⚠ Period range MUST be centred on the target rhythm:
+  e.g. 20–28 h for circadian (24 h), 4–8 h for ultradian (6 h).
+
+Recommended settings:
+  Data source  : Fraction Movement (0–1)
+  Bin size     : 1800–3600 s (30–60 min)
+  Period range : set midpoint = target period
+  Min recording: ≥ 3× target period
+
+─────────────────────────────────────────────────────
+Phase Clustering  (detect_phase_clusters)
+─────────────────────────────────────────────────────
+Estimates each ROI's mean activity phase via the Hilbert transform and groups
+ROIs into four temporal clusters relative to recording start (ZT 0 = start):
+
+  early_active : ZT  0– 6 h
+  mid_active   : ZT  6–12 h
+  late_active  : ZT 12–18 h
+  night_active : ZT 18–24 h (or 0–dominant_period for non-24 h rhythms)
+
+dominant_period_hours = (min_period + max_period) / 2 (from GUI).
+
+Algorithm:
+  1. Re-bin signal to bin_size_seconds.
+  2. Subtract mean, apply Hilbert transform.
+  3. Compute circular mean of instantaneous phase → mean_phase (radians).
+  4. Convert to hours: phase_h = (mean_phase / 2π) × dominant_period mod period.
+  5. Assign to one of the four quadrant clusters.
+
+⚠ Hilbert transform captures ALL frequencies (no bandpass filter). Phase
+  estimates are reliable only when the target rhythm is strong and dominant.
+  Use Chi² or FFT first to confirm that a clear rhythm exists.
+
+⚠ Period range midpoint must equal the target period (same as Coherence).
+
+Recommended settings:
+  Data source  : Fraction Movement (0–1)
+  Bin size     : 300–1800 s (5–30 min)
+  Period range : set midpoint = target period
+  Min recording: ≥ 2× target period
 """
 
 import numpy as np

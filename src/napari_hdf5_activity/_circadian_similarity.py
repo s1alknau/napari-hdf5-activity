@@ -1,8 +1,40 @@
 """
 _circadian_similarity.py - ROI similarity and clustering analysis
 
-This module implements methods to compare circadian rhythms between different ROIs,
-identify similar patterns, and group ROIs based on their activity profiles.
+Computes pairwise cross-correlations between all ROI pairs to identify which
+animals move synchronously or with a consistent phase offset.
+
+Algorithm
+---------
+1. Optionally re-bin each ROI's time series to ``bin_size_seconds``.
+2. For every ROI pair (i, j) compute the normalized cross-correlation
+   (scipy.signal.correlate) within a lag window of ±max_lag_hours.
+3. Record the maximum Pearson r and the lag (hours) at which it occurs.
+4. Test significance via t-test: t = r * sqrt((n-2) / (1-r²)), df = n-2.
+5. Perform hierarchical clustering on the distance matrix (1 − r) using
+   average linkage; cut the dendrogram at distance = 0.5 (r = 0.5).
+
+Key parameters
+--------------
+max_lag_hours : float
+    Maximum time shift to consider. Set to max_period / 2 (read from GUI).
+    Default is half the maximum period configured in the period-range spinbox.
+significance_level : float
+    Alpha for the t-test on r. Default 0.05.
+
+Interpretation
+--------------
+- r > 0.7  → highly similar activity profiles
+- lag < 1 h → synchronized (in-phase)
+- lag > 1 h → phase-shifted by that many hours
+- Clusters group ROIs whose correlation distance < 0.5
+
+Recommended settings
+--------------------
+- Data source   : Fraction Movement (0–1)
+- Bin size      : 300–1800 s (5–30 min)
+- Period range  : not critical for this method
+- Min recording : ≥ 2× target period
 """
 
 import numpy as np
