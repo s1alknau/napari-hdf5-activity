@@ -1621,10 +1621,14 @@ class HDF5AnalysisWidget(QWidget):
         layout.addWidget(preset_group)
 
         # Cosinor-specific option
-        self.chk_cosinor_population = QCheckBox("Show population mean (Cosinor)")
+        self.chk_cosinor_population = QCheckBox("Show population mean")
         self.chk_cosinor_population.setToolTip(
             "Add a full-width subplot below the per-ROI panels showing\n"
-            "the population-level cosinor fit (mean across all ROIs)."
+            "the population-level summary across all ROIs.\n\n"
+            "• Cosinor: population cosinor fit (mean MESOR, amplitude, phase)\n"
+            "• FFT: mean power ± SEM across all ROIs\n"
+            "• Chi² Periodogram: mean Z-score ± SEM across all ROIs\n"
+            "• Phase Clustering: mean resultant vector (circular mean + R)"
         )
         layout.addWidget(self.chk_cosinor_population)
 
@@ -11891,6 +11895,11 @@ class HDF5AnalysisWidget(QWidget):
             n_cols = min(3, n_rois)
             n_rows_per_section = (n_rois + n_cols - 1) // n_cols
 
+            has_population = (
+                hasattr(self, "chk_cosinor_population")
+                and self.chk_cosinor_population.isChecked()
+            )
+
             # If we have sleep data, double the rows
             if has_sleep:
                 total_rows = n_rows_per_section * 2
@@ -11899,10 +11908,25 @@ class HDF5AnalysisWidget(QWidget):
                 total_rows = n_rows_per_section
                 fig_height = 3.5 * total_rows + 0.5
 
+            if has_population:
+                fig_height += 3.2
+
             fig_width = 4 * n_cols
-            fig, axes = plt.subplots(
-                total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
+            fig = plt.figure(figsize=(fig_width, fig_height))
+
+            hr = [1.0] * total_rows + ([0.75] if has_population else [])
+            gs = fig.add_gridspec(
+                total_rows + (1 if has_population else 0),
+                n_cols,
+                height_ratios=hr,
+                hspace=0.55,
+                wspace=0.35,
             )
+            axes = np.array(
+                [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
+                 for r in range(total_rows)]
+            )
+            ax_pop = fig.add_subplot(gs[total_rows, :]) if has_population else None
 
             # Check if max period was capped for any ROI
             cap_note = ""
@@ -12045,7 +12069,60 @@ class HDF5AnalysisWidget(QWidget):
             if has_sleep:
                 plot_section(sleep_results, n_rows_per_section, "Sleep")
 
-            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0, w_pad=1.0)
+            # --- Population mean panel ---
+            if has_population and ax_pop is not None:
+                all_p, all_pow = [], []
+                for res in roi_only_results.values():
+                    if "error" not in res:
+                        p = np.array(res.get("relevant_periods", []))
+                        pw = np.array(res.get("relevant_power", []))
+                        if len(p) > 1 and len(p) == len(pw):
+                            all_p.append(p)
+                            all_pow.append(pw)
+
+                if len(all_p) >= 2:
+                    p_min = max(a[0] for a in all_p)
+                    p_max = min(a[-1] for a in all_p)
+                    if p_max > p_min:
+                        grid = np.linspace(p_min, p_max, 300)
+                        interp = np.array([np.interp(grid, p, pw) for p, pw in zip(all_p, all_pow)])
+                        mean_pw = interp.mean(axis=0)
+                        sem_pw = interp.std(axis=0) / np.sqrt(len(interp))
+
+                        ax_pop.plot(grid, mean_pw, color="black", linewidth=2,
+                                    label=f"Mean (n={len(interp)})")
+                        ax_pop.fill_between(grid, mean_pw - sem_pw, mean_pw + sem_pw,
+                                            alpha=0.25, color="gray", label="±SEM")
+
+                        sig_periods = [
+                            res.get("dominant_period")
+                            for res in roi_only_results.values()
+                            if res.get("is_significant") and res.get("dominant_period") is not None
+                        ]
+                        if sig_periods:
+                            med_p = float(np.median(sig_periods))
+                            ax_pop.axvline(med_p, color="red", linestyle="--", linewidth=1.5,
+                                           label=f"Median peak: {med_p:.1f}h")
+                            n_sig = len(sig_periods)
+                            ax_pop.text(0.97, 0.95,
+                                        f"Significant: {n_sig}/{len(all_p)}",
+                                        transform=ax_pop.transAxes, fontsize=8,
+                                        va="top", ha="right",
+                                        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
+
+                        ax_pop.set_xlabel("Period (h)", fontsize=9)
+                        ax_pop.set_ylabel("Power (a.u.)", fontsize=9)
+                        ax_pop.set_title("Population Mean Power Spectrum", fontsize=10,
+                                         fontweight="bold")
+                        ax_pop.legend(fontsize=8, loc="upper left")
+                        ax_pop.grid(True, alpha=0.3)
+                        ax_pop.tick_params(axis="both", labelsize=8)
+                else:
+                    ax_pop.text(0.5, 0.5, "Not enough valid ROIs for population mean",
+                                ha="center", va="center", transform=ax_pop.transAxes)
+                    ax_pop.axis("off")
+
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
             self.fisher_plot_figure = fig
 
             buf = io.BytesIO()
@@ -12687,6 +12764,38 @@ class HDF5AnalysisWidget(QWidget):
 
             ax.set_theta_zero_location("N")
             ax.set_theta_direction(-1)
+
+            # --- Population mean resultant vector ---
+            has_population = (
+                hasattr(self, "chk_cosinor_population")
+                and self.chk_cosinor_population.isChecked()
+            )
+            if has_population and len(roi_phases_filtered) >= 2:
+                thetas = np.array([
+                    (v["phase_radians"] + np.pi) % (2 * np.pi)
+                    for v in roi_phases_filtered.values()
+                ])
+                amplitudes = np.array([v["amplitude"] for v in roi_phases_filtered.values()])
+                sin_mean = np.mean(np.sin(thetas))
+                cos_mean = np.mean(np.cos(thetas))
+                mean_theta = np.arctan2(sin_mean, cos_mean) % (2 * np.pi)
+                R = float(np.sqrt(sin_mean ** 2 + cos_mean ** 2))  # synchrony index 0–1
+                mean_amp = float(np.mean(amplitudes)) * R
+
+                ax.plot([mean_theta, mean_theta], [0, mean_amp],
+                        color="black", linewidth=3.5, zorder=10,
+                        label=f"Population mean (R={R:.2f})")
+                ax.scatter([mean_theta], [mean_amp], color="black", s=200,
+                           edgecolor="white", linewidth=1.5, zorder=11)
+
+                # Convert mean phase back to hours
+                target_period = (self.fisher_min_period.value() + self.fisher_max_period.value()) / 2.0
+                mean_phase_h = (mean_theta / (2 * np.pi)) * target_period
+                ax.text(mean_theta, mean_amp * 1.12,
+                        f"R={R:.2f}\n{mean_phase_h:.1f}h",
+                        ha="center", va="bottom", fontsize=9, fontweight="bold",
+                        color="black")
+
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
@@ -13966,6 +14075,11 @@ class HDF5AnalysisWidget(QWidget):
             n_cols = min(3, n_rois)
             n_rows_per_section = (n_rois + n_cols - 1) // n_cols
 
+            has_population = (
+                hasattr(self, "chk_cosinor_population")
+                and self.chk_cosinor_population.isChecked()
+            )
+
             # If we have sleep data, double the rows (Activity on top, Sleep on bottom)
             if has_sleep:
                 total_rows = n_rows_per_section * 2
@@ -13974,10 +14088,25 @@ class HDF5AnalysisWidget(QWidget):
                 total_rows = n_rows_per_section
                 fig_height = 3.5 * total_rows + 0.5
 
+            if has_population:
+                fig_height += 3.2
+
             fig_width = 4 * n_cols
-            fig, axes = plt.subplots(
-                total_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False
+            fig = plt.figure(figsize=(fig_width, fig_height))
+
+            hr = [1.0] * total_rows + ([0.75] if has_population else [])
+            gs = fig.add_gridspec(
+                total_rows + (1 if has_population else 0),
+                n_cols,
+                height_ratios=hr,
+                hspace=0.55,
+                wspace=0.35,
             )
+            axes = np.array(
+                [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
+                 for r in range(total_rows)]
+            )
+            ax_pop = fig.add_subplot(gs[total_rows, :]) if has_population else None
 
             # Check if max period was capped for any ROI
             cap_note = ""
@@ -14124,7 +14253,71 @@ class HDF5AnalysisWidget(QWidget):
             if has_sleep:
                 plot_section(sleep_results, n_rows_per_section, "Sleep")
 
-            plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0, w_pad=1.0)
+            # --- Population mean panel ---
+            if has_population and ax_pop is not None:
+                all_p, all_z, all_crit = [], [], []
+                for res in roi_only_results.values():
+                    peri = res.get("periodogram", {})
+                    if "error" not in res and "error" not in peri:
+                        p = np.array(peri.get("periods", []))
+                        z = np.array(peri.get("z_scores", []))
+                        cz = peri.get("critical_z", 0)
+                        if len(p) > 1 and len(p) == len(z):
+                            all_p.append(p)
+                            all_z.append(z)
+                            if cz > 0:
+                                all_crit.append(cz)
+
+                if len(all_p) >= 2:
+                    p_min = max(a[0] for a in all_p)
+                    p_max = min(a[-1] for a in all_p)
+                    if p_max > p_min:
+                        grid = np.linspace(p_min, p_max, 300)
+                        interp = np.array([np.interp(grid, p, z) for p, z in zip(all_p, all_z)])
+                        mean_z = interp.mean(axis=0)
+                        sem_z = interp.std(axis=0) / np.sqrt(len(interp))
+
+                        ax_pop.plot(grid, mean_z, color="black", linewidth=2,
+                                    label=f"Mean Z (n={len(interp)})")
+                        ax_pop.fill_between(grid, mean_z - sem_z, mean_z + sem_z,
+                                            alpha=0.25, color="gray", label="±SEM")
+
+                        if all_crit:
+                            mean_crit = float(np.mean(all_crit))
+                            ax_pop.axhline(mean_crit, color="red", linestyle="--",
+                                           linewidth=1.2, label=f"Mean threshold ({mean_crit:.2f})")
+
+                        sig_periods = [
+                            res.get("periodogram", {}).get("dominant_period")
+                            for res in roi_only_results.values()
+                            if res.get("periodogram", {}).get("is_significant")
+                            and res.get("periodogram", {}).get("dominant_period") is not None
+                        ]
+                        if sig_periods:
+                            med_p = float(np.median(sig_periods))
+                            ax_pop.axvline(med_p, color="steelblue", linestyle="--",
+                                           linewidth=1.5, label=f"Median peak: {med_p:.1f}h")
+                            n_sig = len(sig_periods)
+                            ax_pop.text(0.97, 0.95,
+                                        f"Significant: {n_sig}/{len(all_p)}",
+                                        transform=ax_pop.transAxes, fontsize=8,
+                                        va="top", ha="right",
+                                        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
+
+                        ax_pop.set_xlabel("Period (h)", fontsize=9)
+                        ax_pop.set_ylabel("Z-score", fontsize=9)
+                        ax_pop.set_title("Population Mean Periodogram", fontsize=10,
+                                         fontweight="bold")
+                        ax_pop.legend(fontsize=8, loc="upper left")
+                        ax_pop.grid(True, alpha=0.3)
+                        ax_pop.tick_params(axis="both", labelsize=8)
+                        ax_pop.set_ylim(bottom=0)
+                else:
+                    ax_pop.text(0.5, 0.5, "Not enough valid ROIs for population mean",
+                                ha="center", va="center", transform=ax_pop.transAxes)
+                    ax_pop.axis("off")
+
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
 
             # Store figure for later export
             self.fisher_plot_figure = fig
