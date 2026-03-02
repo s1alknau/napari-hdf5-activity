@@ -1677,6 +1677,38 @@ class HDF5AnalysisWidget(QWidget):
 
         layout.addWidget(method_group)
 
+        # Cluster threshold slider — only visible for ROI Similarity Matrix (method index 3)
+        from qtpy.QtWidgets import QSlider
+        from qtpy.QtCore import Qt
+
+        self.similarity_threshold_group = QGroupBox("Cluster Threshold")
+        similarity_thresh_layout = QHBoxLayout()
+        self.similarity_threshold_group.setLayout(similarity_thresh_layout)
+
+        similarity_thresh_layout.addWidget(QLabel("r ="))
+
+        self.similarity_threshold_slider = QSlider(Qt.Horizontal)
+        self.similarity_threshold_slider.setRange(0, 100)
+        self.similarity_threshold_slider.setValue(50)  # default r = 0.50
+        self.similarity_threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.similarity_threshold_slider.setTickInterval(10)
+        self.similarity_threshold_slider.setToolTip(
+            "Minimum Pearson r to merge ROIs into the same cluster.\n"
+            "Higher = fewer, tighter clusters.\n"
+            "Default: 0.50  (distance cut = 0.50)"
+        )
+        self.similarity_threshold_slider.valueChanged.connect(
+            self._on_similarity_threshold_changed
+        )
+        similarity_thresh_layout.addWidget(self.similarity_threshold_slider)
+
+        self.similarity_threshold_label = QLabel("0.50")
+        self.similarity_threshold_label.setMinimumWidth(35)
+        similarity_thresh_layout.addWidget(self.similarity_threshold_label)
+
+        self.similarity_threshold_group.setVisible(False)  # shown only for Similarity method
+        layout.addWidget(self.similarity_threshold_group)
+
         # Re-Binning Options for Extended Analysis
         rebinning_group = QGroupBox("Analysis Binning (Optional)")
         rebinning_layout = QVBoxLayout()
@@ -9802,8 +9834,25 @@ class HDF5AnalysisWidget(QWidget):
         ]
         self._log_message(f"Analysis method changed to: {methods[index]}")
 
+        # Show cluster threshold slider only for ROI Similarity Matrix
+        if hasattr(self, "similarity_threshold_group"):
+            self.similarity_threshold_group.setVisible(index == 3)
+
         # Update data source dropdown based on method
         self._update_data_source_for_method(index)
+
+    def _on_similarity_threshold_changed(self, value):
+        """Update label and redraw dendrogram when the cluster threshold slider moves."""
+        r = value / 100.0
+        if hasattr(self, "similarity_threshold_label"):
+            self.similarity_threshold_label.setText(f"{r:.2f}")
+        # Live-redraw only if similarity results are already shown
+        if (
+            hasattr(self, "fisher_analysis_results")
+            and self.fisher_analysis_results
+            and getattr(self, "current_fisher_method", -1) == 3
+        ):
+            self._create_similarity_plot(self.fisher_analysis_results)
 
     def _update_data_source_for_method(self, method_index):
         """Update data source dropdown based on selected analysis method.
@@ -12456,18 +12505,23 @@ class HDF5AnalysisWidget(QWidget):
             if "clustering" in similarity_results:
                 linkage = similarity_results["clustering"]["linkage_matrix"]
 
-                # Calculate color threshold (30% of max distance)
-                max_distance = np.max(linkage[:, 2])
-                color_threshold = max_distance * 0.3
+                # Cluster cut: distance = 1 − r  (slider in [0,100] → r in [0,1])
+                r_threshold = (
+                    self.similarity_threshold_slider.value() / 100.0
+                    if hasattr(self, "similarity_threshold_slider")
+                    else 0.5
+                )
+                color_threshold = 1.0 - r_threshold
 
                 # Create dendrogram with colors
                 hierarchy.dendrogram(
                     linkage,
-                    labels=[f"ROI {r}" for r in roi_ids],
+                    labels=[str(r) for r in roi_ids],
                     ax=ax2,
                     color_threshold=color_threshold,
                     above_threshold_color="gray",
                 )
+                ax2.tick_params(axis="x", labelsize=9)
 
                 ax2.set_title("Hierarchical Clustering", fontsize=12, fontweight="bold")
                 ax2.set_xlabel("ROI", fontsize=11)
@@ -12481,7 +12535,7 @@ class HDF5AnalysisWidget(QWidget):
                     linestyle="--",
                     linewidth=1.5,
                     alpha=0.7,
-                    label=f"Cluster threshold ({color_threshold:.2f})",
+                    label=f"Cluster cut  r={r_threshold:.2f}  (d={color_threshold:.2f})",
                 )
                 ax2.legend(fontsize=9)
 
