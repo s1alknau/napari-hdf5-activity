@@ -5573,6 +5573,50 @@ class HDF5AnalysisWidget(QWidget):
         self.btn_analyze.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
+    def _auto_adjust_time_range(self):
+        """Set plot_start_time / plot_end_time from the actual recording duration."""
+        data = getattr(self, "merged_results", None) or getattr(self, "movement_data", None)
+        if not data:
+            return
+
+        max_time_seconds = 0.0
+        for roi_data in data.values():
+            if roi_data:
+                times = [t for t, _ in roi_data]
+                if times:
+                    max_time_seconds = max(max_time_seconds, max(times))
+
+        max_time_minutes = max_time_seconds / 60.0
+        if max_time_minutes <= 0:
+            return
+
+        if hasattr(self, "plot_end_time"):
+            self.plot_end_time.setRange(0.0, max_time_minutes * 1.05)
+            self.plot_end_time.setValue(max_time_minutes)
+            self.plot_start_time.setRange(0.0, max_time_minutes * 1.05)
+            self.plot_start_time.setValue(0.0)
+            self._log_message(
+                f"Plot time range set: 0 – {max_time_minutes:.1f} min "
+                f"({max_time_minutes / 60:.2f} h)"
+            )
+
+        # Cap baseline duration spinbox to recording length
+        if hasattr(self, "baseline_duration_minutes"):
+            self.baseline_duration_minutes.setMaximum(max_time_minutes)
+            if self.baseline_duration_minutes.value() > max_time_minutes:
+                self.baseline_duration_minutes.setValue(max_time_minutes)
+
+        # Update Extended Analysis time range (hours axis)
+        max_time_hours = max_time_seconds / 3600.0
+        if hasattr(self, "cycle_end_time") and max_time_hours > 0:
+            self.cycle_end_time.setRange(0.0, max_time_hours * 1.05)
+            self.cycle_end_time.setValue(max_time_hours)
+            self.cycle_start_time.setRange(0.0, max_time_hours * 1.05)
+            self.cycle_start_time.setValue(0.0)
+            self._log_message(
+                f"Extended Analysis time range set: 0 – {max_time_hours:.2f} h"
+            )
+
     def _analysis_finished(self, result: Dict[str, Any]):
         """Handle successful analysis completion using results from _calc.py."""
         try:
@@ -5663,49 +5707,7 @@ class HDF5AnalysisWidget(QWidget):
                     self.roi_band_widths_raw[roi] = (upper - lower) / 2
 
             # Update plot time range based on actual data duration
-            if self.merged_results:
-                # Find the maximum time across all ROIs
-                max_time_seconds = 0.0
-                for roi_data in self.merged_results.values():
-                    if roi_data:
-                        # Each entry is (time, value)
-                        times = [t for t, _ in roi_data]
-                        if times:
-                            max_time_seconds = max(max_time_seconds, max(times))
-
-                # Convert to minutes
-                max_time_minutes = max_time_seconds / 60.0
-
-                # Update plot time range controls
-                if hasattr(self, "plot_end_time") and max_time_minutes > 0:
-                    self.plot_end_time.setRange(0.0, max_time_minutes)
-                    self.plot_end_time.setValue(max_time_minutes)
-                    self.plot_start_time.setRange(0.0, max_time_minutes)
-                    self.plot_start_time.setValue(0.0)
-                    self._log_message(
-                        f"Plot time range updated: 0.0 - {max_time_minutes:.1f} minutes ({max_time_minutes/60:.2f} hours)"
-                    )
-
-                # Cap baseline duration spinbox to recording length
-                if hasattr(self, "baseline_duration_minutes") and max_time_minutes > 0:
-                    current_val = self.baseline_duration_minutes.value()
-                    self.baseline_duration_minutes.setMaximum(max_time_minutes)
-                    if current_val > max_time_minutes:
-                        self.baseline_duration_minutes.setValue(max_time_minutes)
-                        self._log_message(
-                            f"⚠️ Baseline duration capped to recording length: {max_time_minutes:.1f} min"
-                        )
-
-                # Update Extended Analysis time range to match recording duration
-                max_time_hours = max_time_seconds / 3600.0
-                if hasattr(self, "cycle_end_time") and max_time_hours > 0:
-                    self.cycle_end_time.setRange(0.0, max_time_hours)
-                    self.cycle_end_time.setValue(max_time_hours)
-                    self.cycle_start_time.setRange(0.0, max_time_hours)
-                    self.cycle_start_time.setValue(0.0)
-                    self._log_message(
-                        f"Extended Analysis time range updated: 0.0 - {max_time_hours:.1f} hours"
-                    )
+            self._auto_adjust_time_range()
 
             # Calculate performance metrics using _calc.py
             total_frames = (
@@ -10322,6 +10324,9 @@ class HDF5AnalysisWidget(QWidget):
             )
 
             self._log_message("✓ Successfully loaded comprehensive results")
+
+            # Auto-adjust time range spinboxes to match loaded recording duration
+            self._auto_adjust_time_range()
 
             # Compute pixel counts per ROI for Real Amplitude (sum) display mode.
             # Uses current self.masks if they are loaded (from ROI detection step).
