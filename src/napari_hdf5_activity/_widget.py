@@ -5677,6 +5677,8 @@ class HDF5AnalysisWidget(QWidget):
             self.sleep_data = result.get("sleep_data", {})
             # Cache LED data from HDF5 for lighting overlay in plots
             self.led_data = self._extract_led_data_from_hdf5() or {}
+            # Update Real Amplitude checkbox availability now that raw data is loaded
+            self._update_real_amplitude_controls()
             # Pixel count per ROI for sum-mode amplitude display (sum = mean × n_pixels)
             masks = getattr(self, "masks", [])
             self.roi_pixel_counts = {
@@ -5899,8 +5901,34 @@ class HDF5AnalysisWidget(QWidget):
         # Show sleep quality metric selector only for Sleep Quality
         if hasattr(self, "sleep_quality_metric_combo"):
             self.sleep_quality_metric_combo.setVisible(plot_type == "Sleep Quality")
+        # Real Amplitude checkboxes only apply to Raw Intensity Changes
+        self._update_real_amplitude_controls()
         # Generate plot
         self.generate_plot()
+
+    def _update_real_amplitude_controls(self):
+        """Enable/disable Real Amplitude checkboxes based on plot type and data availability."""
+        if not hasattr(self, "show_real_amplitude"):
+            return
+        plot_type = self.plot_type_combo.currentText() if hasattr(self, "plot_type_combo") else ""
+        is_raw_plot = (plot_type == "Raw Intensity Changes")
+        has_raw_data = bool(getattr(self, "merged_results_raw", {}))
+        available = is_raw_plot and has_raw_data
+        self.show_real_amplitude.setEnabled(available)
+        if not available:
+            self.show_real_amplitude.setToolTip(
+                "Only available for 'Raw Intensity Changes' plot type\n"
+                "and requires raw (pre-MinMax) data from the current analysis session."
+            )
+            if hasattr(self, "chk_divide_by_pixels"):
+                self.chk_divide_by_pixels.setEnabled(False)
+        else:
+            self.show_real_amplitude.setToolTip(
+                "Toggle between MinMax-normalized [0,1] view and real amplitude values.\n"
+                "Real amplitude shows sum(|Δpixel|) per ROI in raw pixel counts (MATLAB-style)."
+            )
+            if hasattr(self, "chk_divide_by_pixels"):
+                self.chk_divide_by_pixels.setEnabled(self.show_real_amplitude.isChecked())
 
     def generate_plot(self):
         """Generate plot using PlotGenerator."""
@@ -5958,6 +5986,11 @@ class HDF5AnalysisWidget(QWidget):
             # Get data based on plot type
             if plot_type == "Raw Intensity Changes":
                 pixel_sum_scales = {}  # {roi: scale_factor} — used to scale thresholds too
+                if use_real_amplitude and not getattr(self, "merged_results_raw", {}):
+                    self._log_message(
+                        "⚠️ Real Amplitude: no raw data available (not saved in HDF5 results). "
+                        "Run a fresh analysis to use this mode."
+                    )
                 if use_real_amplitude and getattr(self, "merged_results_raw", {}):
                     divide_by_pixels = (
                         hasattr(self, "chk_divide_by_pixels")
@@ -10383,6 +10416,8 @@ class HDF5AnalysisWidget(QWidget):
 
             # Auto-adjust time range spinboxes to match loaded recording duration
             self._auto_adjust_time_range()
+            # Raw data is not saved in HDF5 results — disable Real Amplitude controls
+            self._update_real_amplitude_controls()
 
             # Compute pixel counts per ROI for Real Amplitude (sum) display mode.
             # Uses current self.masks if they are loaded (from ROI detection step).
