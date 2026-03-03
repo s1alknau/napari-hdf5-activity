@@ -54,3 +54,6 @@ napari-hdf5-activity = "napari_hdf5_activity:napari.yaml"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["napari_hdf5_activity*"]
+
+[tool.setuptools.package-data]
+napari_hdf5_activity = ["napari.yaml"]
