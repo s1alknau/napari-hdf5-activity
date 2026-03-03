@@ -1688,9 +1688,6 @@ class HDF5AnalysisWidget(QWidget):
         layout.addWidget(method_group)
 
         # Cluster threshold slider — only visible for ROI Similarity Matrix (method index 3)
-        from qtpy.QtWidgets import QSlider
-        from qtpy.QtCore import Qt
-
         self.similarity_threshold_group = QGroupBox("Cluster Threshold")
         similarity_thresh_layout = QHBoxLayout()
         self.similarity_threshold_group.setLayout(similarity_thresh_layout)
@@ -1700,7 +1697,7 @@ class HDF5AnalysisWidget(QWidget):
         self.similarity_threshold_slider = QSlider(Qt.Horizontal)
         self.similarity_threshold_slider.setRange(0, 100)
         self.similarity_threshold_slider.setValue(50)  # default r = 0.50
-        self.similarity_threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.similarity_threshold_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.similarity_threshold_slider.setTickInterval(10)
         self.similarity_threshold_slider.setToolTip(
             "Minimum Pearson r to merge ROIs into the same cluster.\n"
@@ -2005,7 +2002,7 @@ class HDF5AnalysisWidget(QWidget):
 
         # Create a horizontal splitter for results and plot
         splitter = QSplitter()
-        splitter.setOrientation(1)  # Horizontal
+        splitter.setOrientation(Qt.Horizontal)
 
         # Results display (left side)
         self.fisher_results_text = QTextEdit()
@@ -2102,8 +2099,7 @@ class HDF5AnalysisWidget(QWidget):
 
         # Frame slider with current frame display
         slider_layout = QHBoxLayout()
-        self.viewer_frame_slider = QSlider()
-        self.viewer_frame_slider.setOrientation(1)  # Horizontal
+        self.viewer_frame_slider = QSlider(Qt.Horizontal)
         self.viewer_frame_slider.setMinimum(0)
         self.viewer_frame_slider.setMaximum(0)
         self.viewer_frame_slider.setValue(0)
