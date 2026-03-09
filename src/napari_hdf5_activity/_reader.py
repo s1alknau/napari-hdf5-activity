@@ -2017,7 +2017,22 @@ def detect_hdf5_structure_type(file_path: str) -> Dict[str, Any]:
                         "data_location": "frames",
                     }
 
-            # Structure 2: Individual frames in images/ group
+            # Structure 2a: Stacked dataset inside images/ group (e.g. /images/frames)
+            if "images" in h5_file:
+                images_group = h5_file["images"]
+                if "frames" in images_group and isinstance(images_group["frames"], h5py.Dataset):
+                    ds = images_group["frames"]
+                    return {
+                        "type": "stacked_frames",
+                        "dataset_name": "images/frames",
+                        "frame_count": ds.shape[0],
+                        "frame_shape": ds.shape[1:],
+                        "dtype": ds.dtype,
+                        "dtype_size": ds.dtype.itemsize,
+                        "data_location": "images/frames",
+                    }
+
+            # Structure 2b: Individual frames in images/ group
             if "images" in h5_file:
                 images_group = h5_file["images"]
                 if len(images_group.keys()) > 0:
@@ -2108,11 +2123,12 @@ def get_first_frame_enhanced(
             logger.info(f"HDF5 file structure: {list(f.keys())}")
 
             if structure_info["type"] == "stacked_frames":
-                # Handle stacked frames (original structure)
-                frames_dataset = f["frames"]
+                # Handle stacked frames — dataset may be at root "frames" or "images/frames"
+                dataset_path = structure_info.get("dataset_name", "frames")
+                frames_dataset = f[dataset_path]
                 raw_frame = frames_dataset[0].copy()
                 logger.info(
-                    f"Loaded first frame from stacked dataset: {raw_frame.shape}"
+                    f"Loaded first frame from stacked dataset '{dataset_path}': {raw_frame.shape}"
                 )
 
             elif structure_info["type"] == "individual_frames":
@@ -2184,7 +2200,8 @@ def read_chunk_data_dual_structure(
 
             if structure_info["type"] == "stacked_frames":
                 # Standard stacked frames approach
-                frames_dataset = f["frames"]
+                dataset_path = structure_info.get("dataset_name", "frames")
+                frames_dataset = f[dataset_path]
                 chunk_data = frames_dataset[start_idx:end_idx].copy()
 
             elif structure_info["type"] == "individual_frames":
