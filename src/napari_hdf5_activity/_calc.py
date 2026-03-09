@@ -732,6 +732,91 @@ def apply_matlab_normalization_to_merged_results(
     return merged_results
 
 
+def detect_jumps_from_frame_mean(
+    frame_times_s: np.ndarray,
+    frame_mean: np.ndarray,
+    jump_threshold_factor: float = 3.0,
+) -> List[Tuple[float, float]]:
+    """
+    Detect illumination jumps from HDF5 frame_mean telemetry.
+
+    frame_mean (average pixel intensity per frame) is a clean, low-noise signal
+    where sudden illumination changes appear as clear step jumps. Using it is much
+    more reliable than detecting jumps in the noisy activity signal itself.
+
+    Args:
+        frame_times_s: Timestamps in seconds (same length as frame_mean)
+        frame_mean: Average pixel intensity per frame from HDF5 timeseries
+        jump_threshold_factor: How many sigma above median diff qualifies as jump
+
+    Returns:
+        List of (time_s, offset) tuples — offset is the jump magnitude
+        (positive = sudden brightness increase, negative = decrease).
+        Caller subtracts offset from all subsequent activity values.
+    """
+    if len(frame_mean) < 10:
+        return []
+
+    diffs = np.diff(frame_mean.astype(float))
+    median_abs = np.median(np.abs(diffs))
+    if median_abs == 0:
+        return []
+
+    threshold = jump_threshold_factor * median_abs
+    jump_mask = np.abs(diffs) > threshold
+    jump_indices = np.where(jump_mask)[0]
+
+    # Merge consecutive jump indices (same physical event)
+    merged = []
+    for idx in jump_indices:
+        if merged and idx == merged[-1][0] + 1:
+            # Accumulate consecutive frames into one jump
+            merged[-1] = (merged[-1][0], merged[-1][1] + diffs[idx])
+        else:
+            merged.append((idx, diffs[idx]))
+
+    result = []
+    for idx, offset in merged:
+        t = float(frame_times_s[idx + 1]) if idx + 1 < len(frame_times_s) else float(frame_times_s[idx])
+        result.append((t, float(offset)))
+
+    return result
+
+
+def correct_activity_with_frame_mean_jumps(
+    times: np.ndarray,
+    values: np.ndarray,
+    jump_list: List[Tuple[float, float]],
+) -> np.ndarray:
+    """
+    Apply frame_mean-derived jump offsets to activity signal.
+
+    For each detected jump (time_s, offset), all activity values at or after
+    time_s are shifted by -offset so the signal level is continuous.
+
+    Args:
+        times: Time array of the activity signal (seconds)
+        values: Activity values
+        jump_list: Output of detect_jumps_from_frame_mean()
+
+    Returns:
+        Corrected values array (same length as input)
+    """
+    if not jump_list:
+        return values
+
+    corrected = values.copy()
+    cumulative_offset = 0.0
+    # Sort by time just in case
+    for jump_time, offset in sorted(jump_list, key=lambda x: x[0]):
+        mask = times >= jump_time
+        corrected[mask] -= offset
+        cumulative_offset += offset
+
+    logger.debug(f"Jump correction: applied {len(jump_list)} frame_mean jumps, total offset {cumulative_offset:.3f}")
+    return corrected
+
+
 def detect_and_remove_jumps(
     times: np.ndarray, values: np.ndarray, jump_threshold_factor: float = 1.5
 ) -> Tuple[np.ndarray, List[int]]:
@@ -794,6 +879,7 @@ def improved_full_dataset_detrending(
     merged_results: Dict[int, List[Tuple[float, float]]],
     enable_jump_correction: bool = False,
     enable_detrending: bool = True,
+    frame_mean_data: Optional[Dict] = None,
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Apply improved detrending to complete dataset.
@@ -802,10 +888,25 @@ def improved_full_dataset_detrending(
         merged_results: Dictionary mapping ROI ID to list of (time, value) tuples
         enable_jump_correction: Whether to apply jump correction before detrending
         enable_detrending: Whether to apply polynomial detrending
+        frame_mean_data: Optional dict with 'times' (s) and 'values' (pixel intensity)
+                         from HDF5 timeseries/frame_mean. When provided and
+                         enable_jump_correction is True, jumps are derived from
+                         frame_mean (more reliable) instead of the noisy activity signal.
 
     Returns:
         Dictionary with detrended values
     """
+    # Pre-compute frame_mean jumps once (shared across all ROIs) if available
+    frame_mean_jumps = []
+    if enable_jump_correction and frame_mean_data:
+        try:
+            fm_times = np.array(frame_mean_data["times"], dtype=float)
+            fm_values = np.array(frame_mean_data["values"], dtype=float)
+            frame_mean_jumps = detect_jumps_from_frame_mean(fm_times, fm_values)
+            logger.info(f"Frame mean jump detection: found {len(frame_mean_jumps)} jumps")
+        except Exception as e:
+            logger.warning(f"Could not use frame_mean for jump detection: {e}; falling back to signal-based")
+
     detrended_results = {}
 
     for roi, data in merged_results.items():
@@ -820,9 +921,14 @@ def improved_full_dataset_detrending(
 
             # Step 1: Jump correction (if enabled)
             if enable_jump_correction:
-                values, jump_indices = detect_and_remove_jumps(times, values)
-                if len(jump_indices) > 0:
-                    logger.debug(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
+                if frame_mean_jumps:
+                    # Use frame_mean-derived jumps (preferred: clean signal)
+                    values = correct_activity_with_frame_mean_jumps(times, values, frame_mean_jumps)
+                else:
+                    # Fallback: detect jumps in activity signal directly
+                    values, jump_indices = detect_and_remove_jumps(times, values)
+                    if len(jump_indices) > 0:
+                        logger.debug(f"ROI {roi}: Corrected {len(jump_indices)} jumps (signal-based)")
 
             # Step 2: Remove polynomial trend (handles curved drift)
             if enable_detrending and len(values) >= 10:
@@ -1787,7 +1893,8 @@ def run_baseline_analysis(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
-    enable_jump_correction: bool = False,  # kept for backward compat
+    enable_jump_correction: bool = False,
+    frame_mean_data: Optional[Dict] = None,
     adaptive_illumination_baseline: bool = False,
     led_data: Optional[Dict] = None,
     baseline_duration_minutes: float = 200.0,
@@ -1862,6 +1969,7 @@ def run_baseline_analysis(
             normalized_data,
             enable_jump_correction=enable_jump_correction,
             enable_detrending=enable_detrending and use_improved_detrending,
+            frame_mean_data=frame_mean_data,
         )
     else:
         processed_data = normalized_data

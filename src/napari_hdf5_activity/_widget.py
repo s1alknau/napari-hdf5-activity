@@ -843,7 +843,17 @@ class HDF5AnalysisWidget(QWidget):
         )
         baseline_layout.addRow("", self.enable_detrending)
 
-        # Add adaptive illumination baseline option
+        # Jump correction using frame_mean telemetry
+        self.enable_jump_correction = QCheckBox("Jump Correction (frame mean)")
+        self.enable_jump_correction.setChecked(False)
+        self.enable_jump_correction.setToolTip(
+            "Detect and correct sudden illumination jumps.\n"
+            "Uses HDF5 frame_mean telemetry when available (recommended);\n"
+            "falls back to signal-based detection otherwise."
+        )
+        baseline_layout.addRow("", self.enable_jump_correction)
+
+        # Adaptive illumination baseline option
         self.adaptive_illumination_baseline = QCheckBox("Adaptive Illumination Baseline")
         self.adaptive_illumination_baseline.setChecked(False)
         self.adaptive_illumination_baseline.setToolTip(
@@ -5369,6 +5379,8 @@ class HDF5AnalysisWidget(QWidget):
                 {
                     "baseline_duration_minutes": self.baseline_duration_minutes.value(),
                     "multiplier": self.threshold_multiplier.value(),
+                    "enable_jump_correction": self.enable_jump_correction.isChecked(),
+                    "frame_mean_data": self._extract_frame_mean_from_hdf5() if self.enable_jump_correction.isChecked() else None,
                     "adaptive_illumination_baseline": self.adaptive_illumination_baseline.isChecked(),
                     "led_data": self._extract_led_data_from_hdf5() if self.adaptive_illumination_baseline.isChecked() else None,
                 }
@@ -6257,6 +6269,39 @@ class HDF5AnalysisWidget(QWidget):
             "AVI files don't contain LED data - lighting conditions will not be shown in plots"
         )
         return None
+
+    def _extract_frame_mean_from_hdf5(self):
+        """Extract frame_mean timeseries from HDF5 for jump correction.
+
+        Returns:
+            dict with 'times' (list of floats, seconds) and 'values' (list of floats),
+            or None if not available.
+        """
+        try:
+            if not hasattr(self, "file_path") or not self.file_path:
+                return None
+            if self.file_path.lower().endswith(".avi"):
+                return None
+
+            with h5py.File(self.file_path, "r") as f:
+                if "timeseries" not in f or "frame_mean" not in f["timeseries"]:
+                    return None
+
+                fm = f["timeseries"]["frame_mean"][:]
+
+                # Timestamps
+                ts = f["timeseries"]
+                if "capture_timestamps" in ts:
+                    times = ts["capture_timestamps"][:].astype(float)
+                else:
+                    frame_interval = self.frame_interval.value()
+                    times = np.arange(len(fm), dtype=float) * frame_interval
+
+                return {"times": times.tolist(), "values": fm.tolist()}
+
+        except Exception as e:
+            self._log_message(f"Could not extract frame_mean from HDF5: {e}")
+            return None
 
     def apply_time_range(self):
         """Apply time range and regenerate plot."""
@@ -7395,8 +7440,8 @@ class HDF5AnalysisWidget(QWidget):
                             else "N/A"
                         ),
                         (
-                            self.adaptive_illumination_baseline.isChecked()
-                            if hasattr(self, "adaptive_illumination_baseline")
+                            self.enable_jump_correction.isChecked()
+                            if hasattr(self, "enable_jump_correction")
                             else "N/A"
                         ),
                         self.bin_size_seconds.value(),

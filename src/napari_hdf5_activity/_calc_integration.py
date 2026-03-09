@@ -1953,6 +1953,18 @@ def integrate_analysis_with_widget(widget) -> bool:
         else:
             kwargs["enable_detrending"] = False
 
+        if hasattr(widget, "enable_jump_correction") and hasattr(
+            widget.enable_jump_correction, "isChecked"
+        ):
+            kwargs["enable_jump_correction"] = widget.enable_jump_correction.isChecked()
+            if kwargs["enable_jump_correction"] and hasattr(widget, "_extract_frame_mean_from_hdf5"):
+                kwargs["frame_mean_data"] = widget._extract_frame_mean_from_hdf5() or None
+            else:
+                kwargs["frame_mean_data"] = None
+        else:
+            kwargs["enable_jump_correction"] = False
+            kwargs["frame_mean_data"] = None
+
         if hasattr(widget, "adaptive_illumination_baseline") and hasattr(
             widget.adaptive_illumination_baseline, "isChecked"
         ):
