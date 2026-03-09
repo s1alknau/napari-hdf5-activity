@@ -1953,12 +1953,17 @@ def integrate_analysis_with_widget(widget) -> bool:
         else:
             kwargs["enable_detrending"] = False
 
-        if hasattr(widget, "enable_jump_correction") and hasattr(
-            widget.enable_jump_correction, "isChecked"
+        if hasattr(widget, "adaptive_illumination_baseline") and hasattr(
+            widget.adaptive_illumination_baseline, "isChecked"
         ):
-            kwargs["enable_jump_correction"] = widget.enable_jump_correction.isChecked()
+            kwargs["adaptive_illumination_baseline"] = widget.adaptive_illumination_baseline.isChecked()
+            if kwargs["adaptive_illumination_baseline"] and hasattr(widget, "_extract_led_data_from_hdf5"):
+                kwargs["led_data"] = widget._extract_led_data_from_hdf5() or {}
+            else:
+                kwargs["led_data"] = {}
         else:
-            kwargs["enable_jump_correction"] = False
+            kwargs["adaptive_illumination_baseline"] = False
+            kwargs["led_data"] = {}
 
         # Add method-specific parameters
         if "Baseline" in method_text:

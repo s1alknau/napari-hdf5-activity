@@ -843,13 +843,14 @@ class HDF5AnalysisWidget(QWidget):
         )
         baseline_layout.addRow("", self.enable_detrending)
 
-        # Add jump correction option
-        self.enable_jump_correction = QCheckBox("Enable Jump Correction")
-        self.enable_jump_correction.setChecked(False)
-        self.enable_jump_correction.setToolTip(
-            "Detect and correct sudden jumps/plateaus in baseline data"
+        # Add adaptive illumination baseline option
+        self.adaptive_illumination_baseline = QCheckBox("Adaptive Illumination Baseline")
+        self.adaptive_illumination_baseline.setChecked(False)
+        self.adaptive_illumination_baseline.setToolTip(
+            "Re-compute baseline per light/dark period from HDF5 LED data.\n"
+            "Falls back to global baseline when no LED data is available."
         )
-        baseline_layout.addRow("", self.enable_jump_correction)
+        baseline_layout.addRow("", self.adaptive_illumination_baseline)
 
         baseline_info = QLabel(
             "HYSTERESIS METHOD:\n"
@@ -5368,7 +5369,8 @@ class HDF5AnalysisWidget(QWidget):
                 {
                     "baseline_duration_minutes": self.baseline_duration_minutes.value(),
                     "multiplier": self.threshold_multiplier.value(),
-                    "enable_jump_correction": self.enable_jump_correction.isChecked(),
+                    "adaptive_illumination_baseline": self.adaptive_illumination_baseline.isChecked(),
+                    "led_data": self._extract_led_data_from_hdf5() if self.adaptive_illumination_baseline.isChecked() else None,
                 }
             )
         elif threshold_method == "calibration":
@@ -7393,8 +7395,8 @@ class HDF5AnalysisWidget(QWidget):
                             else "N/A"
                         ),
                         (
-                            self.enable_jump_correction.isChecked()
-                            if hasattr(self, "enable_jump_correction")
+                            self.adaptive_illumination_baseline.isChecked()
+                            if hasattr(self, "adaptive_illumination_baseline")
                             else "N/A"
                         ),
                         self.bin_size_seconds.value(),
@@ -16366,18 +16368,17 @@ def prepare_analysis_parameters(widget, method):
                         (baseline_duration_minutes * 60) / frame_interval
                     ),
                     "multiplier": multiplier,
-                    "enable_jump_correction": getattr(
-                        widget, "enable_jump_correction", None
+                    "adaptive_illumination_baseline": getattr(
+                        widget, "adaptive_illumination_baseline", None
                     ),
                 }
             )
 
-            if hasattr(base_params["enable_jump_correction"], "isChecked"):
-                base_params["enable_jump_correction"] = base_params[
-                    "enable_jump_correction"
-                ].isChecked()
+            aib = base_params["adaptive_illumination_baseline"]
+            if hasattr(aib, "isChecked"):
+                base_params["adaptive_illumination_baseline"] = aib.isChecked()
             else:
-                base_params["enable_jump_correction"] = True
+                base_params["adaptive_illumination_baseline"] = False
 
         except Exception as e:
             print(f"Warning: Could not extract baseline parameters: {e}")

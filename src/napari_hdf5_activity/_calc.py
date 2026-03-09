@@ -793,6 +793,7 @@ def detect_and_remove_jumps(
 def improved_full_dataset_detrending(
     merged_results: Dict[int, List[Tuple[float, float]]],
     enable_jump_correction: bool = False,
+    enable_detrending: bool = True,
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Apply improved detrending to complete dataset.
@@ -800,6 +801,7 @@ def improved_full_dataset_detrending(
     Args:
         merged_results: Dictionary mapping ROI ID to list of (time, value) tuples
         enable_jump_correction: Whether to apply jump correction before detrending
+        enable_detrending: Whether to apply polynomial detrending
 
     Returns:
         Dictionary with detrended values
@@ -823,15 +825,15 @@ def improved_full_dataset_detrending(
                     logger.debug(f"ROI {roi}: Corrected {len(jump_indices)} jumps")
 
             # Step 2: Remove polynomial trend (handles curved drift)
-            if len(values) >= 10:
+            if enable_detrending and len(values) >= 10:
                 poly_coeffs = np.polyfit(times, values, 2)
                 poly_trend = np.polyval(poly_coeffs, times)
                 values_detrended = values - poly_trend + np.mean(poly_trend)
             else:
                 values_detrended = values
 
-            # Step 3: Remove any remaining linear drift
-            if len(values_detrended) >= 10:
+            # Step 3: Remove any remaining linear drift (only if detrending enabled)
+            if enable_detrending and len(values_detrended) >= 10:
                 slope, intercept = np.polyfit(times, values_detrended, 1)
                 total_drift = abs(slope * (times[-1] - times[0]))
                 drift_percentage = (
@@ -1588,6 +1590,114 @@ def bin_activity_data_for_lighting(
 # =============================================================================
 
 
+def extract_illumination_periods(
+    led_data: Dict[str, list],
+    recording_start_s: float = 0.0,
+    recording_end_s: Optional[float] = None,
+    min_period_s: float = 60.0,
+) -> List[Tuple[float, float, str]]:
+    """
+    Extract light/dark periods from LED timeseries data.
+
+    Returns:
+        List of (start_s, end_s, phase) where phase is 'light' or 'dark'.
+        Empty list if LED data is unusable.
+    """
+    try:
+        times = np.array(led_data.get("times", []), dtype=float)
+        white = np.array(led_data.get("white_powers", []), dtype=float)
+        if len(times) == 0 or len(white) == 0:
+            return []
+
+        phases = np.where(white > 0, "light", "dark")
+        periods = []
+        start = times[0]
+        current = phases[0]
+
+        for i in range(1, len(times)):
+            if phases[i] != current:
+                end = times[i]
+                if end - start >= min_period_s:
+                    periods.append((max(start, recording_start_s), end, current))
+                start = times[i]
+                current = phases[i]
+
+        # Last period
+        end = times[-1] if recording_end_s is None else recording_end_s
+        if end - start >= min_period_s:
+            periods.append((max(start, recording_start_s), end, current))
+
+        return periods
+    except Exception as e:
+        logger.warning(f"extract_illumination_periods failed: {e}")
+        return []
+
+
+def compute_adaptive_baselines(
+    data: List[Tuple[float, float]],
+    periods: List[Tuple[float, float, str]],
+    multiplier: float,
+    frame_interval: float,
+) -> List[Tuple[float, float, float, float, float, str]]:
+    """
+    Compute baseline thresholds for each illumination period.
+
+    Returns:
+        List of (start_s, end_s, baseline_mean, upper_thresh, lower_thresh, phase)
+    """
+    result = []
+    for start_s, end_s, phase in periods:
+        period_data = [(t, v) for t, v in data if start_s <= t < end_s]
+        if len(period_data) < 2:
+            continue
+        duration_min = (end_s - start_s) / 60.0
+        baseline_mean, upper, lower, _ = compute_threshold_baseline_hysteresis(
+            period_data, duration_min, multiplier, frame_interval
+        )
+        result.append((start_s, end_s, baseline_mean, upper, lower, phase))
+    return result
+
+
+def apply_adaptive_illumination_movement(
+    data: List[Tuple[float, float]],
+    period_thresholds: List[Tuple[float, float, float, float, float, str]],
+    global_upper: float,
+    global_lower: float,
+) -> List[Tuple[float, int]]:
+    """
+    Detect movement using per-illumination-period thresholds with continuous hysteresis.
+
+    Args:
+        data: List of (time_s, value) tuples
+        period_thresholds: Output of compute_adaptive_baselines
+        global_upper / global_lower: Fallback thresholds for gaps between periods
+    """
+    sorted_data = sorted(data, key=lambda x: x[0])
+    movement = []
+    is_moving = False
+
+    for t, v in sorted_data:
+        # Find which period this frame belongs to
+        upper = global_upper
+        lower = global_lower
+        for start_s, end_s, _, pt_upper, pt_lower, _ in period_thresholds:
+            if start_s <= t < end_s:
+                upper = pt_upper
+                lower = pt_lower
+                break
+
+        # Hysteresis
+        if is_moving:
+            if v < lower:
+                is_moving = False
+        else:
+            if v > upper:
+                is_moving = True
+        movement.append((t, 1 if is_moving else 0))
+
+    return movement
+
+
 def _process_single_roi_movement(
     args: Tuple,
 ) -> Tuple[int, Dict[str, Any]]:
@@ -1610,7 +1720,9 @@ def _process_single_roi_movement(
         bin_size_seconds,
         frame_interval,
         is_active,
+        *extra,
     ) = args
+    period_thresholds = extra[0] if extra else None
 
     results = {}
 
@@ -1633,17 +1745,22 @@ def _process_single_roi_movement(
 
     try:
         # Step 1: Hysteresis movement detection using pre-calculated baselines
-        baseline_means_single = {roi_id: baseline_mean}
-        upper_thresholds_single = {roi_id: upper_threshold}
-        lower_thresholds_single = {roi_id: lower_threshold}
-        data_single = {roi_id: data}
-
-        movement_data_dict = define_movement_with_hysteresis(
-            data_single,
-            baseline_means_single,
-            upper_thresholds_single,
-            lower_thresholds_single,
-        )
+        if period_thresholds:
+            movement_list = apply_adaptive_illumination_movement(
+                data, period_thresholds, upper_threshold, lower_threshold
+            )
+            movement_data_dict = {roi_id: movement_list}
+        else:
+            baseline_means_single = {roi_id: baseline_mean}
+            upper_thresholds_single = {roi_id: upper_threshold}
+            lower_thresholds_single = {roi_id: lower_threshold}
+            data_single = {roi_id: data}
+            movement_data_dict = define_movement_with_hysteresis(
+                data_single,
+                baseline_means_single,
+                upper_thresholds_single,
+                lower_thresholds_single,
+            )
         results["movement_data"] = movement_data_dict.get(roi_id, [])
 
         # Step 2: Bin fraction movement
@@ -1670,7 +1787,9 @@ def run_baseline_analysis(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
-    enable_jump_correction: bool = False,
+    enable_jump_correction: bool = False,  # kept for backward compat
+    adaptive_illumination_baseline: bool = False,
+    led_data: Optional[Dict] = None,
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
@@ -1738,9 +1857,11 @@ def run_baseline_analysis(
     # Step 1a: Apply detrending and jump correction (if enabled) FIRST,
     # so baseline thresholds are computed on the same signal used for movement detection.
     logger.debug(f"Step 1a: Detrending enabled={enable_detrending}, jump_correction={enable_jump_correction}")
-    if enable_detrending and use_improved_detrending:
+    if (enable_detrending and use_improved_detrending) or enable_jump_correction:
         processed_data = improved_full_dataset_detrending(
-            normalized_data, enable_jump_correction=enable_jump_correction
+            normalized_data,
+            enable_jump_correction=enable_jump_correction,
+            enable_detrending=enable_detrending and use_improved_detrending,
         )
     else:
         processed_data = normalized_data
@@ -1772,6 +1893,24 @@ def run_baseline_analysis(
         lower_thresholds[roi] = lower_thresh
         roi_statistics[roi] = stats
 
+    # Step 1c: Compute per-illumination-period thresholds (adaptive baseline)
+    roi_period_thresholds = {}
+    use_adaptive = False
+    if adaptive_illumination_baseline and led_data:
+        all_times = [t for data in processed_data.values() for t, _ in data]
+        rec_start = min(all_times) if all_times else 0.0
+        rec_end = max(all_times) if all_times else None
+        periods = extract_illumination_periods(led_data, rec_start, rec_end)
+        if periods:
+            use_adaptive = True
+            logger.info(f"Adaptive illumination baseline: {len(periods)} periods detected")
+            for roi, data in processed_data.items():
+                roi_period_thresholds[roi] = compute_adaptive_baselines(
+                    data, periods, multiplier, frame_interval
+                )
+        else:
+            logger.warning("Adaptive illumination baseline: no usable periods found, using global baseline")
+
     # Step 2: ROI-level processing (parallel or sequential)
     # Movement detection uses processed_data but pre-calculated baselines
     bin_size_seconds = kwargs.get("bin_size_seconds", 60)
@@ -1789,6 +1928,7 @@ def run_baseline_analysis(
                 bin_size_seconds,
                 frame_interval,
                 roi_active.get(roi_id, True),
+                roi_period_thresholds.get(roi_id) if use_adaptive else None,
             )
             for roi_id in processed_data.keys()
         ]
