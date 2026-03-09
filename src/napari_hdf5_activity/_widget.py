@@ -14680,6 +14680,20 @@ class HDF5AnalysisWidget(QWidget):
                         dataset_found = True
                         break
                     elif isinstance(data_obj, h5py.Group):
+                        # New format: /images/frames stacked dataset
+                        if "frames" in data_obj and isinstance(data_obj["frames"], h5py.Dataset):
+                            frames_ds = data_obj["frames"]
+                            self._log_message(
+                                f"Found stacked dataset: {dataset_name}/frames with shape {frames_ds.shape}"
+                            )
+                            self.viewer_file_handle = h5py.File(self.file_path, "r")
+                            self.viewer_frames = self.viewer_file_handle[dataset_name]["frames"]
+                            self.viewer_n_frames = frames_ds.shape[0]
+                            self.viewer_dataset_name = f"{dataset_name}/frames"
+                            self.viewer_is_sequence = False
+                            dataset_found = True
+                            break
+
                         # Individual frames format: group with frame_XXXXXX datasets
                         frame_names = sorted(
                             [k for k in data_obj.keys() if k.startswith("frame_")]
