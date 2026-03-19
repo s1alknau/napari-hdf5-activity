@@ -1949,8 +1949,10 @@ def preprocess_image_stack_for_processing(image_stack: np.ndarray) -> np.ndarray
         Grayscale image stack for processing
     """
     if len(image_stack.shape) == 3:
-        # Already grayscale stack (frames, height, width)
-        return image_stack.copy()
+        # Already grayscale stack (frames, height, width) — return as-is, no copy needed.
+        # The caller (read_chunk_data_dual_structure) already holds the only reference;
+        # copying here doubles peak memory without benefit.
+        return image_stack
     elif len(image_stack.shape) == 4:
         # RGB/RGBA stack (frames, height, width, channels)
         if image_stack.shape[-1] == 3:  # RGB
@@ -2096,81 +2098,286 @@ def detect_hdf5_structure_type(file_path: str) -> Dict[str, Any]:
         return {"type": "error", "error": str(e)}
 
 
+def detect_file_structure_type(file_path: str) -> Dict[str, Any]:
+    """Format-agnostic structure detection supporting both HDF5 and Zarr.
+
+    For HDF5 files this delegates to the battle-tested
+    :func:`detect_hdf5_structure_type`.  For Zarr stores it performs the
+    same structural inspection using the :mod:`._io_abstraction` layer.
+
+    The returned dictionary has the same keys as
+    :func:`detect_hdf5_structure_type` plus an optional ``"file_format"``
+    key (``"hdf5"`` or ``"zarr"``) so callers can branch on it when needed.
+    """
+    from ._io_abstraction import detect_file_format, open_file_reader
+
+    try:
+        fmt = detect_file_format(file_path)
+    except ValueError as exc:
+        return {"type": "error", "error": str(exc)}
+
+    if fmt == "hdf5":
+        info = detect_hdf5_structure_type(file_path)
+        if info.get("type") not in ("error", "unknown"):
+            info.setdefault("file_format", "hdf5")
+        return info
+
+    # ---- Zarr detection -----------------------------------------------
+    try:
+        with open_file_reader(file_path) as r:
+            root_keys = r.keys("/")
+
+            # Structure 1: /frames stacked array
+            if "frames" in root_keys and r.is_array("frames"):
+                shp = r.shape("frames")
+                if shp[0] > 0:
+                    dt = r.dtype("frames")
+                    return {
+                        "type": "stacked_frames",
+                        "dataset_name": "frames",
+                        "frame_count": shp[0],
+                        "frame_shape": shp[1:],
+                        "dtype": dt,
+                        "dtype_size": dt.itemsize,
+                        "data_location": "frames",
+                        "file_format": "zarr",
+                    }
+
+            # Structure 2: /images group
+            if "images" in root_keys and not r.is_array("images"):
+                img_keys = r.keys("images")
+
+                # 2a: /images/frames stacked array
+                if "frames" in img_keys and r.is_array("images/frames"):
+                    shp = r.shape("images/frames")
+                    dt = r.dtype("images/frames")
+                    return {
+                        "type": "stacked_frames",
+                        "dataset_name": "images/frames",
+                        "frame_count": shp[0],
+                        "frame_shape": shp[1:],
+                        "dtype": dt,
+                        "dtype_size": dt.itemsize,
+                        "data_location": "images/frames",
+                        "file_format": "zarr",
+                    }
+
+                # 2b: individual frame arrays inside /images
+                if img_keys:
+                    all_keys = sorted(img_keys)
+                    first_key = all_keys[0]
+                    first_path = f"images/{first_key}"
+                    frame_shape = r.shape(first_path)
+                    dt = r.dtype(first_path)
+
+                    import re as _re
+                    key_template = None
+                    m = _re.match(r"^([a-zA-Z_]*)(\d+)$", first_key)
+                    if m and len(all_keys) >= 2:
+                        prefix, digits = m.group(1), m.group(2)
+                        expected_second = f"{prefix}{1:0{len(digits)}d}"
+                        if all_keys[1] == expected_second:
+                            key_template = f"{prefix}{{:0{len(digits)}d}}"
+
+                    return {
+                        "type": "individual_frames",
+                        "group_name": "images",
+                        "frame_count": len(all_keys),
+                        "frame_shape": frame_shape,
+                        "dtype": dt,
+                        "dtype_size": dt.itemsize,
+                        "data_location": "images",
+                        "frame_keys": None if key_template else all_keys,
+                        "key_template": key_template,
+                        "file_format": "zarr",
+                    }
+
+            # Structure 3: any top-level 3-D+ array
+            for key in root_keys:
+                if r.is_array(key):
+                    shp = r.shape(key)
+                    if len(shp) >= 3 and shp[0] > 0:
+                        dt = r.dtype(key)
+                        return {
+                            "type": "alternative_dataset",
+                            "dataset_name": key,
+                            "frame_count": shp[0],
+                            "frame_shape": shp[1:],
+                            "dtype": dt,
+                            "dtype_size": dt.itemsize,
+                            "data_location": key,
+                            "file_format": "zarr",
+                        }
+
+            return {
+                "type": "unknown",
+                "error": f"No suitable image data found in {root_keys}",
+                "available_keys": root_keys,
+                "file_format": "zarr",
+            }
+
+    except Exception as exc:
+        return {"type": "error", "error": str(exc)}
+
+
 def get_first_frame_enhanced(
     file_path: str, driver: Optional[str] = None
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
     """
-    Enhanced first frame getter with automatic structure detection and format conversion.
+    Enhanced first frame getter with automatic structure detection and format
+    conversion.  Supports both HDF5 and Zarr files.
 
     Returns:
         Tuple of (display_frame_rgb, processing_frame_grayscale, structure_info)
     """
-    if not H5PY_AVAILABLE:
-        return None, None, {"type": "error", "error": "h5py not available"}
-
     try:
         if not os.path.exists(file_path):
             logger.error(f"File does not exist: {file_path}")
             return None, None, {"type": "error", "error": "File not found"}
 
-        structure_info = detect_hdf5_structure_type(file_path)
+        # Use the format-agnostic detector so Zarr stores work too
+        structure_info = detect_file_structure_type(file_path)
 
         if structure_info["type"] == "error":
             logger.error(f"Structure detection failed: {structure_info['error']}")
             return None, None, structure_info
 
-        with h5py.File(file_path, "r", **(dict(driver=driver) if driver else {})) as f:
-            logger.info(f"HDF5 file structure: {list(f.keys())}")
+        file_fmt = structure_info.get("file_format", "hdf5")
 
-            if structure_info["type"] == "stacked_frames":
-                # Handle stacked frames — dataset may be at root "frames" or "images/frames"
-                dataset_path = structure_info.get("dataset_name", "frames")
-                frames_dataset = f[dataset_path]
-                raw_frame = frames_dataset[0].copy()
-                logger.info(
-                    f"Loaded first frame from stacked dataset '{dataset_path}': {raw_frame.shape}"
-                )
+        if file_fmt == "hdf5":
+            # Fast path: use existing h5py code for HDF5 (no regression risk)
+            if not H5PY_AVAILABLE:
+                return None, None, {"type": "error", "error": "h5py not available"}
+            with h5py.File(file_path, "r", **(dict(driver=driver) if driver else {})) as f:
+                logger.info(f"HDF5 file structure: {list(f.keys())}")
+                raw_frame = _read_first_frame_from_open_file(f, structure_info)
+        else:
+            # Zarr path via abstraction layer
+            from ._io_abstraction import open_file_reader
+            with open_file_reader(file_path) as r:
+                logger.info(f"Zarr store keys: {r.keys('/')}")
+                raw_frame = _read_first_frame_from_reader(r, structure_info)
 
-            elif structure_info["type"] == "individual_frames":
-                # Handle individual frames in images/ group
-                images_group = f["images"]
-                key_template = structure_info.get("key_template")
-                if key_template:
-                    first_key = key_template.format(0)
-                else:
-                    frame_keys = structure_info["frame_keys"]
-                    first_key = frame_keys[0]
-                raw_frame = images_group[first_key][...].copy()
-                logger.info(
-                    f"Loaded first frame from images group: key={first_key}, shape={raw_frame.shape}"
-                )
+        if raw_frame is None:
+            return None, None, structure_info
 
-            elif structure_info["type"] == "alternative_dataset":
-                # Handle alternative dataset structure
-                dataset_name = structure_info["dataset_name"]
-                dataset = f[dataset_name]
-                raw_frame = dataset[0].copy()
-                logger.info(
-                    f"Loaded first frame from alternative dataset '{dataset_name}': {raw_frame.shape}"
-                )
-
-            else:
-                logger.error(f"Unknown structure type: {structure_info['type']}")
-                return None, None, structure_info
-
-            # Preprocess for both display and processing
-            display_frame, processing_frame = preprocess_image_for_processing(raw_frame)
-
-            logger.info(
-                f"Frame preprocessing complete: "
-                f"display={display_frame.shape}, processing={processing_frame.shape}"
-            )
-
-            return display_frame, processing_frame, structure_info
+        display_frame, processing_frame = preprocess_image_for_processing(raw_frame)
+        logger.info(
+            f"Frame preprocessing complete: "
+            f"display={display_frame.shape}, processing={processing_frame.shape}"
+        )
+        return display_frame, processing_frame, structure_info
 
     except Exception as e:
         logger.error(f"Error reading first frame: {e}")
         return None, None, {"type": "error", "error": str(e)}
+
+
+def _read_first_frame_from_open_file(f, structure_info: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Read frame 0 from an already-open h5py File using *structure_info*."""
+    stype = structure_info["type"]
+    if stype == "stacked_frames":
+        dataset_path = structure_info.get("dataset_name", "frames")
+        raw = f[dataset_path][0].copy()
+        logger.info(f"Loaded first frame from stacked dataset '{dataset_path}': {raw.shape}")
+        return raw
+    if stype == "individual_frames":
+        images_group = f["images"]
+        key_template = structure_info.get("key_template")
+        first_key = key_template.format(0) if key_template else structure_info["frame_keys"][0]
+        raw = images_group[first_key][...].copy()
+        logger.info(f"Loaded first frame from images group: key={first_key}, shape={raw.shape}")
+        return raw
+    if stype == "alternative_dataset":
+        raw = f[structure_info["dataset_name"]][0].copy()
+        logger.info(f"Loaded first frame from alt dataset: {raw.shape}")
+        return raw
+    logger.error(f"Unknown structure type: {stype}")
+    return None
+
+
+def _read_first_frame_from_reader(r, structure_info: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Read frame 0 via a :class:`~._io_abstraction.FileReader`."""
+    stype = structure_info["type"]
+    if stype == "stacked_frames":
+        dataset_path = structure_info.get("dataset_name", "frames")
+        raw = r.read_frame(dataset_path, 0)
+        logger.info(f"Loaded first frame from stacked dataset '{dataset_path}': {raw.shape}")
+        return raw
+    if stype == "individual_frames":
+        key_template = structure_info.get("key_template")
+        first_key = key_template.format(0) if key_template else structure_info["frame_keys"][0]
+        raw = r.read_frame(f"images/{first_key}", 0) if r.is_array(f"images/{first_key}") \
+            else np.asarray(r._node(f"images/{first_key}"))
+        logger.info(f"Loaded first frame from images group: key={first_key}, shape={raw.shape}")
+        return raw
+    if stype == "alternative_dataset":
+        raw = r.read_frame(structure_info["dataset_name"], 0)
+        logger.info(f"Loaded first frame from alt dataset: {raw.shape}")
+        return raw
+    logger.error(f"Unknown structure type: {stype}")
+    return None
+
+
+def _read_chunk_hdf5(
+    file_path: str,
+    start_idx: int,
+    end_idx: int,
+    structure_info: Dict[str, Any],
+    driver: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Low-level HDF5 chunk reader used by :func:`read_chunk_data_dual_structure`."""
+    with h5py.File(file_path, "r", **(dict(driver=driver) if driver else {})) as f:
+        stype = structure_info["type"]
+        if stype == "stacked_frames":
+            dataset_path = structure_info.get("dataset_name", "frames")
+            return f[dataset_path][start_idx:end_idx].copy()
+        if stype == "individual_frames":
+            images_group = f["images"]
+            key_template = structure_info.get("key_template")
+            chunk_keys = (
+                [key_template.format(i) for i in range(start_idx, end_idx)]
+                if key_template
+                else structure_info["frame_keys"][start_idx:end_idx]
+            )
+            frames = [images_group[k][...].copy() for k in chunk_keys]
+            return np.stack(frames, axis=0) if frames else None
+        if stype == "alternative_dataset":
+            return f[structure_info["dataset_name"]][start_idx:end_idx].copy()
+        logger.error(f"Cannot read chunk for structure type: {stype}")
+        return None
+
+
+def _read_chunk_zarr(
+    file_path: str,
+    start_idx: int,
+    end_idx: int,
+    structure_info: Dict[str, Any],
+) -> Optional[np.ndarray]:
+    """Low-level Zarr chunk reader used by :func:`read_chunk_data_dual_structure`."""
+    from ._io_abstraction import open_file_reader
+
+    with open_file_reader(file_path) as r:
+        stype = structure_info["type"]
+        if stype == "stacked_frames":
+            dataset_path = structure_info.get("dataset_name", "frames")
+            return r.read_slice(dataset_path, start_idx, end_idx)
+        if stype == "individual_frames":
+            key_template = structure_info.get("key_template")
+            chunk_keys = (
+                [key_template.format(i) for i in range(start_idx, end_idx)]
+                if key_template
+                else structure_info["frame_keys"][start_idx:end_idx]
+            )
+            frames = [r.read_frame(f"images/{k}", 0)
+                      if r.is_array(f"images/{k}")
+                      else np.asarray(r._node(f"images/{k}"))
+                      for k in chunk_keys]
+            return np.stack(frames, axis=0) if frames else None
+        if stype == "alternative_dataset":
+            return r.read_slice(structure_info["dataset_name"], start_idx, end_idx)
+        logger.error(f"Cannot read chunk for structure type: {stype}")
+        return None
 
 
 def read_chunk_data_dual_structure(
@@ -2181,76 +2388,65 @@ def read_chunk_data_dual_structure(
     driver: Optional[str] = None,
     for_processing: bool = True,
 ) -> Optional[np.ndarray]:
-    """
-    Read a chunk of data handling both stacked and individual frame structures.
+    """Read a chunk of frames handling stacked, individual-frame, and Zarr structures.
 
     Args:
-        file_path: Path to HDF5 file
-        start_idx: Start frame index
-        end_idx: End frame index
-        structure_info: Structure information from detection
-        driver: HDF5 driver
-        for_processing: If True, return grayscale data for processing. If False, return raw data.
+        file_path: Path to HDF5 or Zarr file
+        start_idx: Start frame index (inclusive)
+        end_idx: End frame index (exclusive)
+        structure_info: Structure information from :func:`detect_file_structure_type`
+        driver: HDF5 driver (ignored for Zarr)
+        for_processing: If True, return grayscale data; otherwise return raw data.
 
     Returns:
-        Chunk data (grayscale if for_processing=True, raw if for_processing=False)
+        Chunk data array, or None on error.
     """
+    file_fmt = structure_info.get("file_format", "hdf5")
+
     try:
-        with h5py.File(file_path, "r", **(dict(driver=driver) if driver else {})) as f:
+        if file_fmt == "zarr":
+            chunk_data = _read_chunk_zarr(file_path, start_idx, end_idx, structure_info)
+        else:
+            chunk_data = _read_chunk_hdf5(file_path, start_idx, end_idx, structure_info, driver)
 
-            if structure_info["type"] == "stacked_frames":
-                # Standard stacked frames approach
-                dataset_path = structure_info.get("dataset_name", "frames")
-                frames_dataset = f[dataset_path]
-                chunk_data = frames_dataset[start_idx:end_idx].copy()
+        if chunk_data is None:
+            return None
 
-            elif structure_info["type"] == "individual_frames":
-                # Read individual frames from images/ group
-                images_group = f["images"]
+        if for_processing:
+            grey = preprocess_image_stack_for_processing(chunk_data)
+            if grey is not chunk_data:
+                del chunk_data
+            chunk_data = grey
 
-                # Reconstruct keys for this chunk without pickling the full key list.
-                # If a key_template was detected (e.g. "frame_{:06d}"), generate keys
-                # mathematically; otherwise fall back to the stored list.
-                key_template = structure_info.get("key_template")
-                if key_template:
-                    chunk_keys = [key_template.format(i) for i in range(start_idx, end_idx)]
-                else:
-                    frame_keys = structure_info["frame_keys"]
-                    chunk_keys = frame_keys[start_idx:end_idx]
+        logger.debug(
+            f"Read chunk {start_idx}:{end_idx}, shape: {chunk_data.shape}, "
+            f"for_processing: {for_processing}"
+        )
+        return chunk_data
 
-                # Read each frame individually and stack them
-                frames = []
-                for key in chunk_keys:
-                    frame = images_group[key][...].copy()
-                    frames.append(frame)
-
-                # Stack into array format expected by processing
-                if frames:
-                    chunk_data = np.stack(frames, axis=0)
-                else:
-                    return None
-
-            elif structure_info["type"] == "alternative_dataset":
-                # Handle alternative dataset
-                dataset = f[structure_info["dataset_name"]]
-                chunk_data = dataset[start_idx:end_idx].copy()
-
-            else:
-                logger.error(
-                    f"Cannot read chunk for structure type: {structure_info['type']}"
-                )
-                return None
-
-            # Convert to grayscale for processing if requested
-            if for_processing:
-                chunk_data = preprocess_image_stack_for_processing(chunk_data)
-
-            logger.debug(
-                f"Read chunk {start_idx}:{end_idx}, shape: {chunk_data.shape}, "
-                f"for_processing: {for_processing}"
+    except MemoryError as e:
+        # Not enough contiguous RAM — retry with half the chunk size
+        half = (end_idx - start_idx) // 2
+        if half >= 2:
+            logger.warning(
+                f"MemoryError reading chunk {start_idx}:{end_idx} "
+                f"— retrying as two halves (chunk_size={half})"
             )
-            return chunk_data
-
+            left = read_chunk_data_dual_structure(
+                file_path, start_idx, start_idx + half, structure_info, driver, for_processing
+            )
+            right = read_chunk_data_dual_structure(
+                file_path, start_idx + half, end_idx, structure_info, driver, for_processing
+            )
+            if left is not None and right is not None:
+                try:
+                    return np.concatenate([left, right], axis=0)
+                except MemoryError:
+                    logger.error(f"MemoryError concatenating halves for chunk {start_idx}:{end_idx}")
+                    return left  # return what we have rather than nothing
+            return left if left is not None else right
+        logger.error(f"MemoryError reading chunk {start_idx}:{end_idx} and chunk is too small to split: {e}")
+        return None
     except Exception as e:
         logger.error(f"Error reading chunk {start_idx}:{end_idx}: {e}")
         return None
@@ -3101,9 +3297,26 @@ def process_chunk(
         # Normalize entire stack to float32 in one vectorized operation.
         # chunk_data is already grayscale from read_chunk_data_dual_structure;
         # no copy needed — normalize_image_to_float32 always creates a new array.
-        normalized_frames = normalize_image_to_float32(
-            chunk_data, target_range=(0.0, 1.0)
-        )
+        try:
+            normalized_frames = normalize_image_to_float32(
+                chunk_data, target_range=(0.0, 1.0)
+            )
+            del chunk_data  # free raw input now that float32 is ready
+        except MemoryError:
+            # Not enough contiguous RAM for full float32 stack — split into two halves
+            n = len(chunk_data)
+            half = n // 2
+            if half < 2:
+                raise
+            logger.warning(
+                f"MemoryError normalizing chunk (shape {chunk_data.shape}) "
+                f"— splitting into two halves and merging"
+            )
+            r1 = process_chunk(chunk_data[:half], masks, start_time, frame_interval)
+            r2 = process_chunk(chunk_data[half:], masks, start_time + half * frame_interval, frame_interval)
+            for roi_id in r1:
+                r1[roi_id].extend(r2.get(roi_id, []))
+            return r1
 
         # === ROI Processing — fully vectorized, no Python loops over frames ===
         for roi_idx, mask in enumerate(masks, start=1):
@@ -3491,6 +3704,10 @@ def process_hdf5_file_dual_structure(
 
             if this_chunk is None:
                 logger.error(f"Failed to read chunk {chunk_idx}")
+                # Shrink chunk size for all subsequent chunks to avoid repeated failures
+                if actual_chunk_size > MIN_CHUNK_SIZE:
+                    actual_chunk_size = max(MIN_CHUNK_SIZE, actual_chunk_size // 2)
+                    logger.warning(f"Reduced chunk size to {actual_chunk_size} after read failure")
                 continue
 
         except Exception as e:

@@ -40,12 +40,14 @@ dependencies = [
 pyqt5 = ["napari[pyqt5]"]
 pyqt6 = ["napari[pyqt6]"]
 pyside6 = ["napari[pyside6]"]
+zarr = ["zarr>=2.12.0"]
 testing = [
     "tox",
     "pytest",
     "pytest-cov",
     "pytest-qt",
     "napari[pyqt5]",
+    "zarr>=2.12.0",
 ]
 
 [project.entry-points."napari.manifest"]
