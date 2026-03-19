@@ -65,6 +65,30 @@ class TelemetryMixin:
     - self._log_message(msg: str)
     """
 
+    # Timeseries categories and units for telemetry display
+    TELEMETRY_CATEGORIES = {
+        "Timing": [
+            "frame_drift", "cumulative_drift", "actual_intervals", "expected_intervals",
+        ],
+        "Environment": ["temperature", "humidity"],
+        "LED": [
+            "led_white_power_percent", "led_ir_power_percent", "led_power_percent",
+            "led_duration_ms", "led_sync_success",
+        ],
+        "Frame Stats": ["frame_mean", "frame_max", "frame_min", "frame_std"],
+    }
+
+    TIMESERIES_UNITS = {
+        "frame_drift": "s", "cumulative_drift": "s", "actual_intervals": "s",
+        "expected_intervals": "s", "temperature": "\u00b0C", "humidity": "%",
+        "led_white_power_percent": "%", "led_ir_power_percent": "%",
+        "led_power_percent": "%", "led_duration_ms": "ms",
+        "led_sync_success": "bool", "frame_mean": "px intensity",
+        "frame_max": "px intensity", "frame_min": "px intensity",
+        "frame_std": "px intensity",
+    }
+
+
     # --- paste methods here ---
 
     def setup_telemetry_tab(self):
