@@ -11,8 +11,34 @@ import os
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from qtpy.QtCore import QTimer
-from qtpy.QtWidgets import QFileDialog, QMessageBox
+from qtpy.QtCore import QTimer, Qt, QSettings
+from qtpy.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSlider,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 try:
     import h5py
