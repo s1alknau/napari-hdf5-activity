@@ -50,10 +50,16 @@ except ImportError:
     H5PY_AVAILABLE = False
 
 try:
-    from ._io_abstraction import open_file_reader
+    from ._io_abstraction import open_file_reader, detect_file_format
     IO_ABSTRACTION_AVAILABLE = True
 except ImportError:
     IO_ABSTRACTION_AVAILABLE = False
+
+try:
+    from ._reader import detect_hdf5_structure_type, detect_file_structure_type
+    DUAL_STRUCTURE_AVAILABLE = True
+except ImportError:
+    DUAL_STRUCTURE_AVAILABLE = False
 
 
 class TelemetryMixin:
@@ -703,86 +709,139 @@ class TelemetryMixin:
             self._log_message(traceback.format_exc())
 
     def debug_current_file_structure(self):
-        """Debug the structure of the currently loaded file."""
+        """Debug the structure of the currently loaded HDF5 or Zarr file."""
         if not hasattr(self, "file_path") or not self.file_path:
             self._log_message("No file loaded for structure debugging")
             return
 
-        self._log_message("=== DEBUGGING CURRENT FILE STRUCTURE ===")
+        # Detect format
+        try:
+            from ._io_abstraction import detect_file_format, open_file_reader
+            fmt = detect_file_format(self.file_path)
+        except Exception as e:
+            self._log_message(f"Cannot determine file format: {e}")
+            return
 
+        self._log_message(f"=== FILE STRUCTURE DEBUG ({fmt.upper()}) ===")
+        self._log_message(f"Path: {self.file_path}")
+
+        if fmt == "hdf5":
+            self._debug_hdf5_structure()
+        else:
+            self._debug_zarr_structure()
+
+    def _debug_hdf5_structure(self):
+        """Print detailed HDF5 structure to the log."""
         if DUAL_STRUCTURE_AVAILABLE:
             try:
                 structure_info = detect_hdf5_structure_type(self.file_path)
-
                 self._log_message(f"Structure type: {structure_info['type']}")
 
                 if structure_info["type"] == "stacked_frames":
-                    self._log_message("✅ Stacked frames detected")
-                    self._log_message(f"   Dataset: '{structure_info['dataset_name']}'")
-                    self._log_message(
-                        f"   Frame count: {structure_info['frame_count']}"
-                    )
-                    self._log_message(
-                        f"   Frame shape: {structure_info['frame_shape']}"
-                    )
-                    self._log_message(f"   Data type: {structure_info['dtype']}")
+                    self._log_message(f"  Dataset : '{structure_info['dataset_name']}'")
+                    self._log_message(f"  Frames  : {structure_info['frame_count']}")
+                    self._log_message(f"  Shape   : {structure_info['frame_shape']}")
+                    self._log_message(f"  Dtype   : {structure_info['dtype']}")
 
                 elif structure_info["type"] == "individual_frames":
-                    self._log_message("✅ Individual frames detected")
-                    self._log_message(f"   Group: '{structure_info['group_name']}'")
-                    self._log_message(
-                        f"   Frame count: {structure_info['frame_count']}"
-                    )
-                    self._log_message(
-                        f"   Frame shape: {structure_info['frame_shape']}"
-                    )
-                    self._log_message(f"   Data type: {structure_info['dtype']}")
-
-                    # Show sample frame keys
-                    if "frame_keys" in structure_info:
-                        sample_keys = structure_info["frame_keys"][:10]
-                        self._log_message(f"   Sample keys: {sample_keys}")
-                        if len(structure_info["frame_keys"]) > 10:
-                            self._log_message(
-                                f"   ... and {len(structure_info['frame_keys']) - 10} more"
-                            )
+                    self._log_message(f"  Group   : '{structure_info['group_name']}'")
+                    self._log_message(f"  Frames  : {structure_info['frame_count']}")
+                    self._log_message(f"  Shape   : {structure_info['frame_shape']}")
+                    self._log_message(f"  Dtype   : {structure_info['dtype']}")
+                    if structure_info.get("key_template"):
+                        self._log_message(f"  Key tmpl: {structure_info['key_template']}")
+                    elif structure_info.get("frame_keys"):
+                        self._log_message(f"  Keys[0:5]: {structure_info['frame_keys'][:5]}")
 
                 elif structure_info["type"] == "error":
-                    self._log_message(f"❌ Error: {structure_info['error']}")
+                    self._log_message(f"  ERROR: {structure_info['error']}")
 
-                    # Fallback to basic structure info
-                    try:
-                        import h5py
-
-                        with h5py.File(self.file_path, "r") as f:
-                            self._log_message(f"Available keys: {list(f.keys())}")
-                    except Exception as e2:
-                        self._log_message(f"Cannot read file: {e2}")
+                # Additional root-level keys
+                import h5py
+                with h5py.File(self.file_path, "r") as f:
+                    root_keys = list(f.keys())
+                    self._log_message(f"  Root keys: {root_keys}")
+                    if "timeseries" in f:
+                        ts_keys = sorted(f["timeseries"].keys())
+                        self._log_message(f"  Timeseries ({len(ts_keys)}): {ts_keys}")
+                    if "metadata" in f:
+                        meta_keys = list(f["metadata"].keys()) if hasattr(f["metadata"], "keys") else []
+                        self._log_message(f"  Metadata keys: {meta_keys}")
 
             except Exception as e:
-                self._log_message(f"Structure debugging failed: {e}")
+                self._log_message(f"HDF5 structure debug failed: {e}")
         else:
-            self._log_message(
-                "Dual structure support not available - using basic debugging"
-            )
             try:
                 import h5py
-
                 with h5py.File(self.file_path, "r") as f:
-                    self._log_message(f"Root keys: {list(f.keys())}")
-
-                    if "frames" in f:
-                        self._log_message(
-                            f"Found 'frames' dataset: shape {f['frames'].shape}"
-                        )
-                    if "images" in f:
-                        self._log_message(
-                            f"Found 'images' group with {len(f['images'].keys())} items"
-                        )
-                    if "timeseries" in f:
-                        self._log_message(
-                            f"Found 'timeseries' group with {len(f['timeseries'].keys())} items"
-                        )
-
+                    self._log_message(f"  Root keys: {list(f.keys())}")
+                    for key in f.keys():
+                        node = f[key]
+                        if hasattr(node, "shape"):
+                            self._log_message(f"  Dataset '{key}': shape={node.shape} dtype={node.dtype}")
+                        elif hasattr(node, "keys"):
+                            self._log_message(f"  Group   '{key}': {len(node.keys())} items")
             except Exception as e:
-                self._log_message(f"Basic debugging failed: {e}")
+                self._log_message(f"HDF5 debug failed: {e}")
+
+    def _debug_zarr_structure(self):
+        """Print detailed Zarr structure to the log."""
+        try:
+            from ._io_abstraction import open_file_reader
+            with open_file_reader(self.file_path) as r:
+                root_keys = r.keys("/")
+                self._log_message(f"  Root keys: {root_keys}")
+
+                for key in root_keys:
+                    if r.is_array(key):
+                        shp = r.shape(key)
+                        dt = r.dtype(key)
+                        self._log_message(f"  Array  '{key}': shape={shp}  dtype={dt}")
+                    else:
+                        # Group — list children
+                        try:
+                            children = r.keys(key)
+                            self._log_message(f"  Group  '{key}': {len(children)} items")
+                            for child in sorted(children):
+                                path = f"{key}/{child}"
+                                if r.is_array(path):
+                                    shp = r.shape(path)
+                                    dt = r.dtype(path)
+                                    self._log_message(f"    Array  '{child}': shape={shp}  dtype={dt}")
+                                else:
+                                    self._log_message(f"    Group  '{child}'")
+                        except Exception:
+                            self._log_message(f"  Group  '{key}'")
+
+                # Top-level attributes
+                try:
+                    attrs = r.get_attrs("/")
+                    if attrs:
+                        self._log_message(f"  Root attrs: {list(attrs.keys())}")
+                        for k, v in attrs.items():
+                            self._log_message(f"    {k}: {v}")
+                except Exception:
+                    pass
+
+                # Metadata group attributes
+                if "metadata" in root_keys and not r.is_array("metadata"):
+                    try:
+                        meta_attrs = r.get_attrs("metadata")
+                        if meta_attrs:
+                            self._log_message(f"  /metadata attrs ({len(meta_attrs)}):")
+                            for k, v in meta_attrs.items():
+                                self._log_message(f"    {k}: {v}")
+                    except Exception:
+                        pass
+
+                # Image structure summary
+                from ._reader import detect_file_structure_type
+                info = detect_file_structure_type(self.file_path)
+                self._log_message(f"  Image structure: {info['type']}")
+                if info["type"] != "error":
+                    self._log_message(f"    Frames : {info.get('frame_count', '?')}")
+                    self._log_message(f"    Shape  : {info.get('frame_shape', '?')}")
+                    self._log_message(f"    Dtype  : {info.get('dtype', '?')}")
+
+        except Exception as e:
+            self._log_message(f"Zarr structure debug failed: {e}")

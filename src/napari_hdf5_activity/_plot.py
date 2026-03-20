@@ -170,7 +170,7 @@ class PlotGenerator:
 
         # Create subplot grid
         gs = self.figure.add_gridspec(n_rois, 1, hspace=0.4)
-        self.figure.subplots_adjust(left=0.18)
+        self.figure.subplots_adjust(left=0.12)
         axes = []
 
         for i, roi in enumerate(sorted_rois):
@@ -214,7 +214,7 @@ class PlotGenerator:
             ax_roi.set_xlim(start_display, end_display)
 
             # Add lighting overlay if requested
-            if led_data:
+            if led_data is not None:
                 self._add_lighting_periods(
                     ax_roi, start_display, end_display, i == 0, led_data, time_divisor
                 )
@@ -375,9 +375,10 @@ class PlotGenerator:
                 target_min = min(cur_ymin, min(_threshold_vals_for_ylim))
                 target_max = max(cur_ymax, max(_threshold_vals_for_ylim))
                 span = target_max - target_min
-                if span < 1e-9:
-                    # All values identical (thresholds not computed, or zero data)
-                    fallback = max(abs(target_max) * 0.1, 0.01)
+                abs_ref = max(abs(target_max), abs(target_min))
+                if span < max(abs_ref * 1e-6, 1e-15):
+                    # All values effectively identical — use relative fallback
+                    fallback = abs_ref * 0.1 if abs_ref > 0 else 1e-9
                     ax_roi.set_ylim(target_min - fallback, target_max + fallback)
                 else:
                     margin = span * 0.05
@@ -389,7 +390,7 @@ class PlotGenerator:
         else:
             self._format_shared_axes_minutes(axes, start_t_minutes, end_t_minutes)
         self.figure.text(
-            0.01,
+            0.04,
             0.5,
             "Normalized Intensity Change",
             va="center",
@@ -560,7 +561,7 @@ class PlotGenerator:
 
             # Create gridspec for subplots
             gs = self.figure.add_gridspec(n_rois, 1, hspace=0.4)
-            self.figure.subplots_adjust(left=0.18)
+            self.figure.subplots_adjust(left=0.12)
             axes = []
 
             for i, roi in enumerate(sorted_rois):
@@ -699,6 +700,8 @@ class PlotGenerator:
         try:
             # Get selected metric
             sleep_metric = kwargs.get("sleep_metric", "sleep_minutes")
+            zt_mode = kwargs.get("zt_mode", False)
+            led_data = kwargs.get("led_data", None)
 
             metric_config = {
                 "sleep_minutes": {
@@ -715,6 +718,11 @@ class PlotGenerator:
                     "title": "Sleep Quality: Mean Bout Length per Hour",
                     "y_label": "Bout Length (min/h)",
                     "color_base": "seagreen",
+                },
+                "sleep_hours_per_day": {
+                    "title": "Sleep Duration per 24 h",
+                    "y_label": "Sleep (h/day)",
+                    "color_base": "mediumpurple",
                 },
             }
 
@@ -778,18 +786,49 @@ class PlotGenerator:
 
                 color = roi_colors.get(roi, config["color_base"])
 
-                # Bar chart style (like MATLAB)
-                bar_width = 0.8 / max(1, len(times_hours))
-                if len(times_hours) > 1:
-                    bar_width = 0.8 * (times_hours[1] - times_hours[0])
+                if sleep_metric == "sleep_hours_per_day":
+                    # Wide day-bars with value labels
+                    bar_width = 20.0
+                    ax_roi.axhline(y=24, color="gray", linestyle="--",
+                                   linewidth=0.8, alpha=0.5, label="Max (24 h)")
+                    bars = ax_roi.bar(
+                        times_hours, values, width=bar_width,
+                        color=color, alpha=0.8, edgecolor=color, linewidth=0.5,
+                    )
+                    for bar, val in zip(bars, values):
+                        ax_roi.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() * 0.5,
+                            f"{val:.1f} h",
+                            ha="center", va="center",
+                            fontsize=7, color="white", fontweight="bold",
+                        )
+                    ax_roi.set_ylim(0, max(values) * 1.15 if len(values) else 24)
+                else:
+                    # Filled step plot — cleaner for hourly metrics over long recordings
+                    # Build step coordinates: each bin extends from t-0.5h to t+0.5h
+                    if len(times_hours) > 1:
+                        step = (times_hours[1] - times_hours[0])
+                    else:
+                        step = 1.0
+                    x_step = np.repeat(times_hours - step / 2, 2)
+                    x_step = np.append(x_step, times_hours[-1] + step / 2)
+                    x_step = np.insert(x_step, 0, times_hours[0] - step / 2)
+                    y_step = np.repeat(values, 2)
+                    y_step = np.insert(y_step, 0, 0.0)
+                    y_step = np.append(y_step, 0.0)
 
-                ax_roi.bar(
-                    times_hours, values, width=bar_width,
-                    color=color, alpha=0.7, edgecolor=color, linewidth=0.5,
-                )
+                    ax_roi.fill_between(x_step, y_step, step="pre",
+                                        color=color, alpha=0.6, linewidth=0)
+                    ax_roi.plot(x_step, y_step, drawstyle="steps-pre",
+                                color=color, alpha=0.9, linewidth=0.8)
+                    # Max reference line
+                    if sleep_metric == "sleep_minutes":
+                        ax_roi.axhline(y=60, color="gray", linestyle="--",
+                                       linewidth=0.6, alpha=0.4)
+                    self._apply_y_axis_scaling(ax_roi, values, plot_config)
 
                 ax_roi.set_xlim(start_hours, end_hours)
-                self._apply_y_axis_scaling(ax_roi, values, plot_config)
 
                 # ROI label
                 ax_roi.text(
@@ -802,10 +841,20 @@ class PlotGenerator:
                 if i < n_rois - 1:
                     plt.setp(ax_roi.get_xticklabels(), visible=False)
 
+                # Light/Dark overlay (only when explicitly requested via led_data)
+                if led_data is not None:
+                    self._add_lighting_periods(
+                        ax_roi, start_hours, end_hours,
+                        add_legend=(i == 0), led_data=led_data,
+                        time_divisor=3600.0,
+                    )
                 ax_roi.grid(True, alpha=0.3)
 
             # Format shared x-axis
-            self._format_shared_axes_hours(axes, start_hours, end_hours)
+            self._format_shared_axes_hours(
+                axes, start_hours, end_hours,
+                xlabel="ZT (h)" if zt_mode else "Time (h)",
+            )
 
             # Y-axis label
             self.figure.text(
@@ -850,7 +899,7 @@ class PlotGenerator:
             return False
 
         gs = self.figure.add_gridspec(n_rois, 1, hspace=0.3)
-        self.figure.subplots_adjust(left=0.18)
+        self.figure.subplots_adjust(left=0.12)
         axes = []
 
         for i, roi in enumerate(sorted_rois):
@@ -893,7 +942,7 @@ class PlotGenerator:
             )
 
             # Add lighting overlay if requested
-            if led_data:
+            if led_data is not None:
                 self._add_lighting_periods(
                     ax_roi, start_display, end_display, i == 0, led_data, time_divisor
                 )
@@ -965,7 +1014,7 @@ class PlotGenerator:
             return False
 
         gs = self.figure.add_gridspec(n_rois, 1, hspace=0.3)
-        self.figure.subplots_adjust(left=0.18)
+        self.figure.subplots_adjust(left=0.12)
         axes = []
 
         for i, roi in enumerate(sorted_rois):
@@ -1013,7 +1062,7 @@ class PlotGenerator:
             ax_roi.fill_between(times_display, values, 0, alpha=0.2, color=color)
 
             # Add lighting overlay if requested
-            if led_data:
+            if led_data is not None:
                 self._add_lighting_periods(
                     ax_roi, start_display, end_display, i == 0, led_data, time_divisor
                 )
@@ -1102,8 +1151,9 @@ class PlotGenerator:
 
                 # Add margin (guard against zero-span when all values identical)
                 span = y_max - y_min
-                if span < 1e-9:
-                    fallback = max(abs(y_max) * 0.1, 0.01)
+                abs_ref = max(abs(y_max), abs(y_min))
+                if span < max(abs_ref * 1e-6, 1e-15):
+                    fallback = abs_ref * 0.1 if abs_ref > 0 else 1e-9
                     ax_roi.set_ylim(y_min - fallback, y_max + fallback)
                 else:
                     margin = span * 0.05
@@ -1280,16 +1330,12 @@ class PlotGenerator:
     ):
         """Add lighting period indicators to the plot based on HDF5 LED data or fallback to 12h cycles."""
 
-        if led_data is not None and isinstance(led_data, dict):
+        if led_data is not None and isinstance(led_data, dict) and led_data:
             # Use LED data from HDF5 file
             self._add_lighting_periods_from_hdf5(
                 ax_roi, start_display, end_display, add_legend, led_data, time_divisor
             )
-        else:
-            # Fallback: Use 12-hour light/dark cycles (7:00-19:00 light)
-            self._add_lighting_periods_legacy(
-                ax_roi, start_display, end_display, add_legend
-            )
+        # else: led_data is None or empty → no LED metadata available (e.g. AVI) → skip overlay
 
     def _add_lighting_periods_from_hdf5(
         self,
@@ -1313,10 +1359,7 @@ class PlotGenerator:
             )  # White LED power in percent
 
             if not times or not white_powers:
-                print("Warning: No white LED data available, using legacy 12h cycles")
-                self._add_lighting_periods_legacy(
-                    ax_roi, start_display, end_display, add_legend
-                )
+                # No white LED data — skip overlay (e.g. IR-only or dark illumination)
                 return
 
             # Convert times to display units (hours or minutes)
@@ -1357,52 +1400,72 @@ class PlotGenerator:
                         label="Light (White LED)" if i == 0 and add_legend else "",
                     )
 
-            # Plot dark periods (gray) - gaps between light periods
+            # Plot dark periods (gray) - gaps between light periods + trailing dark
+            # Build list of dark intervals: between light periods AND after last light
+            dark_intervals = []
             for i in range(len(light_ends)):
+                dark_start_t = times_display[light_ends[i]]
                 if i < len(light_starts) - 1:
-                    dark_start_t = times_display[light_ends[i]]
                     dark_end_t = times_display[light_starts[i + 1]]
+                else:
+                    # Trailing dark period: from last light_end to end of plot
+                    dark_end_t = end_display
+                dark_intervals.append((dark_start_t, dark_end_t))
 
-                    if dark_end_t >= start_display and dark_start_t <= end_display:
-                        plot_start = max(dark_start_t, start_display)
-                        plot_end = min(dark_end_t, end_display)
-                        ax_roi.axvspan(
-                            plot_start,
-                            plot_end,
-                            alpha=0.2,
-                            color="gray",
-                            zorder=0,
-                            label="Dark (IR only)" if i == 0 and add_legend else "",
-                        )
+            # Also handle leading dark if recording starts in dark phase
+            if len(light_starts) > 0 and times_display[light_starts[0]] > start_display:
+                dark_intervals.insert(0, (start_display, times_display[light_starts[0]]))
+
+            for i, (dark_start_t, dark_end_t) in enumerate(dark_intervals):
+                if dark_end_t >= start_display and dark_start_t <= end_display:
+                    plot_start = max(dark_start_t, start_display)
+                    plot_end = min(dark_end_t, end_display)
+                    ax_roi.axvspan(
+                        plot_start,
+                        plot_end,
+                        alpha=0.2,
+                        color="gray",
+                        zorder=0,
+                        label="Dark (IR only)" if i == 0 and add_legend else "",
+                    )
 
         except Exception as e:
-            print(f"Error processing LED data: {e}, using legacy 12h cycles")
-            self._add_lighting_periods_legacy(
-                ax_roi, start_display, end_display, add_legend
-            )
+            print(f"Error processing LED data: {e}")
 
     def _add_lighting_periods_legacy(
-        self, ax_roi, start_hours: float, end_hours: float, add_legend: bool
+        self, ax_roi, start_display: float, end_display: float, add_legend: bool,
+        time_divisor: float = 3600.0, light_start_hour: int = 7,
     ):
-        """Add lighting periods using legacy 12-hour cycles (7:00-19:00 light)."""
-        light_start_hour = 7
-        light_end_hour = 19
+        """Add lighting periods using legacy 12-hour cycles.
 
-        # Calculate light/dark periods within the plot range
-        plot_start_day = int(start_hours // 24)
-        plot_end_day = int(end_hours // 24) + 1
+        light_start_hour=7  → 07:00–19:00 (clock-time default)
+        light_start_hour=0  → 00:00–12:00 (ZT-aligned, recording starts at lights-on)
+
+        All internal calculations are in hours; converted to display units via time_divisor.
+        time_divisor=3600 → display in hours; time_divisor=60 → display in minutes.
+        """
+        light_end_hour = light_start_hour + 12
+        # Scale factor: how many display units per hour
+        scale = 3600.0 / time_divisor  # 1.0 for hours, 60.0 for minutes
+
+        # Work in hours for day-cycle logic; convert boundaries to hours
+        start_h = start_display / scale
+        end_h = end_display / scale
+
+        plot_start_day = int(start_h // 24)
+        plot_end_day = int(end_h // 24) + 1
 
         for day in range(plot_start_day, plot_end_day + 1):
             day_start = day * 24
-            light_start = day_start + light_start_hour
-            light_end = day_start + light_end_hour
+            light_start = (day_start + light_start_hour) * scale
+            light_end = (day_start + light_end_hour) * scale
             dark_start = light_end
-            dark_end = day_start + 24 + light_start_hour
+            dark_end = (day_start + 24 + light_start_hour) * scale
 
             # Light period (yellow background)
-            if light_start <= end_hours and light_end >= start_hours:
-                light_plot_start = max(light_start, start_hours)
-                light_plot_end = min(light_end, end_hours)
+            if light_start <= end_display and light_end >= start_display:
+                light_plot_start = max(light_start, start_display)
+                light_plot_end = min(light_end, end_display)
                 ax_roi.axvspan(
                     light_plot_start,
                     light_plot_end,
@@ -1417,9 +1480,9 @@ class PlotGenerator:
                 )
 
             # Dark period (gray background)
-            if dark_start <= end_hours and dark_end >= start_hours:
-                dark_plot_start = max(dark_start, start_hours)
-                dark_plot_end = min(dark_end, end_hours)
+            if dark_start <= end_display and dark_end >= start_display:
+                dark_plot_start = max(dark_start, start_display)
+                dark_plot_end = min(dark_end, end_display)
                 ax_roi.axvspan(
                     dark_plot_start,
                     dark_plot_end,

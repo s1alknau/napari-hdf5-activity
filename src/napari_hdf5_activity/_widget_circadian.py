@@ -12,7 +12,21 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _fmt_p(p: float) -> str:
+    """Format a p-value for display.
+
+    Handles float underflow (p == 0.0) which occurs when N is very large and the
+    test statistic exceeds the range of float64 survival functions.
+    """
+    if p == 0.0:
+        return "< 1e-300"
+    if p < 0.001:
+        return f"{p:.2e}"
+    return f"{p:.4f}"
 
 import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas

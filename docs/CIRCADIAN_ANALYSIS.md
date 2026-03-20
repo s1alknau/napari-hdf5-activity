@@ -1,283 +1,349 @@
-# Circadian Rhythm Analysis with Fischer Z-Transformation
+# Circadian Rhythm Analysis
 
 ## Overview
 
-The Extended Analysis tab implements **Fischer Z-transformation** for detecting periodic patterns in biological activity data. This statistical method is widely used in chronobiology research to identify circadian rhythms, ultradian rhythms (< 24h), and infradian rhythms (> 24h) in timeseries data.
+The Extended Analysis tab provides three complementary methods for detecting and
+quantifying periodic patterns in biological activity data:
 
-## What is a Periodogram?
+| Method | Best For | Requires |
+|--------|----------|----------|
+| **Chi² Periodogram** | Exploratory period detection, robust to non-sinusoidal signals | ≥ 3 cycles |
+| **Cosinor Analysis** | Quantifying amplitude and acrophase of a known period | ≥ 7 cycles, sinusoidal signal |
+| **Population Mean** | Cross-individual consistency, SEM across ROIs | ≥ 2 ROIs |
 
-A **periodogram** is a frequency-domain representation of timeseries data that reveals periodic (repeating) patterns. It transforms temporal data into the frequency space to identify dominant cycles.
+---
 
-### Key Concepts
+## Chi² Periodogram
 
-- **Period (T)**: The length of one complete cycle (e.g., 24 hours for circadian rhythms)
-- **Frequency (f)**: The reciprocal of period (f = 1/T)
-- **Amplitude**: The strength or power of a periodic component
-- **Phase**: The timing offset of a rhythm relative to a reference point
+### Principle
 
-## Fischer Z-Transformation
+The Chi² periodogram (Sokolove & Bushell 1978) tests whether a timeseries contains
+statistically significant periodic components. For each candidate period T:
 
-### Mathematical Background
+1. Fold the timeseries into T-length epochs
+2. Compute correlation coefficients with sine and cosine at period T
+3. Derive the Chi² statistic: `Q = n × (r²_cos + r²_sin)`
+4. Convert to Z-score for display
 
-The Fischer Z-transformation tests whether a timeseries contains significant periodic components. For a given period T:
+### Z-score
 
-1. **Decompose the signal** into sine and cosine components:
-   ```
-   x(t) ≈ A·cos(2πt/T) + B·sin(2πt/T) + C
-   ```
-
-2. **Calculate the periodogram value** (normalized power):
-   ```
-   P(T) = (A² + B²) / variance(x)
-   ```
-
-3. **Compute the Z-score**:
-   ```
-   Z = √(2N·P)
-   ```
-   where N is the number of data points
-
-4. **Statistical significance**:
-   - Under the null hypothesis (random noise), Z² follows a chi-square distribution with 2 degrees of freedom
-   - Critical value for α=0.05: Z_crit ≈ 2.45
-   - If Z > Z_crit, the period is statistically significant
-
-### Why Fischer Z-Transformation?
-
-Traditional periodogram analysis (e.g., Fourier transform) can produce spurious peaks in noisy biological data. Fischer's method provides:
-
-- **Statistical rigor**: Built-in significance testing
-- **Robustness**: Less sensitive to irregular sampling or missing data
-- **Biological relevance**: Focuses on a specified period range (e.g., 12-36h)
-- **Multiple testing correction**: Accounts for testing multiple periods
-
-## Implementation Details
-
-### Algorithm Steps
-
-1. **Data Preparation**
-   - Extract movement activity data from main analysis
-   - Sampling interval: Defined by frame interval (default: 5 seconds)
-   - Data type: Fraction of time active in each time bin
-
-2. **Period Range Configuration**
-   - Minimum period: 0-100 hours (default: 12h)
-   - Maximum period: 0-100 hours (default: 36h)
-   - Resolution: 0.1 hours
-   - Rationale: Covers circadian (24h), ultradian (<24h), and infradian (>24h) rhythms
-
-3. **For Each ROI**:
-   - Detrend the timeseries (remove linear trend)
-   - Normalize to zero mean, unit variance
-   - For each period in range:
-     - Fit sine/cosine components
-     - Calculate Z-score
-   - Identify dominant period (maximum Z-score)
-   - Test significance against critical Z value
-
-4. **Sleep/Wake Phase Detection**
-   - Use dominant period to fit a cosine function
-   - Phase threshold (default: 0.5): Values above = wake, below = sleep
-   - Output: Predicted sleep and wake phases throughout recording
-
-### Parameters
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| **Minimum Period** | 12.0 h | 0-100 h | Lower bound of period search range |
-| **Maximum Period** | 36.0 h | 0-100 h | Upper bound of period search range |
-| **Significance Level (α)** | 0.05 | 0.001-0.1 | False positive rate for significance testing |
-| **Phase Threshold** | 0.5 | 0.0-1.0 | Threshold for classifying sleep vs wake |
-
-### Output
-
-**Text Results:**
 ```
-ROI 1: SIGNIFICANT circadian rhythm detected
-  Dominant Period: 24.2 ± 0.8 hours
-  Z-score: 8.45 (p < 0.001)
-  Predicted Sleep Phases:
-    - Phase 1: 0.0 - 12.1 hours (12.1h duration)
-    - Phase 2: 24.2 - 36.3 hours (12.1h duration)
-  Predicted Wake Phases:
-    - Phase 1: 12.1 - 24.2 hours (12.1h duration)
+Z-score = f(Chi², n)
+
+n = number of data points ∝ recording duration
 ```
 
-**Periodogram Plot:**
-- X-axis: Period (hours)
-- Y-axis: Z-score
-- Blue line: Z-scores for all tested periods
-- Red dashed line: Significance threshold
-- Red marker: Dominant period (if significant)
-- ROI title color: Green = significant, Black = not significant
+**Important:** The Z-score is NOT a pure measure of rhythm strength. It depends on
+both rhythm quality AND sample size:
 
-## Biological Interpretation
+- Longer recording → more data points (n↑) → higher Z-score for the same rhythm
+- Z-scores from different time ranges or different recording durations are **not
+  directly comparable**
+- Use **Amplitude** (Cosinor) for comparing rhythm strength between experiments
 
-### Circadian Rhythms (≈24h)
+### Significance threshold
 
-**Strong 24h peak:**
-- Organism is entrained to light/dark cycle
-- Clear day/night activity pattern
-- Functional circadian clock
+Under the null hypothesis (white noise), the Chi² statistic follows a chi-square
+distribution with 2 degrees of freedom. The critical Z-value at α = 0.05 is ~5.99
+(Bonferroni-corrected for the number of tested periods).
 
-**Weak or absent 24h peak:**
-- Arrhythmic behavior
-- Clock dysfunction
-- Constant environmental conditions
+### Period Range vs. Time Range
 
-### Ultradian Rhythms (<24h)
+These are two fundamentally different settings:
 
-**Peak at 12h:**
-- Bimodal activity (e.g., morning and evening peaks)
-- Common in crepuscular species
-- May reflect feeding or tidal rhythms
+| Setting | What it changes | Effect on Z-score |
+|---------|----------------|-------------------|
+| **Period Range** (min/max) | Which periods are searched (X-axis zoom) | None — same data, same Z-scores |
+| **Time Range** (start/end) | Which data points are included | Yes — fewer points = lower Z-score |
 
-**Peak at 8h or shorter:**
-- High-frequency activity bouts
-- May indicate stress or abnormal behavior
+→ Adjusting the period range is always safe.
+→ Adjusting the time range changes the analysis fundamentally.
 
-### Infradian Rhythms (>24h)
+### Population Mean Panel
 
-**Peak at 48h or longer:**
-- Multi-day cycles
-- Lunar or tidal influences
-- Developmental rhythms
+Shown automatically when ≥ 2 ROIs are analyzed:
 
-### No Significant Peaks
+- **Black line**: Mean Z-score across all ROIs at each tested period
+- **Grey band**: ± SEM (Standard Error of the Mean)
+- **SEM** = SD / √n_rois — describes uncertainty of the mean, not biological variability
+- A wide SEM band indicates heterogeneous periods across individuals (e.g., two
+  sub-groups with different tau)
+- **Median peak** (blue dashed): median of individual dominant periods
 
-- Random or irregular activity
-- Exploratory behavior
-- Response to unpredictable environmental cues
-- Technical issues (low temporal resolution, short recording duration)
+---
+
+## Cosinor Analysis
+
+### Principle
+
+Fits the model `y(t) = MESOR + Amplitude × cos(2πt/τ + φ)` to the timeseries.
+
+| Parameter | Meaning |
+|-----------|---------|
+| **MESOR** | Midline Estimating Statistic of Rhythm — rhythm-adjusted mean level |
+| **Amplitude** | Half the peak-to-trough difference — biological rhythm strength |
+| **φ (phase)** | Phase offset of the fitted cosine |
+| **Peak Time** | Time from recording start to first cosine peak |
+| **R²** | Goodness of fit (proportion of variance explained by the cosine) |
+
+### R² interpretation
+
+| R² | Meaning |
+|----|---------|
+| > 0.30 | Strong rhythmic pattern |
+| 0.10 – 0.30 | Moderate rhythm |
+| < 0.10 | Weak or absent rhythm — cosine is a poor fit |
+
+### Why Cosinor needs long recordings
+
+The Cosinor fits 3 free parameters (MESOR, Amplitude, Phase) to noisy data.
+Each additional cycle reduces estimation error by √n:
+
+| Recording | Cycles (24h) | Expected R² | Phase CI |
+|-----------|-------------|-------------|----------|
+| 3 days | 3 | ~0.05–0.11 | ± 0.6 h |
+| 7 days | 7 | ~0.20–0.35 | ± 0.3 h |
+| 14 days | 14 | ~0.35–0.50 | ± 0.2 h |
+
+**Minimum: 7 cycles (= 7 days for 24h rhythm)**
+
+### p-values in Cosinor
+
+With large datasets (thousands of frames), p-values will be extremely small
+(p < 1e-300) even for biologically weak rhythms. Do not use p-value alone as
+evidence of a strong rhythm — always report R² and Amplitude.
+
+### Acrophase and ZT reference
+
+The plugin outputs **Peak Time** = time from recording start to first cosine peak.
+To convert to Zeitgeber Time (ZT):
+
+```
+Acrophase (ZT) = (Peak Time + ZT of recording start) mod 24
+```
+
+**Example:** Recording started at ZT7 (7 h after lights-on), Peak Time = 12.5 h:
+```
+Acrophase = (12.5 + 7) mod 24 = ZT 19.5  (7.5 h into dark phase)
+```
+
+If the recording started at ZT0 (lights-on = recording start): no correction needed.
+
+> **Always document:** recording start clock time AND ZT0 clock time.
+
+---
+
+## Data Sources
+
+### Fraction Movement
+
+- Computed as: `active time (s) / bin size (s)` per time bin
+- Time-based (not frame-based) → robust to irregular frame intervals
+- Continuous signal in [0, 1]
+- Threshold-dependent: the hysteresis threshold determines what counts as "active"
+- **Standard for circadian biology** (comparable to running wheel activity counts)
+- Recommended for: Chi² periodogram, actogram visualization
+
+### Raw Intensity
+
+- Per-frame pixel change values (frame differences), MinMax-normalized per ROI
+- Continuous signal, preserves amplitude information
+- Independent of movement threshold
+- Recommended for: Cosinor analysis, detecting subtle rhythms below the
+  movement threshold
+
+### When to use which
+
+| Analysis | Recommended source | Reason |
+|----------|-------------------|--------|
+| Chi² Periodogram | Fraction Movement | Literature standard, robust |
+| Cosinor | Raw Intensity | Assumes sinusoidal, benefits from amplitude info |
+| Actogram | Fraction Movement | Interpretable as % time active |
+
+---
+
+## Sleep Analysis
+
+### Derivation chain
+
+```
+Raw signal → Movement detection → Fraction Movement → Quiescence → Sleep (≥ 8 min)
+```
+
+Sleep is derived from activity — the two periodograms are **not independent**.
+Dominant periods will typically overlap between Activity and Sleep analyses.
+
+| Data source | Definition | Use |
+|-------------|-----------|-----|
+| **Quiescence** | Movement fraction < threshold (per bin) | Direct complement of activity, same resolution |
+| **Sleep (≥ 8 min)** | Sustained quiescence ≥ 8 consecutive minutes | Biologically strict, low-pass filtered |
+
+The parallel Sleep periodogram is confirmatory, not independent:
+it shows whether the rhythm also appears in consolidated rest behavior.
+
+---
+
+## Free-Running vs. Entrained Rhythms
+
+### Free-running (constant conditions, DD or LL)
+
+- Period τ ≠ 24 h (intrinsic clock period)
+- Typical range in animals: 20–28 h
+- Drifts relative to external time (no synchronization)
+- Chi² periodogram: sharp peak at τ
+
+### Entrained (under LD cycle)
+
+- Period converges to exactly 24 h (or the Zeitgeber period)
+- Stable acrophase relative to ZT
+- Requires 2–5 transient cycles after LD onset before stable entrainment
+- Chi² periodogram: peak at 24 h
+
+### Transient phase
+
+When animals are transferred from DD to LD (or vice versa), the first 2–5 cycles
+show a gradual phase shift. Analyzing transient + entrained data together in a single
+Cosinor fit degrades R² because the model assumes a single constant period.
+
+**Solution:** Analyze segments separately using Time Range Selection:
+
+```
+Full recording:    [DD] ──── [LD transient] ──── [LD stable] ──── [DD post]
+Time Range:         └── τ_1 ──┘               └── Acrophase ──┘  └── τ_2 ──┘
+```
+
+---
+
+## Adaptive Illumination Baseline
+
+When analyzing recordings with light/dark cycles (LD), the raw activity signal has
+different baseline levels during the light and dark phases. The Adaptive Illumination
+Baseline option:
+
+1. Detects period boundaries from HDF5 LED data
+2. Computes the resting floor (15th percentile) for each period
+3. Shifts each period's signal to a common global reference level
+4. Then computes a single global threshold on the equalized signal
+
+This ensures the hysteresis detection works correctly across all illumination phases
+without requiring per-period thresholds.
+
+---
 
 ## Best Practices
 
-### Recording Duration
+### Recording duration
 
-- **Minimum**: 3-4 cycles of the expected period
-  - For 24h rhythm: At least 3-4 days
-  - For 12h rhythm: At least 2 days
-- **Recommended**: 5-7 days for robust circadian analysis
-- **Longer is better**: Improves statistical power and phase estimation
+| Goal | Minimum | Recommended |
+|------|---------|-------------|
+| Chi² period detection | 3 cycles (3 days for τ=24h) | 5–7 days |
+| Cosinor fit | 7 cycles | 10–14 days |
+| Entrainment verification | 5 days LD + 5 days DD | 7 days LD + 7 days DD |
 
-### Sampling Interval
+### Period range
 
-- **Frame interval**: 5 seconds (default) is sufficient for most organisms
-- **Nyquist criterion**: Sample at least twice per cycle
-  - For 12h rhythm: Sample at least every 6 hours
-  - For 24h rhythm: Sample at least every 12 hours
-- **Trade-off**: Higher resolution = larger file size and longer processing
+- Set wider than expected: 16–36 h covers circadian rhythms safely
+- Check for boundary warnings (⚠️) — if the peak is at the boundary, extend the range
+- Extending the period range does not affect Z-scores
 
-### Environmental Control
+### Time range
 
-- **Light/Dark cycles**: Ensure stable, programmed lighting
-- **Temperature**: Maintain constant temperature (±1°C)
-- **Feeding**: Regular feeding schedule or fast during recording
-- **Isolation**: Minimize external disturbances
+- Use Full Recording by default
+- Use segment analysis only when recording is long enough to split into
+  transient and stable phases (≥ 7 days total)
+- Minimum window for reliable analysis: 5 × expected period
 
-### Data Quality
+### Environmental control
 
-- **Sufficient activity**: ROI must show measurable movement
-- **Consistent tracking**: ROI should not drift or be lost
-- **No gaps**: Continuous recording without interruptions
-- **Baseline period**: Include enough baseline data for threshold calculation
+- **Temperature**: constant ± 0.5 °C (temperature is itself a Zeitgeber)
+- **Feeding**: document time; regular feeding is a Zeitgeber
+- **Vibration/sound**: minimize at fixed times (can mask rhythms)
+- **ZT0 consistency**: use the same lights-on time across experiments
+
+### Segment analysis for entrainment experiments
+
+Do not fit Cosinor across the full LD recording if it includes the transient phase.
+Use Time Range Selection:
+
+- Chi² on full recording → overview, period visible in all phases
+- Cosinor on stable phase only (e.g., days 4–7 of LD) → reliable acrophase
+
+---
 
 ## Troubleshooting
 
-### No Significant Rhythms Detected
+### Peak at period boundary (⚠️)
+
+**Cause:** True peak is outside the tested range.
+**Fix:** Extend min/max period range (e.g., from 20–28 h → 16–36 h).
+Does not change any Z-scores, only expands the search space.
+
+### Low R² in Cosinor (< 0.10)
+
+**Causes:**
+- Too few cycles (< 7 days)
+- Mixed transient + stable phases in the same fit
+- Signal is non-sinusoidal (use Chi² instead)
+- LD recording: baseline level differs between light/dark (enable Adaptive Illumination Baseline)
+
+### Z-score drops when narrowing Time Range
+
+**Expected behavior.** Z-score depends on number of data points (n).
+Fewer data = lower Z-score even for identical rhythm quality.
+Always compare Z-scores from the same time range.
+
+### Periods ≠ 24 h under LD 12:12
 
 **Possible causes:**
-1. **Recording too short**: Extend recording duration to 5-7 days
-2. **Activity too low**: Check ROI detection and baseline thresholds
-3. **Period range wrong**: Adjust min/max period to expected range
-4. **Organism arrhythmic**: Some individuals naturally lack strong rhythms
-5. **Environmental noise**: Improve isolation and temperature control
+1. Animals still in transient phase (first 2–3 days of LD) → wait or extend recording
+2. Animals not entrained → check light intensity, check temperature constancy
+3. Masking without entrainment → verify with DD phase after LD
 
-**Solutions:**
-- Increase recording duration
-- Verify ROI detection quality
-- Try different period ranges (e.g., 6-30h for ultradian)
-- Reduce significance level (e.g., α = 0.1) for exploratory analysis
+### Sleep and Activity show identical periods
 
-### Multiple Significant Peaks
+Expected — sleep is derived from activity. The overlap confirms the same biological
+clock drives both behaviors. Check Z-score and amplitude differences between the two
+for additional insight.
 
-**Interpretation:**
-- **Harmonics**: Peaks at 24h and 12h (harmonic relationship)
-  - Primary rhythm is at longer period (24h)
-  - Shorter peak (12h) is a harmonic
-- **Multiple rhythms**: Independent biological rhythms
-  - Example: Circadian (24h) + tidal (12.4h)
-- **Spurious peaks**: Statistical artifacts
-  - Check if peaks are narrow (< 2h width) = likely artifact
+---
 
-**Solutions:**
-- Focus on the dominant (highest Z-score) peak
-- Check biological plausibility
-- Compare across multiple individuals/ROIs
+## Parameters Reference
 
-### Inconsistent Results Across ROIs
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Min Period | 12.0 h | Lower bound of period search range |
+| Max Period | 36.0 h | Upper bound of period search range |
+| Significance α | 0.05 | False positive rate |
+| Data Source | Fraction Movement | Input signal for periodogram |
+| Sleep Source | Sleep ≥ 8 min | Input for sleep phase periodogram |
+| Time Range | Full Recording | Data window for analysis |
+| Bin Size | 60 s | Time bin for fraction movement calculation |
 
-**Possible causes:**
-1. **Individual variation**: Natural differences in rhythm strength
-2. **ROI size mismatch**: Different ROI sizes affect signal-to-noise
-3. **Partial organism**: ROI doesn't capture full organism
-4. **Edge effects**: ROI partially out of frame
-
-**Solutions:**
-- Report population statistics (mean ± SEM)
-- Exclude outlier ROIs with abnormal detection
-- Ensure ROIs are properly centered and sized
+---
 
 ## References
 
-### Key Papers
+1. **Sokolove, P. G., & Bushell, W. N. (1978)**
+   The chi square periodogram: its application to the analysis of circadian rhythms.
+   *Journal of Theoretical Biology*, 72(1), 131–160.
 
-1. **Fischer, R. A. (1929)** - "Tests of Significance in Harmonic Analysis"
-   - Original description of the Z-transformation method
+2. **Nelson, W., et al. (1979)**
+   Methods for cosinor rhythmometry.
+   *Chronobiologia*, 6(4), 305–323.
 
-2. **Sokolove, P. G., & Bushell, W. N. (1978)** - "The chi square periodogram: Its application to the analysis of circadian rhythms"
-   - Chronobiology application of Fischer's method
-   - Widely cited in circadian research
+3. **Pittendrigh, C. S., & Daan, S. (1976)**
+   A functional analysis of circadian pacemakers in nocturnal rodents.
+   *Journal of Comparative Physiology*, 106(3), 223–252.
 
-3. **Levine, J. D., et al. (2002)** - "Signal analysis of behavioral and molecular cycles"
-   - Modern applications in Drosophila circadian biology
+4. **Aschoff, J. (1965)**
+   Circadian Clocks. North-Holland Publishing, Amsterdam.
 
-### Online Resources
+5. **Aguillon, R., et al. (2023)**
+   Quantification of activity and rest in *Nematostella vectensis*.
 
-- **Circadian rhythm analysis**: https://www.circadian.org/
-- **Chronobiology tools**: https://www.euclock.org/
-- **Statistical methods**: https://www.chronobiology.com/
-
-## Citation
-
-If you use the Extended Analysis feature in your research, please cite:
-
-```bibtex
-@software{napari_hdf5_activity_extended,
-  author = {s1alknau},
-  title = {napari-hdf5-activity: Extended Analysis with Fischer Z-transformation},
-  year = {2025},
-  url = {https://github.com/s1alknau/napari-hdf5-activity}
-}
-```
-
-And cite the foundational work:
-
-```bibtex
-@article{sokolove1978chi,
-  title={The chi square periodogram: its application to the analysis of circadian rhythms},
-  author={Sokolove, PG and Bushell, WN},
-  journal={Journal of theoretical biology},
-  volume={72},
-  number={1},
-  pages={131--160},
-  year={1978},
-  publisher={Elsevier}
-}
-```
+---
 
 ## See Also
 
-- [Main README](../README.md) - Plugin overview and installation
-- [User Guide](USER_GUIDE.md) - Step-by-step usage instructions
-- [Technical Documentation](TECHNICAL.md) - Code architecture and API reference
+- [Entrainment Protocol](entrainment_protocol_EN.txt) — Step-by-step experimental design
+- [Main README](../README.md) — Plugin overview and installation

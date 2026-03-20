@@ -247,6 +247,10 @@ def run_adaptive_analysis(
     enable_matlab_norm: bool = True,
     enable_detrending: bool = True,
     use_improved_detrending: bool = True,
+    enable_jump_correction: bool = False,
+    frame_mean_data: Optional[Dict] = None,
+    adaptive_illumination_baseline: bool = False,
+    led_data: Optional[Dict] = None,
     adaptive_duration_minutes: float = 15.0,
     adaptive_multiplier: float = 2.5,
     frame_interval: float = 5.0,
@@ -263,6 +267,10 @@ def run_adaptive_analysis(
         enable_matlab_norm: Whether to apply MATLAB normalization
         enable_detrending: Whether to apply detrending
         use_improved_detrending: Whether to use improved detrending
+        enable_jump_correction: Whether to apply jump correction
+        frame_mean_data: Frame mean telemetry for jump correction
+        adaptive_illumination_baseline: Whether to equalize signal across illumination periods
+        led_data: LED data for illumination period extraction
         adaptive_duration_minutes: Minutes of data to analyze for adaptation
         adaptive_multiplier: Base multiplier for adaptive calculation
         frame_interval: Time between frames
@@ -292,6 +300,8 @@ def run_adaptive_analysis(
             "enable_matlab_norm": enable_matlab_norm,
             "enable_detrending": enable_detrending,
             "use_improved_detrending": use_improved_detrending,
+            "enable_jump_correction": enable_jump_correction,
+            "adaptive_illumination_baseline": adaptive_illumination_baseline,
             "adaptive_duration_minutes": adaptive_duration_minutes,
             "adaptive_multiplier": adaptive_multiplier,
             "frame_interval": frame_interval,
@@ -306,10 +316,28 @@ def run_adaptive_analysis(
     else:
         normalized_data = merged_results
 
-    if enable_detrending and use_improved_detrending:
-        processed_data = improved_full_dataset_detrending(normalized_data)
+    if (enable_detrending and use_improved_detrending) or enable_jump_correction:
+        processed_data = improved_full_dataset_detrending(
+            normalized_data,
+            enable_jump_correction=enable_jump_correction,
+            enable_detrending=enable_detrending and use_improved_detrending,
+            frame_mean_data=frame_mean_data,
+        )
     else:
         processed_data = normalized_data
+
+    # Step 1b: Adaptive illumination baseline equalization
+    if adaptive_illumination_baseline and led_data:
+        from ._calc import extract_illumination_periods, equalize_signal_per_illumination_period
+        all_times = [t for data in processed_data.values() for t, _ in data]
+        rec_start = min(all_times) if all_times else 0.0
+        rec_end = max(all_times) if all_times else None
+        periods = extract_illumination_periods(led_data, rec_start, rec_end)
+        if periods:
+            processed_data = {
+                roi: equalize_signal_per_illumination_period(data, periods)
+                for roi, data in processed_data.items()
+            }
 
     # Amplitude check on raw values (before any normalization)
     roi_active = check_roi_activity(normalized_data)

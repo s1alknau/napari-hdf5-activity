@@ -3376,7 +3376,7 @@ def get_frame_norm_factor(file_path: str) -> float:
         1.0    for float data or unknown formats
     """
     try:
-        info = detect_hdf5_structure_type(file_path)
+        info = detect_file_structure_type(file_path)
         dtype_size = info.get("dtype_size", 1)
         return {1: 255.0, 2: 65535.0}.get(int(dtype_size), 1.0)
     except Exception:
@@ -3445,8 +3445,8 @@ def process_single_file_in_parallel_dual_structure(
     """
     start_all = time.time()
 
-    # Detect structure
-    structure_info = detect_hdf5_structure_type(file_path)
+    # Detect structure (format-agnostic: works for both HDF5 and Zarr)
+    structure_info = detect_file_structure_type(file_path)
     if structure_info["type"] == "error":
         logger.error(f"Cannot process file: {structure_info['error']}")
         return file_path, {}, 0.0
@@ -3659,8 +3659,8 @@ def process_hdf5_file_dual_structure(
     """
     start_all = time.time()
 
-    # Detect structure
-    structure_info = detect_hdf5_structure_type(file_path)
+    # Detect structure (format-agnostic: works for both HDF5 and Zarr)
+    structure_info = detect_file_structure_type(file_path)
     if structure_info["type"] == "error":
         logger.error(f"Cannot process file: {structure_info['error']}")
         return file_path, {}, 0.0
@@ -4254,7 +4254,7 @@ def _process_single_chunk(
         else:
             # Old format - need to detect structure
             file_path, masks, start_idx, end_idx, frame_interval = args
-            structure_info = detect_hdf5_structure_type(file_path)
+            structure_info = detect_file_structure_type(file_path)
             new_args = (
                 file_path,
                 masks,

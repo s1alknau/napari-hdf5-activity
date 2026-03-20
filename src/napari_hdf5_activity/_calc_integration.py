@@ -1422,10 +1422,29 @@ def run_analysis_with_method(
 
                 results = run_calibration_analysis(merged_results, **kwargs)
 
+        elif method.lower() == "fixed":
+            from ._calc import run_baseline_analysis
+
+            # Threshold is already in normalised signal space [0-1].
+            # Inject directly — no pixel-count conversion needed.
+            fixed_value = kwargs.pop("fixed_threshold_value", 0.05)
+            hysteresis_ratio = kwargs.pop("fixed_threshold_hysteresis", 0.8)
+            frame_interval = kwargs.get("frame_interval", 5.0)
+
+            upper_thresh = {roi_id: fixed_value for roi_id in merged_results}
+            lower_thresh = {roi_id: fixed_value * hysteresis_ratio for roi_id in merged_results}
+
+            kwargs["_fixed_upper_thresholds"] = upper_thresh
+            kwargs["_fixed_lower_thresholds"] = lower_thresh
+            kwargs["baseline_duration_minutes"] = frame_interval / 60.0  # 1 frame
+            kwargs["multiplier"] = 0.0  # no SD band — use fixed values directly
+            results = run_baseline_analysis(merged_results, **kwargs)
+            results["method"] = "fixed"
+
         else:
             raise ValueError(
                 f"Unknown analysis method: {method}. "
-                f"Supported methods: 'baseline', 'adaptive', 'calibration'"
+                f"Supported methods: 'baseline', 'adaptive', 'calibration', 'fixed'"
             )
 
         # Add integration metadata

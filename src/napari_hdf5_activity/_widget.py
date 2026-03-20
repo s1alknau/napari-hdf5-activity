@@ -613,13 +613,20 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         file_layout = QVBoxLayout()
         file_group.setLayout(file_layout)
         # Debug-Button hinzufügen
-        self.btn_debug_structure = QPushButton("Debug HDF5 Structure")
-        self.btn_debug_structure.setToolTip("Analyze HDF5 file structure")
+        self.btn_debug_structure = QPushButton("Debug File Structure")
+        self.btn_debug_structure.setToolTip("Analyze HDF5 or Zarr file structure")
         self.btn_debug_structure.clicked.connect(self.debug_current_file_structure)
         file_layout.addWidget(self.btn_debug_structure)
         # File loading buttons
         self.btn_load_file = QPushButton("Load File")
         self.btn_load_file.setToolTip("Load HDF5 file or AVI video(s) for analysis")
+
+        self.btn_load_zarr = QPushButton("Load Zarr")
+        self.btn_load_zarr.setToolTip(
+            "Load a Zarr store for analysis.\n"
+            "• Zip store (.zarr file): click and select the .zarr file\n"
+            "• Directory store (.zarr folder): use 'Load Directory' instead"
+        )
 
         self.btn_load_dir = QPushButton("Load Directory")
         self.btn_load_dir.setToolTip("Load all HDF5/AVI files from a directory")
@@ -633,6 +640,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.btn_clear_rois.setToolTip("Remove ROI detection layers")
 
         file_layout.addWidget(self.btn_load_file)
+        file_layout.addWidget(self.btn_load_zarr)
         file_layout.addWidget(self.btn_load_dir)
         file_layout.addWidget(self.btn_detect_rois)
         file_layout.addWidget(self.btn_clear_rois)
@@ -1186,9 +1194,9 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         # Testing and diagnostics buttons
         test_layout = QHBoxLayout()
         self.btn_quick_test = QPushButton("Quick Test")
-        self.btn_quick_test.setToolTip("Run quick analysis test using _calc.py")
-        self.btn_validate_timing = QPushButton("Validate HDF5 Timing")
-        self.btn_validate_timing.setToolTip("Check HDF5 timing using _calc.py")
+        self.btn_quick_test.setToolTip("Run quick analysis test on loaded data (HDF5 and Zarr)")
+        self.btn_validate_timing = QPushButton("Validate Timing")
+        self.btn_validate_timing.setToolTip("Check recording timing quality (HDF5 and Zarr)")
 
         test_layout.addWidget(self.btn_quick_test)
         test_layout.addWidget(self.btn_validate_timing)
@@ -2288,6 +2296,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         # File operations
         self.btn_load_file.clicked.connect(self.load_file)
+        self.btn_load_zarr.clicked.connect(self._load_zarr_dialog)
         self.btn_load_dir.clicked.connect(self.load_directory)
         self.btn_detect_rois.clicked.connect(self.enhanced_detect_rois)
         self.btn_clear_rois.clicked.connect(self.clear_roi_detection)
@@ -2768,11 +2777,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         return False
 
     def load_directory(self):
-        """Load a directory containing HDF5 or AVI files."""
+        """Load a directory containing HDF5/AVI files, or a Zarr store directory."""
         directory = QFileDialog.getExistingDirectory(
-            self, "Select Directory Containing Video Files"
+            self, "Select Directory or Zarr Store"
         )
         if not directory:
+            return
+
+        # Check if the selected directory is itself a Zarr store
+        zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+        if any(os.path.exists(os.path.join(directory, m)) for m in zarr_markers):
+            self._load_zarr_file(directory)
             return
 
         self.directory = directory
@@ -2863,6 +2878,95 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         # Update frame viewer file selector for directory
         self._update_viewer_file_combo()
 
+    def _load_zarr_dialog(self):
+        """Open a picker for a Zarr zip store (file) or directory store."""
+        from qtpy.QtWidgets import QMessageBox
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Select Zarr Store Type")
+        msg.setText("Which type of Zarr store do you want to load?")
+        btn_file = msg.addButton("Zip store (.zarr file)", QMessageBox.ButtonRole.AcceptRole)
+        btn_dir  = msg.addButton("Directory store (.zarr folder)", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked is btn_file:
+            zarr_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Zarr Zip Store",
+                "",
+                "Zarr Files (*.zarr);;All Files (*)",
+            )
+            if zarr_path:
+                self._load_zarr_file(zarr_path)
+        elif clicked is btn_dir:
+            zarr_path = QFileDialog.getExistingDirectory(
+                self,
+                "Select Zarr Directory Store",
+                "",
+            )
+            if zarr_path:
+                zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+                if not any(os.path.exists(os.path.join(zarr_path, m)) for m in zarr_markers):
+                    self._log_message(
+                        f"Selected directory does not appear to be a Zarr store: {zarr_path}"
+                    )
+                    return
+                self._load_zarr_file(zarr_path)
+
+    def _load_zarr_file(self, zarr_path: str):
+        """Load a Zarr store directory as an activity recording."""
+        self.file_path = zarr_path
+        self.recording_start_datetime = _parse_recording_start_datetime(zarr_path)
+        basename = os.path.basename(zarr_path.rstrip("/\\"))
+
+        self._log_message(f"Loading Zarr store: {basename}")
+        self.lbl_file_info.setText(f"Loaded Zarr store: {basename}")
+
+        self.masks = []
+
+        # Structure detection (format-agnostic)
+        if DUAL_STRUCTURE_AVAILABLE:
+            try:
+                structure_info = detect_file_structure_type(zarr_path)
+                fmt = structure_info.get("file_format", "zarr")
+                self._log_message(
+                    f"Detected {fmt} structure: {structure_info['type']} "
+                    f"({structure_info.get('frame_count', '?')} frames, "
+                    f"shape {structure_info.get('frame_shape', '?')})"
+                )
+                if structure_info["type"] in ("error", "unknown"):
+                    self._log_message(
+                        f"Structure detection failed: {structure_info.get('error', 'unknown structure')}"
+                    )
+                    return
+                reader = reader_function_dual_structure
+            except Exception as e:
+                self._log_message(f"Structure detection error: {e}")
+                return
+        else:
+            self._log_message("Dual structure reader not available — cannot load Zarr.")
+            return
+
+        try:
+            self.viewer.layers.clear()
+            layers = reader(zarr_path)
+            for data, meta, layer_type in layers:
+                name = meta.get("name", basename)
+                kwargs = {k: v for k, v in meta.items() if k != "name"}
+                if layer_type == "image":
+                    self.viewer.add_image(data, name=name, **kwargs)
+                elif layer_type == "labels":
+                    self.viewer.add_labels(data, name=name, **kwargs)
+        except Exception as e:
+            self._log_message(f"Zarr reader error: {e}")
+            return
+
+        self.update_end_time()
+        self.check_hdf5_structure()
+        self._update_viewer_file_combo()
+
     def update_end_time(self):
         """Enhanced update_end_time method with dual structure support."""
         if self.file_path:
@@ -2902,10 +3006,10 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                             range(0, reader.frame_count, frames_per_sample)
                         )
                 else:
-                    # HDF5 file
+                    # HDF5 or Zarr file
                     if DUAL_STRUCTURE_AVAILABLE:
-                        # Use structure detection to get frame count
-                        structure_info = detect_hdf5_structure_type(self.file_path)
+                        # Use format-agnostic detection (handles both HDF5 and Zarr)
+                        structure_info = detect_file_structure_type(self.file_path)
                         if structure_info["type"] != "error":
                             frame_count = structure_info["frame_count"]
                             self._log_message(
@@ -2974,7 +3078,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self._log_message("NOTE: This is for the experimental data analysis")
 
         if not current_file:
-            self.lbl_file_info.setText("Error: No HDF5 file loaded for ROI detection")
+            self.lbl_file_info.setText("Error: No file loaded for ROI detection")
             return
 
         # Get ROI detection parameters based on preset or manual values
@@ -3005,15 +3109,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             # ROI detection - get first frame from viewer layer or file
             first_frame = None
 
-            # Check if current file is HDF5 or AVI to decide source
-            is_hdf5 = current_file.lower().endswith((".h5", ".hdf5"))
+            # Check if current file is HDF5/Zarr or AVI to decide source
             is_avi = current_file.lower().endswith(".avi")
+            is_file_based = not is_avi and not (
+                hasattr(self, "avi_batch_loaded") and self.avi_batch_loaded
+            )
 
-            # For HDF5 files, always read from file (not from viewer layer)
-            # For AVI batch, try to use existing layer first
-            if is_hdf5:
+            # For HDF5/Zarr files, always read from file using format-agnostic reader
+            # For AVI batch, try to use existing viewer layer first
+            if is_file_based:
                 self._log_message(
-                    "HDF5 file detected - reading first frame from file..."
+                    "Reading first frame from file..."
                 )
                 first_frame = get_first_frame(current_file)
             elif is_avi or (
@@ -3146,11 +3252,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     )
                     masks.append(mask)
 
-                # Create labeled frame with scaled circles
-                if len(first_frame.shape) == 3:
-                    labeled_frame = first_frame.copy()
-                else:
-                    labeled_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2RGB)
+                # Create labeled frame with scaled circles.
+                # Always build from the uint8 normalized gray_frame so that the
+                # drawn circle colors (0-255 range) are visible regardless of
+                # whether the source file is HDF5 (possibly uint16) or Zarr.
+                labeled_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2RGB)
 
                 for idx, circle in enumerate(scaled_circles):
                     color = (
@@ -5169,20 +5275,29 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self._log_message(f"Quick test failed: {e}")
 
     def validate_hdf5_timing(self):
-        """Validate HDF5 timing using _calc.py module."""
+        """Validate recording timing using _calc.py module (HDF5 and Zarr)."""
         if not hasattr(self, "merged_results") or not self.merged_results:
             self._log_message("No data available for timing validation")
             return
+
+        # Detect file format for the header label
+        fmt_label = "HDF5"
+        if hasattr(self, "file_path") and self.file_path:
+            try:
+                from ._io_abstraction import detect_file_format
+                fmt_label = detect_file_format(self.file_path).upper()
+            except Exception:
+                pass
 
         try:
             timing_diagnostics = validate_hdf5_timing_in_data(
                 self.merged_results, self.frame_interval.value()
             )
 
-            self._log_message("HDF5 TIMING DIAGNOSTICS:")
-            self._log_message(f"Timing type: {timing_diagnostics['timing_type']}")
+            self._log_message(f"=== {fmt_label} TIMING DIAGNOSTICS ===")
+            self._log_message(f"Timing type     : {timing_diagnostics['timing_type']}")
             self._log_message(
-                f"First timestamp: {timing_diagnostics['first_time']:.1f}s"
+                f"First timestamp : {timing_diagnostics['first_time']:.1f}s"
             )
             self._log_message(
                 f"Average interval: {timing_diagnostics['avg_interval']:.1f}s"
@@ -5191,13 +5306,16 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 f"Expected interval: {timing_diagnostics['expected_interval']:.1f}s"
             )
             self._log_message(
-                f"Interval consistent: {timing_diagnostics['interval_consistent']}"
+                f"Interval quality: {timing_diagnostics.get('timing_quality', 'n/a')}"
             )
             self._log_message(
-                f"Needs correction: {timing_diagnostics['needs_hdf5_correction']}"
+                f"Consistent      : {timing_diagnostics['interval_consistent']}"
             )
             self._log_message(
-                f"Recommendation: {timing_diagnostics['recommended_action']}"
+                f"Needs correction: {timing_diagnostics.get('needs_hdf5_correction', timing_diagnostics.get('needs_correction', 'n/a'))}"
+            )
+            self._log_message(
+                f"Recommendation  : {timing_diagnostics['recommended_action']}"
             )
 
         except Exception as e:
@@ -5896,10 +6014,19 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         import h5py
 
+        # Determine whether this is HDF5 or Zarr so we use the right detector
+        _zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+        _is_zarr = os.path.isdir(self.file_path) and any(
+            os.path.exists(os.path.join(self.file_path, m)) for m in _zarr_markers
+        )
+
         try:
             if DUAL_STRUCTURE_AVAILABLE:
-                # Use enhanced structure detection
-                structure_info = detect_hdf5_structure_type(self.file_path)
+                # Use format-agnostic detection for Zarr, HDF5-specific for HDF5
+                if _is_zarr:
+                    structure_info = detect_file_structure_type(self.file_path)
+                else:
+                    structure_info = detect_hdf5_structure_type(self.file_path)
 
                 self._log_message("=== ENHANCED HDF5 FILE STRUCTURE ANALYSIS ===")
                 self._log_message(f"Structure type: {structure_info['type']}")
@@ -5945,20 +6072,23 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     )
 
             else:
-                # Fallback to original method
-                with h5py.File(self.file_path, "r") as f:
-                    self._log_message("=== BASIC HDF5 FILE STRUCTURE ===")
-                    self._log_message(f"Root keys: {list(f.keys())}")
+                # Fallback to original method — skip for Zarr stores
+                if _is_zarr:
+                    self._log_message("Zarr store loaded — basic HDF5 fallback skipped")
+                else:
+                    with h5py.File(self.file_path, "r") as f:
+                        self._log_message("=== BASIC HDF5 FILE STRUCTURE ===")
+                        self._log_message(f"Root keys: {list(f.keys())}")
 
-                    def print_structure(name, obj):
-                        if isinstance(obj, h5py.Group):
-                            self._log_message(
-                                f"Group: {name} - keys: {list(obj.keys())}"
-                            )
-                        elif isinstance(obj, h5py.Dataset):
-                            self._log_message(f"Dataset: {name} - shape: {obj.shape}")
+                        def print_structure(name, obj):
+                            if isinstance(obj, h5py.Group):
+                                self._log_message(
+                                    f"Group: {name} - keys: {list(obj.keys())}"
+                                )
+                            elif isinstance(obj, h5py.Dataset):
+                                self._log_message(f"Dataset: {name} - shape: {obj.shape}")
 
-                    f.visititems(print_structure)
+                        f.visititems(print_structure)
 
         except Exception as e:
             self._log_message(f"HDF5 structure check failed: {e}")

@@ -275,7 +275,26 @@ class ZarrFileReader(FileReader):
                 "Install it with:  pip install zarr"
             ) from exc
         self._zarr = zarr
-        self._handle = zarr.open(self.path, mode="r")
+        # A .zarr path that is a regular file is a zip store.
+        # ZipStore location differs between zarr v2 (zarr.ZipStore) and
+        # v3 (zarr.storage.ZipStore).  Try both, then fall back to a direct
+        # open() call in case a future version handles zip automatically.
+        if os.path.isfile(self.path):
+            ZipStore = (
+                getattr(zarr, "ZipStore", None)
+                or getattr(getattr(zarr, "storage", None), "ZipStore", None)
+            )
+            if ZipStore is not None:
+                try:
+                    self._handle = zarr.open(ZipStore(self.path, mode="r"), mode="r")
+                except TypeError:
+                    # zarr v3 ZipStore may not accept a mode kwarg
+                    self._handle = zarr.open(ZipStore(self.path), mode="r")
+            else:
+                # Last resort: let zarr figure it out
+                self._handle = zarr.open(self.path, mode="r")
+        else:
+            self._handle = zarr.open(self.path, mode="r")
         return self
 
     def close(self) -> None:

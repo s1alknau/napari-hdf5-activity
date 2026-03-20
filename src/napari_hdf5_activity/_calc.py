@@ -1575,6 +1575,7 @@ def calculate_sleep_quality_hourly(
         "sleep_minutes": {},
         "transitions": {},
         "bout_length": {},
+        "sleep_hours_per_day": {},
     }
 
     for roi, data in sleep_data.items():
@@ -1643,6 +1644,21 @@ def calculate_sleep_quality_hourly(
         result["sleep_minutes"][roi] = sleep_min_roi
         result["transitions"][roi] = transitions_roi
         result["bout_length"][roi] = bout_length_roi
+
+        # 4. Sleep duration per 24 h: total sleep hours per calendar day
+        day_size_s = 24 * 3600.0
+        day_start = (start_time // day_size_s) * day_size_s
+        sleep_per_day = []
+        while day_start < end_time:
+            day_end = day_start + day_size_s
+            day_center = day_start + day_size_s / 2
+            mask = (times >= day_start) & (times < day_end)
+            day_states = states[mask]
+            if len(day_states) > 0:
+                sleep_h = float(np.sum(day_states)) * minutes_per_data_bin / 60.0
+                sleep_per_day.append((day_center, sleep_h))
+            day_start = day_end
+        result["sleep_hours_per_day"][roi] = sleep_per_day
 
     return result
 
@@ -1739,69 +1755,68 @@ def extract_illumination_periods(
         return []
 
 
-def compute_adaptive_baselines(
+def equalize_signal_per_illumination_period(
     data: List[Tuple[float, float]],
     periods: List[Tuple[float, float, str]],
-    multiplier: float,
-    frame_interval: float,
-) -> List[Tuple[float, float, float, float, float, str]]:
+    floor_percentile: float = 15.0,
+) -> List[Tuple[float, float]]:
     """
-    Compute baseline thresholds for each illumination period.
+    Level-correct activity signal so all illumination periods share the same baseline floor.
 
-    Returns:
-        List of (start_s, end_s, baseline_mean, upper_thresh, lower_thresh, phase)
-    """
-    result = []
-    for start_s, end_s, phase in periods:
-        period_data = [(t, v) for t, v in data if start_s <= t < end_s]
-        if len(period_data) < 2:
-            continue
-        duration_min = (end_s - start_s) / 60.0
-        baseline_mean, upper, lower, _ = compute_threshold_baseline_hysteresis(
-            period_data, duration_min, multiplier, frame_interval
-        )
-        result.append((start_s, end_s, baseline_mean, upper, lower, phase))
-    return result
-
-
-def apply_adaptive_illumination_movement(
-    data: List[Tuple[float, float]],
-    period_thresholds: List[Tuple[float, float, float, float, float, str]],
-    global_upper: float,
-    global_lower: float,
-) -> List[Tuple[float, int]]:
-    """
-    Detect movement using per-illumination-period thresholds with continuous hysteresis.
+    For each period, computes the resting floor (low percentile of values — represents
+    quiet/resting activity level) then shifts that period's values so all floors align
+    to a common global reference. This removes the DC offset caused by different
+    illumination intensities while fully preserving animal movement amplitudes.
 
     Args:
-        data: List of (time_s, value) tuples
-        period_thresholds: Output of compute_adaptive_baselines
-        global_upper / global_lower: Fallback thresholds for gaps between periods
+        data: List of (time_s, value) tuples (frame-to-frame differences)
+        periods: List of (start_s, end_s, phase) from extract_illumination_periods()
+        floor_percentile: Percentile used as resting floor estimate (default 15)
+                          Low enough to represent quiet frames, robust to brief spikes.
+
+    Returns:
+        Level-corrected data as List of (time_s, value) tuples
     """
-    sorted_data = sorted(data, key=lambda x: x[0])
-    movement = []
-    is_moving = False
+    if not data or not periods:
+        return data
 
-    for t, v in sorted_data:
-        # Find which period this frame belongs to
-        upper = global_upper
-        lower = global_lower
-        for start_s, end_s, _, pt_upper, pt_lower, _ in period_thresholds:
-            if start_s <= t < end_s:
-                upper = pt_upper
-                lower = pt_lower
-                break
+    times = np.array([t for t, _ in data])
+    values = np.array([v for _, v in data])
 
-        # Hysteresis
-        if is_moving:
-            if v < lower:
-                is_moving = False
-        else:
-            if v > upper:
-                is_moving = True
-        movement.append((t, 1 if is_moving else 0))
+    # Compute per-period floor
+    period_floors = []
+    period_masks = []
+    for start_s, end_s, _ in periods:
+        mask = (times >= start_s) & (times < end_s)
+        if np.sum(mask) < 5:
+            period_masks.append(mask)
+            period_floors.append(None)
+            continue
+        floor = np.percentile(values[mask], floor_percentile)
+        period_floors.append(floor)
+        period_masks.append(mask)
 
-    return movement
+    valid_floors = [f for f in period_floors if f is not None]
+    if not valid_floors:
+        return data
+
+    # Global reference = median of per-period floors
+    global_floor = float(np.median(valid_floors))
+
+    corrected = values.copy()
+    for mask, floor in zip(period_masks, period_floors):
+        if floor is None or np.sum(mask) == 0:
+            continue
+        corrected[mask] += (global_floor - floor)
+
+    # Clamp to >= 0 (frame differences are non-negative)
+    corrected = np.clip(corrected, 0.0, None)
+
+    logger.debug(
+        f"Signal equalization: {len(valid_floors)} periods, "
+        f"floors {[f'{f:.4f}' for f in valid_floors]}, global ref={global_floor:.4f}"
+    )
+    return list(zip(times, corrected))
 
 
 def _process_single_roi_movement(
@@ -1826,9 +1841,7 @@ def _process_single_roi_movement(
         bin_size_seconds,
         frame_interval,
         is_active,
-        *extra,
     ) = args
-    period_thresholds = extra[0] if extra else None
 
     results = {}
 
@@ -1851,22 +1864,16 @@ def _process_single_roi_movement(
 
     try:
         # Step 1: Hysteresis movement detection using pre-calculated baselines
-        if period_thresholds:
-            movement_list = apply_adaptive_illumination_movement(
-                data, period_thresholds, upper_threshold, lower_threshold
-            )
-            movement_data_dict = {roi_id: movement_list}
-        else:
-            baseline_means_single = {roi_id: baseline_mean}
-            upper_thresholds_single = {roi_id: upper_threshold}
-            lower_thresholds_single = {roi_id: lower_threshold}
-            data_single = {roi_id: data}
-            movement_data_dict = define_movement_with_hysteresis(
-                data_single,
-                baseline_means_single,
-                upper_thresholds_single,
-                lower_thresholds_single,
-            )
+        baseline_means_single = {roi_id: baseline_mean}
+        upper_thresholds_single = {roi_id: upper_threshold}
+        lower_thresholds_single = {roi_id: lower_threshold}
+        data_single = {roi_id: data}
+        movement_data_dict = define_movement_with_hysteresis(
+            data_single,
+            baseline_means_single,
+            upper_thresholds_single,
+            lower_thresholds_single,
+        )
         results["movement_data"] = movement_data_dict.get(roi_id, [])
 
         # Step 2: Bin fraction movement
@@ -1975,8 +1982,25 @@ def run_baseline_analysis(
         processed_data = normalized_data
     logger.debug(f"Step 1a complete: {len(processed_data)} ROIs")
 
-    # Step 1b: Calculate baseline thresholds from processed (detrended) data.
-    # Thresholds must be in the same signal space as movement detection.
+    # Step 1b: Equalize signal level across illumination periods (adaptive baseline).
+    # Must run BEFORE threshold computation so thresholds and movement detection
+    # both operate on the same equalized signal space.
+    if adaptive_illumination_baseline and led_data:
+        all_times = [t for data in processed_data.values() for t, _ in data]
+        rec_start = min(all_times) if all_times else 0.0
+        rec_end = max(all_times) if all_times else None
+        periods = extract_illumination_periods(led_data, rec_start, rec_end)
+        if periods:
+            logger.info(f"Adaptive illumination baseline: equalizing signal across {len(periods)} periods")
+            processed_data = {
+                roi: equalize_signal_per_illumination_period(data, periods)
+                for roi, data in processed_data.items()
+            }
+        else:
+            logger.warning("Adaptive illumination baseline: no usable periods found, using global baseline")
+
+    # Step 1c: Calculate baseline thresholds from equalized/processed data.
+    # Thresholds are now in the same signal space as movement detection.
     baseline_means = {}
     upper_thresholds = {}
     lower_thresholds = {}
@@ -2001,23 +2025,30 @@ def run_baseline_analysis(
         lower_thresholds[roi] = lower_thresh
         roi_statistics[roi] = stats
 
-    # Step 1c: Compute per-illumination-period thresholds (adaptive baseline)
-    roi_period_thresholds = {}
-    use_adaptive = False
-    if adaptive_illumination_baseline and led_data:
-        all_times = [t for data in processed_data.values() for t, _ in data]
-        rec_start = min(all_times) if all_times else 0.0
-        rec_end = max(all_times) if all_times else None
-        periods = extract_illumination_periods(led_data, rec_start, rec_end)
-        if periods:
-            use_adaptive = True
-            logger.info(f"Adaptive illumination baseline: {len(periods)} periods detected")
-            for roi, data in processed_data.items():
-                roi_period_thresholds[roi] = compute_adaptive_baselines(
-                    data, periods, multiplier, frame_interval
-                )
-        else:
-            logger.warning("Adaptive illumination baseline: no usable periods found, using global baseline")
+    # Step 1d (optional): override thresholds with pre-computed fixed values.
+    # _fixed_upper_thresholds are in post-MinMax [0-1] space (as entered by the user).
+    # We de-normalise them per ROI so that after apply_minmax_normalization they map
+    # back to exactly the user-specified value — giving identical threshold lines for
+    # all ROIs in the displayed [0-1] plot.
+    if "_fixed_upper_thresholds" in kwargs:
+        _f_upper = kwargs.pop("_fixed_upper_thresholds", {})
+        _f_lower = kwargs.pop("_fixed_lower_thresholds", {})
+        for roi in list(processed_data.keys()):
+            if roi not in _f_upper:
+                continue
+            vals = np.array([v for _, v in processed_data[roi]]) if processed_data[roi] else np.array([0.0])
+            min_roi = float(np.min(vals))
+            range_roi = float(np.max(vals)) - min_roi
+            fixed_norm_upper = _f_upper[roi]
+            fixed_norm_lower = _f_lower.get(roi, fixed_norm_upper * 0.8)
+            if range_roi > 0:
+                # De-normalise: threshold_preminmax = fixed_norm * range + min
+                upper_thresholds[roi] = fixed_norm_upper * range_roi + min_roi
+                lower_thresholds[roi] = fixed_norm_lower * range_roi + min_roi
+            else:
+                upper_thresholds[roi] = fixed_norm_upper
+                lower_thresholds[roi] = fixed_norm_lower
+            baseline_means[roi] = (upper_thresholds[roi] + lower_thresholds[roi]) / 2
 
     # Step 2: ROI-level processing (parallel or sequential)
     # Movement detection uses processed_data but pre-calculated baselines
@@ -2036,7 +2067,6 @@ def run_baseline_analysis(
                 bin_size_seconds,
                 frame_interval,
                 roi_active.get(roi_id, True),
-                roi_period_thresholds.get(roi_id) if use_adaptive else None,
             )
             for roi_id in processed_data.keys()
         ]

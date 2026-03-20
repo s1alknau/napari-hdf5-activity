@@ -128,9 +128,13 @@ def calculate_coherence(
         return {"error": "Signals too short for coherence analysis"}
 
     # Auto-select segment length if not provided
+    # Base nperseg on the target period so each segment covers at least one full cycle.
+    # This generalises to any recording length and any target period.
     if nperseg is None:
-        nperseg = min(256, len(signal1) // 8)
-        nperseg = max(nperseg, 16)  # Minimum segment size
+        samples_per_period = int(target_period_hours * 3600.0 / sampling_interval)
+        nperseg = max(samples_per_period, 16)   # at least 16 samples
+        nperseg = min(nperseg, len(signal1) // 2)  # need ≥ 2 segments
+        nperseg = max(nperseg, 16)  # re-apply minimum after clamping
 
     # Calculate coherence using Welch's method
     sampling_freq = 1.0 / sampling_interval
