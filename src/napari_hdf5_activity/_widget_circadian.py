@@ -2849,13 +2849,7 @@ class CircadianMixin:
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
 
-            # Scale pixmap to fit canvas while maintaining aspect ratio
-            scaled_pixmap = pixmap.scaled(
-                self.fisher_plot_canvas.size(),
-                1,  # Qt.KeepAspectRatio
-                1,  # Qt.SmoothTransformation
-            )
-            self.fisher_plot_canvas.setPixmap(scaled_pixmap)
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
@@ -3284,9 +3278,7 @@ class CircadianMixin:
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
-            self.fisher_plot_canvas.setPixmap(
-                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
-            )
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
@@ -3395,9 +3387,7 @@ class CircadianMixin:
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
-            self.fisher_plot_canvas.setPixmap(
-                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
-            )
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
@@ -3459,9 +3449,7 @@ class CircadianMixin:
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
-            self.fisher_plot_canvas.setPixmap(
-                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
-            )
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
@@ -3589,9 +3577,7 @@ class CircadianMixin:
             buf.seek(0)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
-            self.fisher_plot_canvas.setPixmap(
-                pixmap.scaled(self.fisher_plot_canvas.size(), 1, 1)
-            )
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):
@@ -5158,13 +5144,7 @@ class CircadianMixin:
             pixmap = QPixmap()
             pixmap.loadFromData(buf.read())
 
-            # Scale pixmap to fit canvas while maintaining aspect ratio
-            scaled_pixmap = pixmap.scaled(
-                self.fisher_plot_canvas.size(),
-                1,  # Qt.KeepAspectRatio
-                1,  # Qt.SmoothTransformation
-            )
-            self.fisher_plot_canvas.setPixmap(scaled_pixmap)
+            self.fisher_plot_canvas.setPixmap(pixmap)
 
             # Enable pop-out button after successful plot creation
             if hasattr(self, "btn_popout_plot"):

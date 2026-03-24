@@ -2267,7 +2267,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         self.fisher_plot_canvas = QLabel()
         self.fisher_plot_canvas.setMinimumSize(400, 300)
-        self.fisher_plot_canvas.setScaledContents(False)  # Maintain aspect ratio
+        self.fisher_plot_canvas.setScaledContents(True)  # Auto-scale to label size
         self.fisher_plot_canvas.setStyleSheet(
             "border: 1px solid #ccc; background-color: white;"
         )
@@ -5766,12 +5766,13 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             if self.file_path.lower().endswith(".avi"):
                 return self._extract_led_data_from_avi()
 
-            # HDF5 file processing
-            with h5py.File(self.file_path, "r") as f:
-                if "timeseries" not in f:
+            # HDF5 or Zarr file processing via format-agnostic reader
+            with open_file_reader(self.file_path) as r:
+                root_keys = r.keys("/")
+                if "timeseries" not in root_keys:
                     return None
 
-                timeseries = f["timeseries"]
+                ts_keys = r.keys("timeseries")
 
                 # Try to find white LED data (various possible names)
                 white_led = None
@@ -5782,21 +5783,20 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     "white_led_power_percent",
                 ]
                 for name in white_led_names:
-                    if name in timeseries:
-                        white_led = timeseries[name][:]
+                    if name in ts_keys:
+                        white_led = r.read_all(f"timeseries/{name}").astype(float)
                         self._log_message(f"Found white LED data: {name}")
                         break
 
                 # Special case: "led_power_percent" without specific white/IR separation
-                # This is typically IR-only systems (old recordings) - don't use for lighting detection
-                if white_led is None and "led_power_percent" in timeseries:
+                if white_led is None and "led_power_percent" in ts_keys:
                     self._log_message(
                         "Found generic 'led_power_percent' but no white LED channel - likely IR-only system"
                     )
                     self._log_message(
                         "→ Using legacy 12h light/dark cycles for visualization"
                     )
-                    return None  # Will trigger legacy 12h cycle visualization
+                    return None
 
                 # Try to find IR LED data (various possible names)
                 ir_led = None
@@ -5807,29 +5807,30 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     "ir_led_power_percent",
                 ]
                 for name in ir_led_names:
-                    if name in timeseries:
-                        ir_led = timeseries[name][:]
+                    if name in ts_keys:
+                        ir_led = r.read_all(f"timeseries/{name}").astype(float)
                         self._log_message(f"Found IR LED data: {name}")
                         break
 
-                # If no separate LED channels found, return None
                 if white_led is None:
-                    self._log_message("No white LED data found in HDF5 timeseries")
+                    self._log_message("No white LED data found in timeseries")
                     return None
 
-                # Get timestamps (try capture_timestamps first, fallback to calculated times)
-                if "capture_timestamps" in timeseries:
-                    times = timeseries["capture_timestamps"][:]
+                # Get timestamps — check multiple possible names (HDF5 and Zarr variants)
+                frame_interval = self.frame_interval.value()
+                if "capture_timestamps" in ts_keys:
+                    times = r.read_all("timeseries/capture_timestamps").astype(float)
+                elif "recording_elapsed_sec" in ts_keys:
+                    times = r.read_all("timeseries/recording_elapsed_sec").astype(float)
+                elif "timestamps" in ts_keys:
+                    ts_raw = r.read_all("timeseries/timestamps").astype(float)
+                    times = ts_raw - ts_raw[0] if len(ts_raw) > 0 else ts_raw
                 else:
-                    # Fallback: use frame interval to calculate times
-                    frame_interval = self.frame_interval.value()
                     times = np.arange(len(white_led)) * frame_interval
 
                 result = {"times": times.tolist(), "white_powers": white_led.tolist()}
-
                 if ir_led is not None:
                     result["ir_powers"] = ir_led.tolist()
-
                 return result
 
         except Exception as e:
@@ -5863,24 +5864,34 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             if self.file_path.lower().endswith(".avi"):
                 return None
 
-            with h5py.File(self.file_path, "r") as f:
-                if "timeseries" not in f or "frame_mean" not in f["timeseries"]:
+            with open_file_reader(self.file_path) as r:
+                root_keys = r.keys("/")
+                if "timeseries" not in root_keys:
+                    return None
+                ts_keys = r.keys("timeseries")
+                # Accept both HDF5 name (frame_mean) and Zarr name (frame_mean_intensity)
+                fm_key = None
+                for candidate in ("frame_mean", "frame_mean_intensity"):
+                    if candidate in ts_keys:
+                        fm_key = candidate
+                        break
+                if fm_key is None:
                     return None
 
-                fm = f["timeseries"]["frame_mean"][:]
+                fm = r.read_all(f"timeseries/{fm_key}").astype(float)
 
-                # Timestamps
-                ts = f["timeseries"]
-                if "capture_timestamps" in ts:
-                    times = ts["capture_timestamps"][:].astype(float)
+                frame_interval = self.frame_interval.value()
+                if "capture_timestamps" in ts_keys:
+                    times = r.read_all("timeseries/capture_timestamps").astype(float)
+                elif "recording_elapsed_sec" in ts_keys:
+                    times = r.read_all("timeseries/recording_elapsed_sec").astype(float)
                 else:
-                    frame_interval = self.frame_interval.value()
                     times = np.arange(len(fm), dtype=float) * frame_interval
 
                 return {"times": times.tolist(), "values": fm.tolist()}
 
         except Exception as e:
-            self._log_message(f"Could not extract frame_mean from HDF5: {e}")
+            self._log_message(f"Could not extract frame_mean: {e}")
             return None
 
     def apply_time_range(self):

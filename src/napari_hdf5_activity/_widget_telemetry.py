@@ -75,23 +75,47 @@ class TelemetryMixin:
     TELEMETRY_CATEGORIES = {
         "Timing": [
             "frame_drift", "cumulative_drift", "actual_intervals", "expected_intervals",
+            "cumulative_drift_sec", "recording_elapsed_sec",
         ],
-        "Environment": ["temperature", "humidity"],
+        "Environment": [
+            "temperature", "humidity",                      # COMPREHENSIVE mode
+            "temperature_celsius", "humidity_percent",      # MINIMAL/STANDARD mode
+        ],
         "LED": [
             "led_white_power_percent", "led_ir_power_percent", "led_power_percent",
             "led_duration_ms", "led_sync_success",
+            "white_led_power", "ir_led_power", "led_power", "sync_success",
         ],
-        "Frame Stats": ["frame_mean", "frame_max", "frame_min", "frame_std"],
+        "Frame Stats": [
+            "frame_mean", "frame_max", "frame_min", "frame_std",
+            "frame_mean_intensity",
+        ],
+        "Recording": [
+            "phase_transition", "cycle_number", "frame_index",
+        ],
     }
 
     TIMESERIES_UNITS = {
         "frame_drift": "s", "cumulative_drift": "s", "actual_intervals": "s",
-        "expected_intervals": "s", "temperature": "\u00b0C", "humidity": "%",
+        "expected_intervals": "s", "cumulative_drift_sec": "s", "recording_elapsed_sec": "s",
+        "temperature": "\u00b0C", "humidity": "%",
+        "temperature_celsius": "\u00b0C", "humidity_percent": "%",
         "led_white_power_percent": "%", "led_ir_power_percent": "%",
         "led_power_percent": "%", "led_duration_ms": "ms",
-        "led_sync_success": "bool", "frame_mean": "px intensity",
+        "led_sync_success": "bool", "sync_success": "bool",
+        "white_led_power": "%", "ir_led_power": "%", "led_power": "%",
+        "frame_mean": "px intensity", "frame_mean_intensity": "px intensity",
         "frame_max": "px intensity", "frame_min": "px intensity",
         "frame_std": "px intensity",
+    }
+
+    # Keyword fragments for fuzzy categorization (fallback when exact name not found)
+    _CATEGORY_KEYWORDS = {
+        "Environment": ["temp", "humid", "celsius", "humidity"],
+        "LED": ["led", "sync"],
+        "Timing": ["drift", "interval", "elapsed", "timestamp"],
+        "Frame Stats": ["frame_mean", "frame_max", "frame_min", "frame_std", "intensity"],
+        "Recording": ["phase", "cycle", "transition", "frame_index"],
     }
 
 
@@ -427,8 +451,14 @@ class TelemetryMixin:
 
     def _get_category_for_dataset(self, ds_name: str) -> str:
         """Return the category name for a given timeseries dataset name."""
+        # Exact match first
         for cat_name, ds_list in self.TELEMETRY_CATEGORIES.items():
             if ds_name in ds_list:
+                return cat_name
+        # Fuzzy keyword fallback for unknown naming variants
+        name_lower = ds_name.lower()
+        for cat_name, keywords in self._CATEGORY_KEYWORDS.items():
+            if any(kw in name_lower for kw in keywords):
                 return cat_name
         return "Other"
 

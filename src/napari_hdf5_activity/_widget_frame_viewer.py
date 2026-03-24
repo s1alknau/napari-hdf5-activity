@@ -392,12 +392,13 @@ class FrameViewerMixin:
                     )
                     files_added.add(avi_path)
 
-        # Add HDF5 files from directory
+        # Add HDF5 and Zarr files from directory
         if hasattr(self, "directory") and self.directory:
             try:
                 for f in sorted(os.listdir(self.directory)):
                     full_path = os.path.join(self.directory, f)
-                    if f.lower().endswith((".h5", ".hdf5")) and full_path not in files_added:
+                    is_zarr_dir = f.lower().endswith(".zarr") and os.path.isdir(full_path)
+                    if (f.lower().endswith((".h5", ".hdf5")) or is_zarr_dir) and full_path not in files_added:
                         self.viewer_file_combo.addItem(f, full_path)
                         files_added.add(full_path)
             except Exception:
@@ -432,19 +433,40 @@ class FrameViewerMixin:
         self.file_path = selected_path
 
         try:
-            # Check if HDF5 or AVI
-            is_hdf5 = selected_path.lower().endswith((".h5", ".hdf5"))
-            is_avi = selected_path.lower().endswith(".avi")
+            # Normalize path (strip trailing separators/spaces from directory pickers)
+            selected_path = selected_path.rstrip("/\\").strip()
+            self.file_path = selected_path
+
+            path_lower = selected_path.lower()
+            is_avi = path_lower.endswith(".avi")
+            # Any directory is treated as a Zarr store (HDF5/AVI are never directories)
+            is_directory = os.path.isdir(selected_path)
+            is_zarr = path_lower.endswith(".zarr") or is_directory
+            is_hdf5 = not is_zarr and path_lower.endswith((".h5", ".hdf5"))
+
+            # Content-based fallback for files with unexpected extensions
+            if not is_avi and not is_hdf5 and not is_zarr and IO_ABSTRACTION_AVAILABLE:
+                try:
+                    fmt = detect_file_format(selected_path)
+                    is_hdf5 = fmt == "hdf5"
+                    is_zarr = fmt == "zarr"
+                except Exception:
+                    pass
+
+            self._log_message(
+                f"Frame viewer: loading {repr(selected_path)} "
+                f"[dir={is_directory}, zarr={is_zarr}, hdf5={is_hdf5}, avi={is_avi}]"
+            )
 
             if is_avi:
-                # Load AVI batch
                 self._viewer_load_avi_batch()
-            elif is_hdf5:
-                # Load HDF5
+            elif is_hdf5 or is_zarr:
                 self._viewer_load_hdf5()
             else:
                 self.viewer_status_label.setText("⚠️ Unsupported file format")
-                self._log_message("⚠️ Frame viewer: Unsupported file format")
+                self._log_message(
+                    f"⚠️ Frame viewer: Unsupported file format — path: {repr(selected_path)}"
+                )
 
         except Exception as e:
             self.viewer_status_label.setText(f"❌ Error loading data: {e}")
