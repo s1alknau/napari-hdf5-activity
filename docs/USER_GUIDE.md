@@ -74,6 +74,13 @@ The plugin has 5 tabs:
 /metadata (optional)
 ```
 
+#### Zarr Files
+
+**Directory Stores (.zarr directories):**
+1. Click **"Load File"**
+2. Select the `.zarr` directory
+3. Plugin reads the Zarr array and treats it identically to an HDF5 stacked-frames dataset
+
 #### AVI Files
 
 **Single Video:**
@@ -122,6 +129,12 @@ Regions of Interest (ROIs) are circular areas that represent individual organism
   - Adjust radius range
   - Check image contrast
 - You can re-run detection with new parameters (previous ROIs are cleared)
+
+**ROI Editor (fine-tuning positions):**
+1. Click **"Edit ROI Circles"** — a napari Points layer appears showing ring symbols at each ROI center
+2. Drag points to correct positions (move only — resizing is not supported in the editor)
+3. Click **"Apply Edits"** — masks are rebuilt from the updated positions
+4. The editor layer is removed automatically after applying
 
 **ROI Visualization:**
 - Each ROI has a unique color (repeated in plots)
@@ -362,7 +375,7 @@ After analysis completes:
 
 ### Overview
 
-The Extended Analysis tab implements **Fischer Z-transformation** to detect periodic patterns in activity data, particularly useful for identifying circadian rhythms.
+The Extended Analysis tab provides six complementary methods for detecting periodic patterns and synchronization in activity data. The primary period-detection method is the **Chi² periodogram** (Sokolove & Bushell 1978), which uses a Bonferroni-corrected significance threshold (≈ 15.2 for α = 0.05, m = 100 tested periods). See the [Extended Analysis Guide](../EXTENDED_ANALYSIS.md) and [Circadian Analysis Guide](CIRCADIAN_ANALYSIS.md) for full method details.
 
 ### Prerequisites
 
@@ -418,11 +431,11 @@ ROI 1: SIGNIFICANT circadian rhythm detected
 
 **Periodogram Plot:**
 - **X-axis**: Period (hours)
-- **Y-axis**: Z-score (strength of periodicity)
-- **Blue line**: Z-scores for all tested periods
-- **Red dashed line**: Significance threshold
-- **Red marker**: Dominant period (peak Z-score)
-- **Green title**: Significant rhythm detected
+- **Y-axis**: Labeled "Z-score" but represents the chi-squared statistic Z(T) = n × (r_cos² + r_sin²)
+- **Blue line**: Z(T) values across all tested periods
+- **Gray dashed line**: Bonferroni-corrected significance threshold (≈ 15.2 for α=0.05, m=100)
+- **Red/colored marker**: Dominant period (peak Z(T))
+- **Green title**: Significant rhythm detected (Z(T) > Bonferroni threshold)
 - **Black title**: No significant rhythm
 
 **Biological Interpretation:**

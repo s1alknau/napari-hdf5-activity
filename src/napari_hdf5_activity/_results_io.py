@@ -184,6 +184,14 @@ def save_comprehensive_results(
                         roi_group.create_dataset("bouts", data=bout_array)
                         roi_group.attrs["n_bouts"] = len(bouts)
 
+            # Save LED / lighting data (times, white_powers, ir_powers)
+            if "led_data" in core_results and core_results["led_data"]:
+                led = core_results["led_data"]
+                led_group = core_group.create_group("led_data")
+                for key in ("times", "white_powers", "ir_powers"):
+                    if key in led and led[key] is not None:
+                        led_group.create_dataset(key, data=np.array(led[key], dtype="f8"))
+
             # ================================================================
             # 2. EXTENDED ANALYSIS RESULTS
             # ================================================================
@@ -650,6 +658,15 @@ def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
                             ]
 
                     results["core_analysis"]["quiescence_bouts"] = bouts_data
+
+                # Load LED / lighting data
+                if "led_data" in core_group:
+                    led_group = core_group["led_data"]
+                    led_data = {}
+                    for key in ("times", "white_powers", "ir_powers"):
+                        if key in led_group:
+                            led_data[key] = led_group[key][:].tolist()
+                    results["core_analysis"]["led_data"] = led_data
 
             # ================================================================
             # 2. LOAD EXTENDED ANALYSIS RESULTS

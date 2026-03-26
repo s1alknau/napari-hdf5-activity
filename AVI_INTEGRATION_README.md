@@ -2,7 +2,7 @@
 
 ## Overview
 
-The napari-hdf5-activity plugin now supports AVI video files in addition to HDF5 files. This enables analysis of videos using the same movement analysis pipeline.
+The napari-hdf5-activity plugin supports AVI video files in addition to HDF5 and Zarr files. This enables analysis of standard video recordings using the same movement analysis pipeline.
 
 ## Features
 
@@ -106,16 +106,16 @@ When loading multiple videos:
 
 ## Differences from HDF5
 
-| Feature | HDF5 | AVI |
-|---------|------|-----|
-| Frame Loading | Direct dataset access | opencv video reader |
-| LED Data | ✓ Available in timeseries | ✗ Not available |
-| Lighting Plot | ✓ Automatic from LED data | ✗ Not shown |
-| Metadata | ✓ Embedded in file | ✗ Basic (FPS, duration) |
-| Batch Processing | Directory scan | Multi-select or directory |
-| Movement Analysis | ✓ Identical | ✓ Identical |
-| Threshold Methods | ✓ All methods | ✓ All methods |
-| Export | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots |
+| Feature | HDF5 | Zarr | AVI |
+|---------|------|------|-----|
+| Frame Loading | Direct dataset access | Direct array access | opencv video reader |
+| LED Data | ✓ Available in timeseries | ✗ Not available | ✗ Not available |
+| Lighting Plot | ✓ Automatic from LED data | ✗ Not shown | ✗ Not shown |
+| Metadata | ✓ Embedded in file | ✗ Basic (shape, dtype) | ✗ Basic (FPS, duration) |
+| Batch Processing | Directory scan | Single directory store | Multi-select or directory |
+| Movement Analysis | ✓ Identical | ✓ Identical | ✓ Identical |
+| Threshold Methods | ✓ All methods | ✓ All methods | ✓ All methods |
+| Export | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots |
 
 **Note:** Lighting conditions plots are only available for HDF5 files where LED power data is stored in the timeseries.
 

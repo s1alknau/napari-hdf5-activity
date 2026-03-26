@@ -726,6 +726,24 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.btn_apply_scale.setEnabled(False)
         roi_layout.addRow("", self.btn_apply_scale)
 
+        # Manual ROI editing
+        edit_btn_layout = QHBoxLayout()
+        self.btn_edit_rois = QPushButton("Edit ROI Circles")
+        self.btn_edit_rois.setToolTip(
+            "Add draggable circles to the napari viewer.\n"
+            "Move/resize them, then click 'Apply Edits' to update masks."
+        )
+        self.btn_edit_rois.setEnabled(False)
+        self.btn_apply_roi_edits = QPushButton("Apply Edits")
+        self.btn_apply_roi_edits.setToolTip("Convert the edited circles into new ROI masks")
+        self.btn_apply_roi_edits.setEnabled(False)
+        self.btn_apply_roi_edits.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }"
+        )
+        edit_btn_layout.addWidget(self.btn_edit_rois)
+        edit_btn_layout.addWidget(self.btn_apply_roi_edits)
+        roi_layout.addRow("", edit_btn_layout)
+
         layout.addWidget(roi_group)
 
         # ROI Selection (exclude/include)
@@ -1524,8 +1542,6 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         time_range_layout.addWidget(self.plot_end_time)
         time_range_layout.addWidget(self.btn_apply_time_range)
 
-        layout.addWidget(time_range_group)
-
         # Plot binning configuration (separate from analysis binning)
         plot_binning_group = QGroupBox("Plot Binning (Visualization Only)")
         plot_binning_layout = QHBoxLayout()
@@ -1611,6 +1627,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.btn_save_plot = QPushButton("Save Current Plot")
         self.btn_save_plot.setToolTip("Save the currently displayed plot as image file")
 
+        self.btn_save_individual_rois = QPushButton("Save ROIs individually...")
+        self.btn_save_individual_rois.setToolTip(
+            "Save one PNG per ROI for the current plot type into a folder"
+        )
+
         self.btn_save_all_plots = QPushButton("Save All Plots")
         self.btn_save_all_plots.setToolTip(
             "Save all plot types to separate image files"
@@ -1634,6 +1655,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         plot_buttons_layout.addWidget(self.btn_plot)
         plot_buttons_layout.addWidget(self.btn_save_plot)
+        plot_buttons_layout.addWidget(self.btn_save_individual_rois)
         plot_buttons_layout.addWidget(self.btn_save_all_plots)
 
         plot_buttons_layout.addWidget(self.btn_save_results)
@@ -1879,6 +1901,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "Label X-axis as ZT (Zeitgeber Time).\n"
             "ZT 0 = recording start (= lights-on if started at ZT 0)."
         )
+        self.actogram_chk_zt_axis.stateChanged.connect(self._rerender_actogram)
         actogram_settings_layout.addRow("", self.actogram_chk_zt_axis)
 
         self.actogram_chk_show_lighting = QCheckBox("Light/Dark shading")
@@ -1887,6 +1910,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "Overlay yellow light-phase shading from HDF5 LED data.\n"
             "Only available when LED data is present in the HDF5 file."
         )
+        self.actogram_chk_show_lighting.stateChanged.connect(self._rerender_actogram)
         actogram_settings_layout.addRow("", self.actogram_chk_show_lighting)
 
         # Hide τ spinbox — Cosinor always auto-detects τ from the fit
@@ -2228,12 +2252,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         fisher_plot_layout = QVBoxLayout()
         self.fisher_plot_widget.setLayout(fisher_plot_layout)
 
-        # Plot header with title and pop-out button
+        # Plot header with buttons
         plot_header_layout = QHBoxLayout()
-        fisher_plot_label = QLabel("Periodogram Plot")
-        fisher_plot_label.setStyleSheet("font-weight: bold;")
-        plot_header_layout.addWidget(fisher_plot_label)
-
         plot_header_layout.addStretch()
 
         # Button to save the current periodogram plot as image
@@ -2307,6 +2327,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         # ROI scale button
         self.btn_apply_scale.clicked.connect(self._apply_roi_scale)
+        self.btn_edit_rois.clicked.connect(self._open_roi_editor)
+        self.btn_apply_roi_edits.clicked.connect(self._apply_roi_edits)
 
         # NEW: Calibration workflow connections
         self.btn_load_calibration.clicked.connect(self.load_calibration_file)
@@ -2328,6 +2350,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.plot_type_combo.currentIndexChanged.connect(self._on_plot_type_changed)
         self.btn_plot.clicked.connect(self.generate_plot)
         self.btn_save_plot.clicked.connect(self.save_current_plot)
+        self.btn_save_individual_rois.clicked.connect(self.save_individual_roi_plots)
         self.btn_save_all_plots.clicked.connect(self.save_all_plots)
         self.btn_save_results.clicked.connect(
             self.save_results_consolidated_complete
@@ -3322,6 +3345,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             result_msg = f"{dataset_type}: Detected {len(masks)} ROIs"
             self.lbl_file_info.setText(result_msg)
             self._log_message(result_msg)
+            self._log_message("💡 Use 'Edit ROI Circles' to manually adjust positions in the viewer")
+
+            if dataset_type == "MAIN":
+                self.btn_edit_rois.setEnabled(True)
+                self.btn_apply_scale.setEnabled(True)
 
             # Persist the parameters that led to a successful detection
             self._save_roi_settings()
@@ -4170,6 +4198,109 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         except Exception as e:
             self._log_message(f"ERROR applying ROI scale: {e}")
+
+    def _open_roi_editor(self):
+        """Add a draggable Points layer (one point per circle centre) for manual repositioning."""
+        if not hasattr(self, "_original_circles") or self._original_circles is None:
+            self._log_message("⚠️ No ROIs detected yet — run detection first.")
+            return
+
+        try:
+            circles = self._original_circles
+            # Points layer uses (row, col) = (y, x) order
+            centres = np.array([[float(c[1]), float(c[0])] for c in circles])
+
+            # Remove any previous edit layer
+            for layer in list(self.viewer.layers):
+                if getattr(layer, "name", "").startswith("ROI Centres (edit)"):
+                    self.viewer.layers.remove(layer)
+
+            scale = self.roi_scale.value()
+            avg_r = float(np.mean(circles[:, 2])) * scale
+
+            self._roi_edit_layer = self.viewer.add_points(
+                centres,
+                name="ROI Centres (edit)",
+                size=avg_r * 2,        # visual diameter matches circle size
+                symbol="ring",         # ring so the centre is visible
+                face_color="transparent",
+                edge_color="lime",
+                edge_width=0.05,       # napari uses fraction of size
+            )
+            self._roi_edit_layer.mode = "select"
+
+            self.btn_apply_roi_edits.setEnabled(True)
+            self._log_message(
+                f"✏️ {len(centres)} circle centres added. "
+                "Drag points to reposition, then click 'Apply Edits'."
+            )
+
+        except Exception as e:
+            self._log_message(f"ERROR opening ROI editor: {e}")
+            import traceback; traceback.print_exc()
+
+    def _apply_roi_edits(self):
+        """Read the moved point positions and rebuild masks with original radii."""
+        if not hasattr(self, "_roi_edit_layer"):
+            self._log_message("⚠️ No edit layer — click 'Edit ROI Circles' first.")
+            return
+
+        try:
+            new_centres = self._roi_edit_layer.data  # shape (N, 2) in (row, col) order
+            if new_centres is None or len(new_centres) == 0:
+                self._log_message("⚠️ No points in editor layer.")
+                return
+
+            original_radii = self._original_circles[:, 2].astype(int)
+            scale = self.roi_scale.value()
+            frame_shape = self._original_frame_shape
+
+            # Build new circles array: col=cx, row=cy, keep original radius × scale
+            new_circles = np.array([
+                [int(round(pt[1])), int(round(pt[0])),
+                 int(round(original_radii[i] * scale))]
+                for i, pt in enumerate(new_centres)
+            ], dtype=np.uint16)
+
+            # Update stored circles and reset scale (baked in)
+            self._original_circles = new_circles
+            self.roi_scale.setValue(1.0)
+
+            # Recreate masks
+            masks = []
+            for c in new_circles:
+                mask = np.zeros(frame_shape, dtype=np.uint8)
+                cv2.circle(mask, (int(c[0]), int(c[1])), int(c[2]), 255, thickness=-1)
+                masks.append(mask)
+
+            # Recreate labeled frame
+            first_frame = self._original_first_frame
+            labeled_frame = (first_frame.copy() if len(first_frame.shape) == 3
+                             else cv2.cvtColor(first_frame, cv2.COLOR_GRAY2RGB))
+            for idx, c in enumerate(new_circles):
+                cv2.circle(labeled_frame, (int(c[0]), int(c[1])), int(c[2]), (0, 255, 0), 2)
+                cv2.putText(labeled_frame, str(idx + 1),
+                            (int(c[0]) - 10, int(c[1]) + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2.5, (255, 0, 0), 3)
+
+            self.masks = masks
+            self.main_masks = masks.copy()
+            self.labeled_frame = labeled_frame
+            self.main_labeled_frame = labeled_frame.copy()
+
+            self.viewer.layers.remove(self._roi_edit_layer)
+            del self._roi_edit_layer
+            self.btn_apply_roi_edits.setEnabled(False)
+
+            self._add_roi_layers_to_viewer(labeled_frame, masks, "MAIN")
+            self._populate_roi_checkboxes(len(masks))
+
+            self._log_message(f"✅ Applied {len(masks)} repositioned ROIs.")
+            self.lbl_file_info.setText(f"MAIN: {len(masks)} ROIs (manually adjusted)")
+
+        except Exception as e:
+            self._log_message(f"ERROR applying ROI edits: {e}")
+            import traceback; traceback.print_exc()
 
     def clear_roi_detection(self):
         """Enhanced ROI detection clearing with proper event disconnection."""
@@ -5571,7 +5702,18 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
             show_lighting = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
             if show_lighting:
-                led_data_for_plot = getattr(self, "led_data", None) or {}
+                _raw_led = getattr(self, "led_data", None)
+                if _raw_led and isinstance(_raw_led, dict) and _raw_led.get("times") and _raw_led.get("white_powers"):
+                    led_data_for_plot = _raw_led
+                    self._log_message(
+                        f"Light/Dark overlay: {len(_raw_led['times'])} LED data points"
+                    )
+                else:
+                    # No white LED channel in file — pass empty dict to trigger legacy 12h fallback
+                    led_data_for_plot = {}
+                    self._log_message(
+                        "Light/Dark: no white LED data in file — using legacy 12h cycle (lights-on at ZT 0)"
+                    )
             else:
                 led_data_for_plot = None
 
@@ -5713,10 +5855,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self.results_label.setText(f"No {plot_type.lower()} data available.")
                 return
 
-            # Create plot config
+            # Create plot config — screen rendering, publication settings only at export
             from ._plot import create_plot_config
 
             plot_config = create_plot_config(self)
+            plot_config["export_mode"] = False
 
             # Generate plot
             success = self.plot_generator.generate_plot(
@@ -5931,6 +6074,71 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self.results_label.setText(error_msg)
                 self._log_message(f"ERROR: {error_msg}")
 
+    def save_individual_roi_plots(self):
+        """Save one PNG per ROI for the currently selected plot type."""
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self.results_label.setText("No analysis results — run analysis first.")
+            return
+
+        plot_type = self.plot_type_combo.currentText() if hasattr(self, "plot_type_combo") else ""
+
+        # Get the data dict for the current plot type
+        if plot_type == "Raw Intensity Changes":
+            data_dict = getattr(self, "merged_results", {})
+        elif plot_type == "Movement":
+            data_dict = getattr(self, "movement_data", {})
+        elif plot_type in ("Fraction Movement", "Quiescence", "Sleep"):
+            bin_minutes = self.plot_bin_minutes.value() if hasattr(self, "plot_bin_minutes") else 0
+            fd, qd, sd = self._get_rebinned_behavioral_data(bin_minutes)
+            data_dict = {"Fraction Movement": fd, "Quiescence": qd, "Sleep": sd}[plot_type]
+        elif plot_type == "Sleep Quality":
+            data_dict = getattr(self, "sleep_quality_data", {})
+        else:
+            self.results_label.setText(f"Individual save not supported for '{plot_type}'.")
+            return
+
+        if not data_dict:
+            self.results_label.setText(f"No {plot_type} data available.")
+            return
+
+        out_dir = QFileDialog.getExistingDirectory(self, "Select output folder for individual ROI plots")
+        if not out_dir:
+            return
+
+        try:
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+        except Exception:
+            base = "analysis"
+        plot_slug = plot_type.replace(" ", "_").lower()
+
+        from ._plot import PlotGenerator, create_plot_config
+        plot_config = create_plot_config(self)
+        plot_config["export_mode"] = True  # publication DPI + dimensions for file output
+        zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+        show_lighting = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+        led_data_for_plot = (getattr(self, "led_data", None) or {}) if show_lighting else None
+        kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
+
+        dpi = self.plot_dpi_spin.value() if hasattr(self, "plot_dpi_spin") else 300
+        saved = 0
+        roi_colors = getattr(self, "roi_colors", {})
+
+        for roi_id in sorted(data_dict.keys()):
+            single_data = {roi_id: data_dict[roi_id]}
+            single_colors = {roi_id: roi_colors.get(roi_id, f"C{(roi_id - 1) % 10}")}
+
+            from matplotlib.figure import Figure as _Figure
+            fig = _Figure()
+            gen = PlotGenerator(fig)
+            gen.generate_plot(plot_type, single_data, single_colors, plot_config, **kwargs)
+
+            out_path = os.path.join(out_dir, f"{base}_{plot_slug}_ROI{roi_id}.png")
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+            saved += 1
+
+        self._log_message(f"✅ Saved {saved} individual ROI plot(s) to {out_dir}")
+        self.results_label.setText(f"Saved {saved} individual ROI plots to folder.")
+
     def save_all_plots(self):
         """Save all plot types using _plot.py module."""
         directory = QFileDialog.getExistingDirectory(
@@ -5971,8 +6179,9 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 "sleep_data": getattr(self, "sleep_data", {}),
             }
 
-            # Create plot configuration
+            # Create plot configuration — export uses publication DPI + dimensions
             plot_config = create_plot_config(self)
+            plot_config["export_mode"] = True
 
             # Generate timestamp
             timestamp = str(int(time.time()))

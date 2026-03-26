@@ -1393,30 +1393,29 @@ def bin_and_normalize_movement(
 
         # Create time bins
         first_bin_start = (start_time // bin_size_seconds) * bin_size_seconds
-        bin_edges = []
-        current_bin_start = first_bin_start
-        while current_bin_start < end_time:
-            bin_edges.append(current_bin_start)
-            current_bin_start += bin_size_seconds
-        bin_edges.append(current_bin_start)
+        bin_edges = np.arange(
+            first_bin_start,
+            end_time + bin_size_seconds,
+            bin_size_seconds,
+        )
 
-        # Sum pixel changes per bin (like Aguillon sums distance per hour)
+        # Vectorised binning using searchsorted (O(N log N) instead of O(N*B))
+        times_arr = np.array([t for t, _ in sorted_data])
+        values_arr = np.array([v for _, v in sorted_data])
+        bin_indices = np.searchsorted(times_arr, bin_edges)
+
         roi_binned = []
         for i in range(len(bin_edges) - 1):
-            bin_start = bin_edges[i]
-            bin_end = bin_edges[i + 1]
-            bin_center = (bin_start + bin_end) / 2
-
-            bin_sum = sum(
-                v for t, v in sorted_data if bin_start <= t < bin_end
-            )
+            bin_center = float((bin_edges[i] + bin_edges[i + 1]) / 2)
+            s, e = int(bin_indices[i]), int(bin_indices[i + 1])
+            bin_sum = float(values_arr[s:e].sum())
             roi_binned.append((bin_center, bin_sum))
 
         # Min/Max normalize per ROI
         if roi_binned:
-            values = [v for _, v in roi_binned]
-            min_val = min(values)
-            max_val = max(values)
+            vals = np.array([v for _, v in roi_binned])
+            min_val = float(vals.min())
+            max_val = float(vals.max())
             val_range = max_val - min_val
 
             if val_range > 0:

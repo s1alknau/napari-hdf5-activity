@@ -106,10 +106,14 @@ def fisher_z_periodogram(
     max_z_score = z_scores[max_z_idx]
 
     # Calculate p-value using chi-square distribution (df=2)
+    # Raw single-frequency p-value (for display)
     p_value = 1 - stats.chi2.cdf(max_z_score, df=2)
 
-    # Find all significant periods
-    critical_z = stats.chi2.ppf(1 - significance_level, df=2)
+    # Bonferroni-corrected threshold: testing m periods simultaneously
+    # chi²(1 - alpha/m, df=2) — guards against false positives across the periodogram
+    m = len(periods)
+    corrected_alpha = significance_level / m
+    critical_z = stats.chi2.ppf(1 - corrected_alpha, df=2)
     significant_mask = z_scores > critical_z
     significant_periods = periods[significant_mask].tolist()
 
@@ -121,8 +125,9 @@ def fisher_z_periodogram(
         "dominant_period": dominant_period,
         "dominant_z_score": max_z_score,
         "p_value": p_value,
-        "is_significant": p_value < significance_level,
+        "is_significant": max_z_score > critical_z,
         "critical_z": critical_z,
+        "n_periods_tested": m,
         "sampling_hours": sampling_hours,
         "total_duration_hours": total_duration_hours,
         "actual_min_period": float(min_period),

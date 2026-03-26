@@ -5,7 +5,7 @@
 [![Python Version](https://img.shields.io/pypi/pyversions/napari-hdf5-activity.svg?color=green)](https://python.org)
 [![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-hdf5-activity)](https://napari-hub.org/plugins/napari-hdf5-activity)
 
-A napari plugin for analyzing activity and movement behavior from HDF5 timelapse recordings and AVI video files.
+A napari plugin for analyzing activity and movement behavior from HDF5, Zarr, and AVI timelapse recordings.
 
 ----------------------------------
 
@@ -29,7 +29,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - [📚 Additional Documentation](#-additional-documentation)
 - [Troubleshooting](#troubleshooting)
 - [Scientific Background](#scientific-background)
-  - [Fischer Z-Transformation](#fischer-z-transformation-for-circadian-rhythm-detection)
+  - [Chi² Periodogram](#chi-periodogram-for-circadian-rhythm-detection)
   - [Frame Viewer](#frame-viewer)
 - [📐 Mathematical Documentation](#-mathematical-documentation)
   - [Movement Analysis Pipeline](#movement-analysis-pipeline-mathematics)
@@ -40,7 +40,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
     - [Hysteresis State Detection](#movement-state-detection-hysteresis)
     - [Activity Fraction & Sleep Bouts](#activity-fraction-and-sleep-detection)
   - [Rhythmic Pattern Analysis](#rhythmic-pattern-analysis-mathematics)
-    - [Fisher Z-Transformation](#fisher-z-transformation-mathematical-details)
+    - [Chi² Periodogram](#chi-periodogram-mathematical-details)
     - [FFT Power Spectrum](#fft-power-spectrum-mathematical-details)
     - [Cosinor Analysis](#cosinor-analysis-mathematical-details)
     - [Method Comparison](#comparison-of-rhythmic-analysis-methods)
@@ -62,7 +62,7 @@ A napari plugin for analyzing activity and movement behavior from HDF5 timelapse
 - Analyze circadian rhythms and ultradian cycles in model organisms (C. elegans, Drosophila, zebrafish, Nematostella, etc.)
 - Automatically detect sleep/wake states based on movement patterns
 - Quantify activity levels across light/dark cycles with LED-based lighting detection
-- Statistical periodogram analysis (Fisher Z-transformation, FFT) to identify dominant rhythmic patterns
+- Statistical periodogram analysis (Chi² periodogram, FFT) to identify dominant rhythmic patterns
 
 **Key Advantages:**
 - **Automated ROI detection**: No manual tracking required - automatically identifies and monitors multiple organisms
@@ -85,11 +85,12 @@ Detailed documentation for advanced features and workflows:
 
 ### Analysis & Methods
 - **[Extended Analysis Guide](EXTENDED_ANALYSIS.md)** - Comprehensive guide for rhythmic pattern analysis
-  - Fisher Z-Transformation Periodogram
-  - FFT Power Spectrum
-  - ROI Similarity Matrix
-  - Coherence Analysis
-  - Phase Clustering
+  - Chi² Periodogram (Bonferroni-corrected, threshold ≈ 15.2)
+  - FFT Power Spectrum (permutation significance, 1000 shuffles)
+  - Cosinor Analysis (Nelson F-test for population)
+  - ROI Similarity Matrix (Bonferroni-corrected pairwise t-test)
+  - Coherence Analysis (Welch, Bonferroni-corrected)
+  - Phase Clustering (descriptive, PLV heuristics)
   - Scientific rationale and best practices
 
 ### File Format Support
@@ -117,6 +118,7 @@ Detailed documentation for advanced features and workflows:
 
 ### File Format Support
 - **HDF5 files**: Dual structure support (stacked frames and individual frames)
+- **Zarr files**: Directory store (`.zarr` directories) support
 - **AVI video files**: Single or batch processing with temporal concatenation
 - **Memory-efficient loading**: Only first frame loaded for ROI detection, full dataset loaded during analysis
 
@@ -129,12 +131,15 @@ Detailed documentation for advanced features and workflows:
   - **Adaptive**: Dynamic threshold adjustment during analysis
 - **Hysteresis Algorithm**: Robust state detection with upper and lower thresholds
 - **Sleep/Wake Detection**: Automated classification of activity states
-- **Extended Analysis**: Fischer Z-transformation for circadian rhythm detection
-  - Periodogram analysis for detecting periodic patterns
-  - Statistical significance testing (Chi-square)
-  - Sleep/wake phase identification based on dominant periods
+- **Extended Analysis**: Six complementary circadian rhythm methods
+  - **Chi² Periodogram** (Sokolove & Bushell 1978): statistical period detection with Bonferroni-corrected significance (threshold ≈ 15.2 for α=0.05, m=100)
+  - **FFT Power Spectrum**: spectral decomposition with permutation significance (1000 shuffles, max-power test)
+  - **Cosinor Analysis**: amplitude, MESOR, and acrophase with Nelson et al. (1979) population F-test
+  - **ROI Similarity Matrix**: pairwise cross-correlation with Bonferroni-corrected t-test and hierarchical clustering
+  - **Coherence Analysis**: Welch magnitude-squared coherence with Bonferroni correction
+  - **Phase Clustering**: Hilbert-transform phase extraction with PLV (descriptive)
   - Configurable period range (0-100 hours)
-  - Visual periodogram plots for all ROIs
+  - Visual plots for all ROIs
 - **Frame Viewer**: Interactive dataset playback with export capabilities
   - Frame-by-frame navigation with slider
   - Playback controls with adjustable FPS (1-60 FPS)
@@ -154,6 +159,14 @@ Detailed documentation for advanced features and workflows:
   - Seamless integration (no configuration needed)
 
 ## Recent Updates (2025)
+
+### Latest Branch: refactor/widget-split-zarr-support
+
+- **Zarr support**: Directory store (`.zarr` directories) are now supported alongside HDF5 and AVI files; includes realistic test datasets
+- **ROI Editor**: "Edit ROI Circles" button opens a napari Points layer with ring symbols; circles can be moved (but not resized); "Apply Edits" rebuilds the masks from the updated positions
+- **Recording duration fix**: Bin size is added to the duration estimate so that 72-hour recordings are recognized correctly rather than appearing as 71.x hours
+- **Cycle-count warnings**: Warnings about too few cycles for analysis are logged only — they no longer appear as overlaid text on plots
+- **Population cosinor**: Rayleigh test replaced by the Nelson et al. (1979) F-test: F(dfn=2, dfd=2(n−1))
 
 ### Major Features Added
 - **Jump Correction for Time-Series Preprocessing**: Automatically detect and correct sudden signal jumps caused by equipment vibrations or external disturbances
@@ -251,7 +264,7 @@ Detailed documentation for advanced features and workflows:
 - Enhanced "Number of Processes" parameter now functional
 
 ### Version 0.3.0 (2025)
-- Added Extended Analysis tab with Fischer Z-transformation
+- Added Extended Analysis tab with Chi² periodogram (Sokolove & Bushell 1978)
 - Periodogram visualization for circadian rhythm detection
 - Statistical significance testing for periodic patterns
 - Sleep/wake phase identification
@@ -888,11 +901,11 @@ Sleep Bouts (start, end, duration in minutes)
    - Horizontal bars: Sleep bouts
    - Bar length: Sleep duration (minutes)
 
-4. **Periodogram (Fisher Analysis)**:
+4. **Periodogram (Chi² / Fisher Analysis)**:
    - X-axis: "Period (hours)"
-   - Y-axis: "Fischer Z-Score" (dimensionless)
+   - Y-axis: Labeled "Z-score" in the plot, but the quantity is the chi-squared statistic Z(T) = n × (r_cos² + r_sin²), which follows χ²(df=2) under H₀
    - Range: 0 to ~30+ (higher = stronger rhythm)
-   - Horizontal line: Significance threshold (chi-square, df=2)
+   - Horizontal dashed line: Bonferroni-corrected significance threshold ≈ 15.2 (for α=0.05, m=100 tested periods)
 
 ### Multiprocessing Implementation and Performance
 
@@ -1384,9 +1397,9 @@ The multiprocessing speedup for baseline analysis is the same as HDF5 processing
 
 ## Scientific Background
 
-### Fischer Z-Transformation for Circadian Rhythm Detection
+### Chi² Periodogram for Circadian Rhythm Detection
 
-The plugin implements **Fischer's Z-transformation periodogram** for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries. This method tests for correlations between the time series and sine/cosine waves at different periods.
+The plugin implements the **Chi² periodogram** (Sokolove & Bushell 1978) for detecting periodic patterns in activity data, particularly useful for identifying circadian rhythms in biological timeseries. This method tests for correlations between the time series and sine/cosine waves at different candidate periods.
 
 #### What is a Periodogram?
 
@@ -1412,29 +1425,32 @@ A periodogram is a statistical tool that identifies periodic (repeating) pattern
    12.0h, 12.24h, 12.48h, ..., 35.76h, 36.0h
    ```
 
-2. **For Each Test Period P**:
+2. **For Each Test Period T**:
    ```
-   a. Calculate angular frequency: ω = 2π / P
+   a. Calculate angular frequency: ω = 2π / T
    b. Generate cosine wave: cos_wave = cos(ω × t)
    c. Generate sine wave: sin_wave = sin(ω × t)
-   d. Calculate correlations:
+   d. Calculate Pearson correlations:
       - r_cos = correlation(activity_data, cos_wave)
       - r_sin = correlation(activity_data, sin_wave)
-   e. Calculate coherence squared: C² = r_cos² + r_sin²
-   f. Calculate Fischer Z-score: Z = n × C²
+   e. Compute chi-squared statistic: Z(T) = n × (r_cos² + r_sin²)
       (where n = number of data points)
+      NOTE: the plot y-axis is labeled "Z-score" but the quantity is Z(T)
    ```
 
-3. **Statistical Significance**:
+3. **Statistical Significance with Bonferroni Correction**:
    ```
-   Z-scores follow chi-square distribution (df=2)
+   Z(T) follows chi-square distribution (df=2) under H₀
 
-   Significance threshold (α = 0.05):
-   Critical Z = 5.99 (chi-square critical value, 2 df, p<0.05)
+   With m = 100 tested periods, Bonferroni-corrected threshold at α = 0.05:
+   Critical Z ≈ 15.2   (= χ²(1 − 0.05/100, df=2))
 
    Interpretation:
-   - Z > 5.99: Statistically significant rhythm (p < 0.05)
-   - Z < 5.99: No significant rhythm detected
+   - Z(T) > 15.2: Statistically significant rhythm (Bonferroni-corrected)
+   - Z(T) < 15.2: No significant rhythm detected
+
+   The uncorrected threshold (5.99) is NOT used — testing 100 periods without
+   correction would yield ~5 false positives per analysis on average.
    ```
 
 4. **Dominant Period Identification**:
@@ -1450,17 +1466,16 @@ A periodogram is a statistical tool that identifies periodic (repeating) pattern
 - Resolution: 100 test points
 - Covers circadian (24h) and ultradian (<24h) rhythms
 
-**Y-Axis: Fischer Z-Score (dimensionless)**
+**Y-Axis: Chi-squared statistic Z(T) (labeled "Z-score" in plot)**
 - Range: Typically 0 to 30+
-- **Z > 5.99**: Statistically significant (p < 0.05)
-- **Z > 9.21**: Highly significant (p < 0.01)
-- **Z > 13.82**: Very highly significant (p < 0.001)
-- Higher Z-scores indicate stronger, more consistent rhythms
+- **Z(T) > 15.2**: Statistically significant after Bonferroni correction (α=0.05, m=100)
+- **Z(T) > 20**: Highly significant
+- Higher Z(T) values indicate stronger, more consistent rhythms
 
 **Visual Elements**:
-1. **Horizontal line**: Critical threshold (Z = 5.99 for α=0.05)
-2. **Red marker**: Dominant period (peak Z-score)
-3. **Green title**: ROI has significant rhythm (p < 0.05)
+1. **Horizontal dashed line**: Bonferroni-corrected threshold ≈ 15.2 (α=0.05, m=100)
+2. **Red marker**: Dominant period (peak Z(T))
+3. **Green title**: ROI has significant rhythm (above Bonferroni threshold)
 4. **Black title**: No significant rhythm detected
 
 #### Example Interpretations
@@ -1487,8 +1502,8 @@ Biological meaning:
 ```
 Periodogram shows:
 - Peak at 12.0 hours
-- Z-score = 10.2
-- Secondary peak at 24.0 hours (Z = 7.1)
+- Z(T) = 22.4  (above Bonferroni threshold ≈ 15.2 → significant)
+- Secondary peak at 24.0 hours (Z = 16.8, also significant)
 
 Interpretation:
 Organism shows twice-daily (ultradian) activity pattern. Could indicate:
@@ -1506,7 +1521,7 @@ Next steps:
 ```
 Periodogram shows:
 - Peak at 25.2 hours (not 24.0h)
-- Z-score = 12.4
+- Z(T) = 19.1  (above Bonferroni threshold ≈ 15.2 → significant)
 - No light/dark data available (constant darkness)
 
 Interpretation:
@@ -1523,8 +1538,8 @@ Biological meaning:
 ```
 Periodogram shows:
 - Flat profile, no clear peaks
-- Maximum Z-score = 4.2 (below 5.99 threshold)
-- p-value = 0.12
+- Maximum Z(T) = 8.5  (below Bonferroni threshold ≈ 15.2 → not significant)
+- per-test p-value = e^(-8.5/2) ≈ 0.014  (but does not survive correction)
 
 Interpretation:
 No statistically significant periodic pattern detected. Possible reasons:
@@ -1543,22 +1558,22 @@ Next steps:
 **Case 5: Multiple Significant Periods**
 ```
 Periodogram shows:
-- Peak 1 at 24.0h (Z = 15.3)
-- Peak 2 at 12.0h (Z = 8.7)
-- Peak 3 at 8.0h (Z = 6.2)
+- Peak 1 at 24.0h (Z = 32.5  → significant, above 15.2)
+- Peak 2 at 12.0h (Z = 18.7  → significant, above 15.2)
+- Peak 3 at 8.0h  (Z = 9.1   → NOT significant, below 15.2)
 
 Interpretation:
 Multiple rhythmic components detected:
-- 24h: Fundamental circadian rhythm
-- 12h: Second harmonic (ultradian)
-- 8h: Third harmonic or independent rhythm
+- 24h: Fundamental circadian rhythm (dominant)
+- 12h: Second harmonic (ultradian, also significant)
+- 8h: Sub-threshold; not counted as significant after Bonferroni correction
 
 This is common in complex behaviors with multiple regulatory mechanisms.
 
 Analysis approach:
 - Focus on dominant period (24h) for circadian studies
 - Secondary peaks may reflect meal timing, tidal cycles, or other factors
-- Use filtering to isolate specific frequency components if needed
+- Use FFT to see the full spectral picture alongside the Chi² periodogram
 ```
 
 #### Parameter Selection Guidelines
@@ -1605,7 +1620,7 @@ Target Period    Minimum Recording    Recommended
 
 **Problem 4: "Z-scores very low despite clear activity patterns"**
 - **Cause**: Activity patterns are not sinusoidal (e.g., square wave LD response)
-- **Solution**: Fischer Z tests for sinusoidal rhythms. Try autocorrelation analysis for non-sinusoidal patterns.
+- **Solution**: The Chi² periodogram tests for sinusoidal rhythms. Try the FFT power spectrum for non-sinusoidal patterns, or reduce bin size to preserve waveform detail.
 
 #### Technical Notes
 
@@ -1926,15 +1941,15 @@ Sleep Efficiency:  SE_i = TST_i / Total_Recording_Duration
 
 ### Rhythmic Pattern Analysis (Mathematics)
 
-#### Fisher Z-Transformation (Mathematical Details)
+#### Chi² Periodogram (Mathematical Details)
 
 **Core Principle:**
 
-Tests for sinusoidal rhythms by correlating data with cosine/sine waves at different periods.
+Tests for sinusoidal rhythms by correlating data with cosine/sine waves at m=100 candidate periods. Named after the χ²(df=2) null distribution of the test statistic.
 
-**For test period τ:**
+**For test period T:**
 ```
-Angular frequency:  ω = 2π / τ
+Angular frequency:  ω = 2π / T
 
 Reference waves:
   C(t) = cos(ω · t)
@@ -1944,44 +1959,47 @@ Correlations:
   r_cos = corr(y, C)
   r_sin = corr(y, S)
 
-Squared coherence:  R² = r_cos² + r_sin²
+Squared coherence:  R²(T) = r_cos² + r_sin²
 
-Fisher Z-score:  Z(τ) = n · R²
+Chi-squared statistic:  Z(T) = n · R²(T)
+  (labeled "Z-score" in plot output)
 ```
 
-**Statistical Significance:**
+**Statistical Significance (Bonferroni-corrected):**
 ```
-Under H₀ (no rhythm):  Z ~ χ²(df=2)
+Under H₀ (no rhythm):  Z(T) ~ χ²(df=2)
 
-Critical values:
-  α = 0.10:  critical_Z = 4.605
-  α = 0.05:  critical_Z = 5.991
-  α = 0.01:  critical_Z = 9.210
+With m = 100 tested periods, Bonferroni-corrected thresholds:
+  α = 0.10:  critical_Z ≈ 13.4   [χ²(1 - 0.10/100, df=2)]
+  α = 0.05:  critical_Z ≈ 15.2   [χ²(1 - 0.05/100, df=2)]
+  α = 0.01:  critical_Z ≈ 19.5   [χ²(1 - 0.01/100, df=2)]
 
-p-value:  p = 1 - CDF_χ²(Z_max, df=2)
+Per-test p-value:  p = e^(-Z/2)   (closed form for χ²(df=2))
+  NOTE: significance decision uses Bonferroni threshold on Z(T),
+        not the raw per-test p-value
 
-Significant if:  Z > critical_Z  (or p < α)
+Significant if:  Z(T) > critical_Z  (Bonferroni-corrected)
 ```
 
 **Dominant Period:**
 ```
-τ_dom = argmax_τ Z(τ)
+T_dom = argmax_T Z(T)
 
-Test range:  τ ∈ [τ_min, τ_max]  (100 evenly-spaced periods)
+Test range:  T ∈ [T_min, T_max]  (100 evenly-spaced periods)
 ```
 
 **Nyquist Constraint:**
 ```
-Maximum testable period:  τ_max ≤ recording_duration / 2
+Maximum testable period:  T_max ≤ recording_duration / 2
 
 Example: 24-hour recording → can test up to 12-hour periods
 ```
 
-**Interpretation:**
-- **Z > 20**: Very strong, highly consistent rhythm (p < 0.001)
-- **10 < Z < 20**: Strong rhythm (0.001 < p < 0.01)
-- **6 < Z < 10**: Significant rhythm (0.01 < p < 0.05)
-- **Z < 6**: No significant rhythm (p > 0.05)
+**Interpretation (Bonferroni-corrected, α=0.05):**
+- **Z(T) > 20**: Very strong, highly significant rhythm
+- **Z(T) 15-20**: Significant (above Bonferroni threshold ≈ 15.2)
+- **Z(T) 6-15**: Below threshold; not significant after correction
+- **Z(T) < 6**: No significant rhythm
 
 #### FFT Power Spectrum (Mathematical Details)
 
@@ -2020,17 +2038,17 @@ y_windowed[n] = y[n] · w[n]
 
 **Permutation Test for Significance:**
 
-Unlike Fisher Z (which has analytical chi-square distribution), FFT requires empirical significance testing.
+Unlike the Chi² periodogram (which has an analytical χ²(df=2) distribution), FFT requires empirical significance testing. The permutation test uses the **maximum** power over the full period range to correctly handle the multiple-frequencies problem.
 
 **Algorithm:**
 ```
-1. Compute observed power at dominant period:  P_obs
+1. Compute observed MAXIMUM power over the period range:  P_obs = max(P[T_min..T_max])
 
 2. Generate null distribution (n_perm = 1000 permutations):
      For i = 1 to n_perm:
        a. Randomly shuffle data:  y_perm = random_permutation(y)
        b. Apply same preprocessing (detrending, windowing)
-       c. Compute FFT:  P_perm[i] = power at target period
+       c. Compute FFT:  P_perm[i] = max power over same period range
 
 3. Calculate p-value:
      p = (count of P_perm[i] ≥ P_obs) / n_perm
@@ -2133,45 +2151,46 @@ Standard errors from covariance matrix:
 
 | Method | Best For | Significance Test | Period Detection |
 |--------|----------|-------------------|------------------|
-| **Fisher Z** | Testing for circadian rhythms | Chi-square (df=2) | Scans 100 test periods |
-| **FFT** | Exploratory analysis, harmonics | Permutation (1000x) | Full frequency spectrum |
-| **Cosinor** | Quantifying rhythm parameters | F-test (df=2, n-3) | Assumes known period |
+| **Chi² Periodogram** | Statistical period detection | Bonferroni-corrected χ²(df=2); threshold ≈ 15.2 | Scans 100 test periods |
+| **FFT** | Exploratory analysis, harmonics | Permutation (1000x, max-power test) | Full frequency spectrum |
+| **Cosinor** | Quantifying rhythm parameters | F(2, n−3) individual; Nelson F-test for population | Assumes known period |
 
 **When to Use Each:**
 
-1. **Fisher Z-Transformation:**
-   - ✓ Hypothesis testing (analytical p-values)
-   - ✓ Standard circadian analysis
+1. **Chi² Periodogram:**
+   - ✓ Hypothesis testing with analytical χ²(df=2) distribution
+   - ✓ Bonferroni correction for 100 periods built in (threshold ≈ 15.2)
+   - ✓ Standard circadian analysis (Sokolove & Bushell 1978)
    - ✓ Fast computation
-   - ✗ Limited frequency resolution (100 points)
+   - ✗ Limited to 100 test periods (use FFT for finer resolution)
 
 2. **FFT Power Spectrum:**
    - ✓ Discovering unexpected periods
    - ✓ Harmonic analysis
    - ✓ Continuous frequency spectrum
-   - ✗ Requires permutation test (slow)
-   - ✗ Sensitive to noise/leakage
+   - ✓ Permutation test correctly handles multiple-frequency problem
+   - ✗ Power in arbitrary units (not comparable across recordings)
 
 3. **Cosinor Analysis:**
    - ✓ MESOR, Amplitude, Acrophase estimation
    - ✓ Confidence intervals
-   - ✓ Standard F-test
+   - ✓ Nelson F-test for population-level rhythm
    - ✗ Requires known period
    - ✗ Cannot detect period
 
 **Integrated Workflow:**
 ```
-Step 1: Run Fisher Z and FFT
+Step 1: Run Chi² Periodogram and FFT
   → Detect if rhythm exists
-  → Estimate dominant period τ_dom
+  → Estimate dominant period T_dom
 
 Step 2: Verify concordance
-  → If Fisher and FFT agree → proceed
-  → If disagree → investigate data quality
+  → If Chi² and FFT agree → proceed
+  → If disagree → investigate data quality or extend recording
 
-Step 3: Run Cosinor with period = τ_dom
+Step 3: Run Cosinor with period = T_dom
   → Quantify MESOR, Amplitude, Acrophase
-  → Report with confidence intervals
+  → Report with confidence intervals and Nelson population F-test
 
 Step 4: Biological interpretation
   → Relate parameters to experimental conditions
@@ -2180,17 +2199,17 @@ Step 4: Biological interpretation
 **Expected Concordance:**
 ```
 Strong 24h rhythm:
-  Fisher Z: Peak at 24h, Z = 18.5, p < 0.001 ✓
-  FFT: Peak at 24h, p = 0.002 ✓
-  Cosinor (24h): A = 0.28, F = 45.3, p < 0.001 ✓
+  Chi² Periodogram: Peak at 24h, Z(T) = 32.5 > 15.2 → Bonferroni-significant ✓
+  FFT: Peak at 24h, permutation p = 0.001 ✓
+  Cosinor (24h): A = 0.28, F(2, n−3) = 45.3, p < 0.001 ✓
 
   → All methods agree: strong circadian rhythm
 ```
 
 **Key Differences:**
-- **Fisher Z**: Tests specific periods, analytical p-value (chi-square)
-- **FFT**: Tests all frequencies, empirical p-value (permutation)
-- **Cosinor**: Assumes period, parametric p-value (F-test)
+- **Chi² Periodogram**: Bonferroni-corrected threshold (≈ 15.2); analytical χ²(df=2) distribution
+- **FFT**: Tests all frequencies, max-power permutation p-value; power in arbitrary units
+- **Cosinor**: Assumes period, parametric F-test; Nelson F-test for population
 
 ---
 

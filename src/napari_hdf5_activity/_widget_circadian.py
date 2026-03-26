@@ -244,17 +244,31 @@ class CircadianMixin:
             )
 
     def _on_similarity_threshold_changed(self, value):
-        """Update label and redraw dendrogram when the cluster threshold slider moves."""
+        """Update label, re-cluster, and redraw when the threshold slider moves."""
         r = value / 100.0
         if hasattr(self, "similarity_threshold_label"):
             self.similarity_threshold_label.setText(f"{r:.2f}")
-        # Live-redraw only if similarity results are already shown
+        # Re-cluster and redraw if similarity results are already available
         if (
             hasattr(self, "fisher_analysis_results")
             and self.fisher_analysis_results
             and getattr(self, "current_fisher_method", -1) == 3
         ):
-            self._create_similarity_plot(self.fisher_analysis_results)
+            from ._circadian_similarity import (
+                hierarchical_clustering,
+                generate_similarity_summary,
+            )
+            results = self.fisher_analysis_results
+            clustering_results = hierarchical_clustering(
+                results["correlation_matrix"],
+                results["roi_ids"],
+                method="average",
+                threshold=1.0 - r,
+            )
+            results["clustering"] = clustering_results
+            summary = generate_similarity_summary(results, clustering_results, threshold=r)
+            self._log_message(summary)
+            self._create_similarity_plot(results)
 
     def _update_data_source_for_method(self, method_index):
         """Update data source dropdown based on selected analysis method.
@@ -620,6 +634,13 @@ class CircadianMixin:
                         f"  ✓ Loaded thresholds for {len(self.roi_baseline_means)} ROIs"
                     )
 
+                # Restore LED / lighting data
+                if "led_data" in core and core["led_data"]:
+                    self.led_data = core["led_data"]
+                    self._log_message(
+                        f"  ✓ Loaded LED data ({len(self.led_data.get('times', []))} points)"
+                    )
+
             # Restore extended analysis results
             if "extended_analysis" in loaded_data and loaded_data["extended_analysis"]:
                 extended = loaded_data["extended_analysis"]
@@ -869,6 +890,7 @@ class CircadianMixin:
                 "roi_statistics": getattr(self, "roi_statistics", {}),
                 "roi_summary": {},
                 "thresholds": {},
+                "led_data": getattr(self, "led_data", None) or {},
             }
 
             # Add threshold information (core values + extra stats from roi_statistics)
@@ -1169,7 +1191,14 @@ class CircadianMixin:
                 data_type_name = "Raw Intensity (continuous)"
             else:
                 # Normalized movement (min/max per ROI, comparable to literature)
-                if not hasattr(self, "merged_results") or not self.merged_results:
+                # Use raw (pre-MinMax) data so we sum actual pixel-change magnitudes,
+                # not already-normalized 0-1 values.
+                raw_data = (
+                    self.merged_results_raw
+                    if hasattr(self, "merged_results_raw") and self.merged_results_raw
+                    else getattr(self, "merged_results", {})
+                )
+                if not raw_data:
                     self.fisher_results_text.setPlainText(
                         "ERROR: No movement data available.\n\n"
                         "Please run the main analysis first."
@@ -1186,7 +1215,7 @@ class CircadianMixin:
                     else self.bin_size_seconds.value()
                 )
                 source_data = bin_and_normalize_movement(
-                    self.merged_results, norm_bin_size
+                    raw_data, norm_bin_size
                 )
                 data_type_name = "Normalized Movement (min/max, 0-1)"
 
@@ -1514,6 +1543,11 @@ class CircadianMixin:
                 self.fisher_results_text.setPlainText("No data available for actogram.")
                 return
 
+            # Store for re-render when toggles change
+            self._actogram_analysis_data = analysis_data
+            self._actogram_bin_size_s = bin_size_s
+            self._actogram_tau_hours = tau_hours
+
             tau_s = tau_hours * 3600.0
             show_lighting = (
                 hasattr(self, "actogram_chk_show_lighting")
@@ -1527,21 +1561,31 @@ class CircadianMixin:
             # ---- derive light-period rectangles from LED data ----
             light_periods = []  # list of (t_on_s, t_off_s) absolute seconds
             led_data = getattr(self, "led_data", None)
-            if show_lighting and led_data and isinstance(led_data, dict) and "times" in led_data and "white_powers" in led_data:
-                times_led = np.array(led_data["times"], dtype=float)
-                wpow = np.array(led_data["white_powers"], dtype=float)
-                light_on = wpow > 0
-                # Detect rising / falling edges
-                edges = np.diff(light_on.astype(int))
-                rising  = np.where(edges ==  1)[0] + 1
-                falling = np.where(edges == -1)[0] + 1
-                # Handle starts/ends in light
-                if light_on[0]:
-                    rising = np.concatenate([[0], rising])
-                if light_on[-1]:
-                    falling = np.concatenate([falling, [len(light_on)]])
-                for r, f in zip(rising, falling):
-                    light_periods.append((float(times_led[r]), float(times_led[min(f, len(times_led)-1)])))
+            if show_lighting:
+                if led_data and isinstance(led_data, dict) and "times" in led_data and "white_powers" in led_data:
+                    times_led = np.array(led_data["times"], dtype=float)
+                    wpow = np.array(led_data["white_powers"], dtype=float)
+                    light_on = wpow > 0
+                    # Detect rising / falling edges
+                    edges = np.diff(light_on.astype(int))
+                    rising  = np.where(edges ==  1)[0] + 1
+                    falling = np.where(edges == -1)[0] + 1
+                    # Handle starts/ends in light
+                    if light_on[0]:
+                        rising = np.concatenate([[0], rising])
+                    if light_on[-1]:
+                        falling = np.concatenate([falling, [len(light_on)]])
+                    for r, f in zip(rising, falling):
+                        light_periods.append((float(times_led[r]), float(times_led[min(f, len(times_led)-1)])))
+                else:
+                    # No white LED data — legacy 12h cycles: lights-on at t=0 (ZT 0)
+                    all_times = [t for data in analysis_data.values() if data for t, _ in data]
+                    total_s = (max(all_times) - min(all_times)) if all_times else 0.0
+                    n_days = int(total_s / 86400.0) + 2
+                    for d in range(n_days):
+                        t_on_s  = d * 86400.0
+                        t_off_s = t_on_s + 43200.0  # 12 h light
+                        light_periods.append((t_on_s, t_off_s))
 
             # ---- integer ROIs only ----
             roi_ids = sorted(k for k in analysis_data.keys() if isinstance(k, int))
@@ -1561,7 +1605,6 @@ class CircadianMixin:
             from matplotlib.figure import Figure as _Figure
             fig = _Figure(figsize=(fig_w, fig_h), layout="constrained")
             axes_grid = fig.subplots(n_rows_fig, n_cols, squeeze=False)
-            fig.suptitle(f"Double-Plotted Actogram  (τ = {tau_hours:.1f} h)", fontsize=13, fontweight="bold")
 
             summary_lines = [
                 "ACTOGRAM",
@@ -1710,6 +1753,15 @@ class CircadianMixin:
             return
         self._open_actogram_window(fig, tau)
 
+    def _rerender_actogram(self):
+        """Re-render actogram when ZT or lighting toggle changes."""
+        data = getattr(self, "_actogram_analysis_data", None)
+        if data is None:
+            return
+        bin_size = getattr(self, "_actogram_bin_size_s", 60.0)
+        tau = getattr(self, "_actogram_tau_hours", 24.0)
+        self._run_actogram(data, bin_size, tau)
+
     def _open_actogram_window(self, fig, tau_hours: float):
         """Open an actogram figure in a resizable popup dialog."""
         try:
@@ -1728,8 +1780,10 @@ class CircadianMixin:
             layout = QVBoxLayout()
             dialog.setLayout(layout)
 
+            from qtpy.QtWidgets import QSizePolicy as _SP
             canvas = FigureCanvas(fig)
-            canvas.setMinimumSize(600, 400)
+            canvas.setSizePolicy(_SP.Expanding, _SP.Expanding)
+            canvas.mpl_connect("resize_event", lambda _evt: canvas.draw_idle())
 
             toolbar = NavigationToolbar(canvas, dialog)
             toolbar.setStyleSheet(
@@ -1740,13 +1794,16 @@ class CircadianMixin:
                 "QToolButton:checked { background-color: #c8ddf5; border-color: #4a90d9; }"
             )
             layout.addWidget(toolbar)
-            layout.addWidget(canvas)
+            layout.addWidget(canvas, stretch=1)
 
             btn_layout = QHBoxLayout()
             btn_layout.addStretch()
             btn_save = QPushButton("Save Plot...")
             btn_save.clicked.connect(lambda: self._save_plot_from_dialog(canvas))
             btn_layout.addWidget(btn_save)
+            btn_save_individual = QPushButton("Save ROIs individually...")
+            btn_save_individual.clicked.connect(lambda: self._save_actogram_rois_individually(tau_hours))
+            btn_layout.addWidget(btn_save_individual)
             btn_close = QPushButton("Close")
             btn_close.clicked.connect(dialog.close)
             btn_layout.addWidget(btn_close)
@@ -1756,6 +1813,114 @@ class CircadianMixin:
 
         except Exception as e:
             self._log_message(f"⚠️ Could not open actogram window: {e}")
+
+    def _save_actogram_rois_individually(self, tau_hours: float):
+        """Save one PNG per ROI from the stored actogram data."""
+        import numpy as np
+        import matplotlib.patches as mpatches
+        from matplotlib.figure import Figure as _Figure
+        from qtpy.QtWidgets import QFileDialog
+
+        analysis_data = getattr(self, "_actogram_analysis_data", None)
+        if not analysis_data:
+            self._log_message("⚠️ No actogram data — run analysis first.")
+            return
+
+        out_dir = QFileDialog.getExistingDirectory(self, "Select output folder for individual actograms")
+        if not out_dir:
+            return
+
+        show_lighting = (
+            hasattr(self, "actogram_chk_show_lighting")
+            and self.actogram_chk_show_lighting.isChecked()
+        )
+        zt_axis = (
+            hasattr(self, "actogram_chk_zt_axis")
+            and self.actogram_chk_zt_axis.isChecked()
+        )
+
+        led_data = getattr(self, "led_data", None)
+        light_periods = []
+        if show_lighting and led_data and "times" in led_data and "white_powers" in led_data:
+            times_led = np.array(led_data["times"], dtype=float)
+            wpow = np.array(led_data["white_powers"], dtype=float)
+            light_on = wpow > 0
+            edges = np.diff(light_on.astype(int))
+            rising = np.where(edges == 1)[0] + 1
+            falling = np.where(edges == -1)[0] + 1
+            if light_on[0]:
+                rising = np.concatenate([[0], rising])
+            if light_on[-1]:
+                falling = np.concatenate([falling, [len(light_on)]])
+            for r, f in zip(rising, falling):
+                light_periods.append((float(times_led[r]), float(times_led[min(f, len(times_led) - 1)])))
+
+        tau_s = tau_hours * 3600.0
+        roi_colors = getattr(self, "roi_colors", {})
+        base_name = os.path.splitext(os.path.basename(getattr(self, "file_path", "actogram") or "actogram"))[0]
+
+        saved = 0
+        for roi_id, data in analysis_data.items():
+            if not isinstance(roi_id, int) or not data:
+                continue
+
+            times_s = np.array([t for t, _ in data], dtype=float)
+            values = np.array([v for _, v in data], dtype=float)
+            vmax = values.max()
+            values_norm = values / vmax if vmax > 0 else values
+
+            t_start = times_s[0]
+            t_end = times_s[-1]
+            n_day_rows = max(1, int(np.ceil((t_end - t_start) / tau_s)))
+            c = roi_colors.get(roi_id, "#2c3e50")
+
+            fig = _Figure(figsize=(6, max(3, n_day_rows * 0.5)), layout="constrained")
+            ax = fig.add_subplot(111)
+
+            for r in range(n_day_rows):
+                row_start_s = t_start + r * tau_s
+                row_end_s = row_start_s + 2.0 * tau_s
+                y_bottom = n_day_rows - r - 1
+
+                if light_periods:
+                    ax.add_patch(mpatches.Rectangle(
+                        (0.0, y_bottom), 2.0 * tau_hours, 1.0,
+                        color="gray", alpha=0.2, zorder=0, linewidth=0,
+                    ))
+                    for t_on, t_off in light_periods:
+                        x0 = max((t_on - row_start_s) / 3600.0, 0.0)
+                        x1 = min((t_off - row_start_s) / 3600.0, 2.0 * tau_hours)
+                        if x1 > x0:
+                            ax.add_patch(mpatches.Rectangle(
+                                (x0, y_bottom), x1 - x0, 1.0,
+                                color="yellow", alpha=0.2, zorder=0, linewidth=0,
+                            ))
+
+                mask = (times_s >= row_start_s) & (times_s < row_end_s)
+                if mask.any():
+                    x_vals = (times_s[mask] - row_start_s) / 3600.0
+                    y_vals = y_bottom + values_norm[mask]
+                    ax.fill_between(x_vals, y_bottom, y_vals, color=c, linewidth=0, alpha=0.85, zorder=2)
+                ax.axhline(y_bottom, color="#cccccc", lw=0.4, zorder=1)
+
+            ax.axvline(tau_hours, color="#888888", lw=0.8, ls="--", zorder=3)
+            ax.set_xlim(0, 2.0 * tau_hours)
+            ax.set_ylim(0, n_day_rows)
+            tick_positions = [n_day_rows - r - 0.5 for r in range(n_day_rows)]
+            ax.set_yticks(tick_positions)
+            ax.set_yticklabels([f"Day {r + 1}" for r in range(n_day_rows)], fontsize=7)
+            x_ticks = np.arange(0, 2.0 * tau_hours + 0.01, max(tau_hours / 4, 1.0))
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels([f"{v:.0f}" for v in x_ticks], fontsize=7)
+            ax.set_xlabel("ZT (h)" if zt_axis else "Time (h)", fontsize=8)
+            ax.set_title(f"ROI {roi_id}", fontsize=9, fontweight="bold")
+            ax.tick_params(axis="both", labelsize=7)
+
+            out_path = os.path.join(out_dir, f"{base_name}_actogram_ROI{roi_id}.png")
+            fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+            saved += 1
+
+        self._log_message(f"✅ Saved {saved} individual actogram(s) to {out_dir}")
 
     def _run_fisher_method(
         self,
@@ -2089,44 +2254,54 @@ class CircadianMixin:
             population_cosinor,
         )
 
-        # Prepare test periods - test common periods in the specified range
-        test_periods = []
-        if min_period <= 12 and max_period >= 12:
-            test_periods.append(12.0)  # 12h ultradian
-        if min_period <= 24 and max_period >= 24:
-            test_periods.append(24.0)  # 24h circadian
-        if min_period <= 30 and max_period >= 30:
-            test_periods.append(30.0)  # 30h infradian
+        # Generate a fine-grained grid of test periods so no real rhythm is missed.
+        # Use up to ~20 evenly-spaced steps across the range, minimum 1h resolution.
+        range_h = max_period - min_period
+        step = max(1.0, round(range_h / 20, 1))
+        test_periods_set = set()
 
-        # Also add min, max, and midpoint
-        midpoint = (min_period + max_period) / 2
-        for p in [min_period, midpoint, max_period]:
-            if p not in test_periods:
-                test_periods.append(p)
+        # Biological anchor points within range
+        for p in [12.0, 24.0, 30.0]:
+            if min_period <= p <= max_period:
+                test_periods_set.add(p)
 
-        test_periods = sorted(test_periods)
+        # Regular grid — catches periods like 20h, 21h, 27h etc.
+        p = min_period
+        while p <= max_period + 1e-6:
+            test_periods_set.add(round(p, 1))
+            p += step
+        test_periods_set.add(round(max_period, 1))  # ensure boundary included
+
+        test_periods = sorted(test_periods_set)
 
         # Use provided data or fall back to fraction_data
         data_to_analyze = (
             data if data is not None else self.fraction_data
         )
 
-        # Compute recording duration for cycle-count warnings / plot annotation
+        # Compute recording duration for cycle-count warnings / plot annotation.
+        # Add one bin to max-min span: max(t)-min(t) misses the last bin's duration.
+        bin_size_h = bin_size / 3600.0
         recording_duration_h = 0.0
         for _dl in data_to_analyze.values():
             if _dl:
                 _ts = [t for t, _ in _dl]
                 recording_duration_h = max(
-                    recording_duration_h, (max(_ts) - min(_ts)) / 3600.0
+                    recording_duration_h, (max(_ts) - min(_ts)) / 3600.0 + bin_size_h
                 )
 
         # Warn for every test period that yields < 2 complete cycles
         for _tp in test_periods:
             _n_cyc = recording_duration_h / _tp if _tp > 0 else 0
-            if _n_cyc < 2.0:
+            if _n_cyc < 1.5:
                 self._log_message(
                     f"⚠️ Cosinor: period {_tp:.1f} h → only {_n_cyc:.1f} complete cycle(s) "
                     f"in {recording_duration_h:.1f} h recording — result unreliable (need ≥ 2 cycles)"
+                )
+            elif _n_cyc < 2.0:
+                self._log_message(
+                    f"ℹ️ Cosinor: period {_tp:.1f} h → {_n_cyc:.2f} cycles "
+                    f"in {recording_duration_h:.1f} h recording — borderline (ideally ≥ 2 cycles)"
                 )
 
         # Analyze each ROI with cosinor
@@ -2359,12 +2534,16 @@ class CircadianMixin:
                     f"Population Amplitude: {pop_result.get('population_amplitude', 0):.4f}",
                     f"Population Peak Time (circular mean): {pop_result.get('population_peak_time', 0):.2f} h from start",
                     f"Test period: {pop_result.get('period', 0):.2f} hours",
+                    f"F-test (H₀: no population rhythm): F(2,{2*(pop_result.get('n_individuals',2)-1)}) = "
+                    + (f"{pop_result['f_statistic']:.3f}" if pop_result.get('f_statistic') is not None else "n/a"),
                     f"p-value: {_fmt_p(pop_result.get('p_value', 1))}",
                     f"Significant rhythm: {'YES' if pop_result.get('significant', False) else 'NO'}",
                     "",
                     f"Individual ROIs analyzed: {pop_result.get('n_individuals', 0)}",
-                    f"ROIs with significant rhythm: {pop_result.get('n_significant', 0)} "
+                    f"ROIs with significant rhythm at {pop_result.get('period', 0):.1f}h: "
+                    f"{pop_result.get('n_significant', 0)} "
                     f"({pop_result.get('proportion_significant', 0)*100:.1f}%)",
+                    f"  (ROIs significant at their own best-fit period may differ — see individual results above)",
                     "",
                 ]
             )
@@ -2428,14 +2607,23 @@ class CircadianMixin:
             significance_level=significance,
         )
 
+        # Use the GUI slider threshold so the text summary matches the dendrogram
+        r_threshold = (
+            self.similarity_threshold_slider.value() / 100.0
+            if hasattr(self, "similarity_threshold_slider")
+            else 0.5
+        )
         clustering_results = hierarchical_clustering(
             correlation_results["correlation_matrix"],
             correlation_results["roi_ids"],
             method="average",
+            threshold=1.0 - r_threshold,
         )
 
         correlation_results["clustering"] = clustering_results
-        summary = generate_similarity_summary(correlation_results, clustering_results)
+        summary = generate_similarity_summary(
+            correlation_results, clustering_results, threshold=r_threshold
+        )
 
         return correlation_results, summary
 
@@ -2634,20 +2822,6 @@ class CircadianMixin:
                         cap_note = f"  (max period capped at {_actual_max:.1f}h = recording / 2)"
                     break
 
-            if has_sleep:
-                fig.suptitle(
-                    f"FFT Power Spectrum  —  Data source: {data_source}{cap_note}{self._get_recording_start_str()}",
-                    fontsize=11,
-                    fontweight="bold",
-                    y=0.99,
-                )
-            else:
-                fig.suptitle(
-                    f"FFT Power Spectrum  —  Activity from {data_source}{cap_note}{self._get_recording_start_str()}",
-                    fontsize=11,
-                    fontweight="bold",
-                    y=0.99,
-                )
 
             # Helper function to plot a section
             def plot_section(results_dict, start_row, section_label):
@@ -2792,11 +2966,6 @@ class CircadianMixin:
                         mean_pw = interp.mean(axis=0)
                         sem_pw = interp.std(axis=0) / np.sqrt(len(interp))
 
-                        ax_pop.plot(grid, mean_pw, color="black", linewidth=2,
-                                    label=f"Mean (n={len(interp)})")
-                        ax_pop.fill_between(grid, mean_pw - sem_pw, mean_pw + sem_pw,
-                                            alpha=0.25, color="gray", label="±SEM")
-
                         sig_periods = [
                             res.get("dominant_period")
                             for res in roi_only_results.values()
@@ -2806,29 +2975,20 @@ class CircadianMixin:
                             hasattr(self, "population_peak_mode")
                             and self.population_peak_mode.currentText() == "Mean"
                         )
-                        if use_mean_peak:
-                            peak_p = float(grid[np.argmax(mean_pw)])
-                            ax_pop.axvline(peak_p, color="red", linestyle="--", linewidth=1.5,
-                                           label=f"Mean peak: {peak_p:.1f}h")
-                        elif sig_periods:
-                            med_p = float(np.median(sig_periods))
-                            ax_pop.axvline(med_p, color="red", linestyle="--", linewidth=1.5,
-                                           label=f"Median peak: {med_p:.1f}h")
-                        if sig_periods:
-                            n_sig = len(sig_periods)
-                            ax_pop.text(0.97, 0.95,
-                                        f"Significant: {n_sig}/{len(all_p)}",
-                                        transform=ax_pop.transAxes, fontsize=8,
-                                        va="top", ha="right",
-                                        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
 
-                        ax_pop.set_xlabel("Period (h)", fontsize=9)
-                        ax_pop.set_ylabel("Power (a.u.)", fontsize=9)
-                        ax_pop.set_title("Population Mean Power Spectrum", fontsize=10,
-                                         fontweight="bold")
-                        ax_pop.legend(fontsize=8, loc="upper left")
-                        ax_pop.grid(True, alpha=0.3)
-                        ax_pop.tick_params(axis="both", labelsize=8)
+                        # Store population data so it can be saved as a standalone figure
+                        self._pop_spectrum_data = {
+                            "grid": grid,
+                            "mean_pw": mean_pw,
+                            "sem_pw": sem_pw,
+                            "n": len(interp),
+                            "sig_periods": sig_periods,
+                            "use_mean_peak": use_mean_peak,
+                        }
+
+                        self._draw_population_panel(
+                            ax_pop, self._pop_spectrum_data, len(all_p)
+                        )
                 else:
                     ax_pop.text(0.5, 0.5, "Not enough valid ROIs for population mean",
                                 ha="center", va="center", transform=ax_pop.transAxes)
@@ -2927,34 +3087,11 @@ class CircadianMixin:
                 ax_pop = None
 
             data_type_name = getattr(self, "fisher_data_type_name", "Fraction Movement (0-1)")
-            fig.suptitle(
-                f"Cosinor Analysis  —  {data_type_name}{self._get_recording_start_str()}",
-                fontsize=13,
-                fontweight="bold",
-                y=0.99,
-            )
 
             # Recording duration (hours) — needed for figure-level warning and per-ROI annotation
             _recording_dur_h = cosinor_results.get("recording_duration_h", 0.0)
 
-            # Figure-level warning if recording < 2× any test period
-            test_periods_plot = cosinor_results.get("test_periods", [])
-            short_periods = [
-                tp for tp in test_periods_plot
-                if _recording_dur_h > 0 and _recording_dur_h / tp < 2.0
-            ]
-            if short_periods:
-                warn_txt = (
-                    f"⚠  Recording ({_recording_dur_h:.1f} h) < 2× period — "
-                    f"result(s) unreliable for: "
-                    + ", ".join(f"{p:.1f} h" for p in short_periods)
-                )
-                fig.text(
-                    0.5, 0.005, warn_txt,
-                    ha="center", va="bottom", fontsize=8,
-                    color="#B71C1C",
-                    bbox=dict(boxstyle="round", fc="#FFEBEE", ec="#EF9A9A", alpha=0.9),
-                )
+            # Cycle-count warnings go to the log only — not on the plot.
 
             # Use the data that was actually analysed (stored by run_fisher_analysis)
             activity_data_dict = getattr(self, "fisher_analysis_data", None)
@@ -3000,7 +3137,20 @@ class CircadianMixin:
                     if len(starts) > 0 and times_h[starts[0]] > 0:
                         ax.axvspan(0, times_h[starts[0]], alpha=0.15, color="gray",
                                    zorder=0)
-                # else: no LED data → no overlay (AVI or other sources without LED metadata)
+                else:
+                    # No white LED data — fall back to legacy 12h cycles (lights-on at ZT 0)
+                    day = 0
+                    t = 0.0
+                    while t < t_max:
+                        light_end = t + 12.0
+                        dark_end = t + 24.0
+                        ax.axvspan(t, min(light_end, t_max), alpha=0.2, color="yellow",
+                                   zorder=0, label="Light (12h cycle)" if day == 0 and add_legend else "")
+                        if light_end < t_max:
+                            ax.axvspan(light_end, min(dark_end, t_max), alpha=0.15, color="gray",
+                                       zorder=0, label="Dark (12h cycle)" if day == 0 and add_legend else "")
+                        t += 24.0
+                        day += 1
 
             # Helper function to plot ROI results
             def plot_section(
@@ -3251,8 +3401,6 @@ class CircadianMixin:
                     bbox=dict(boxstyle="round", facecolor="wheat",
                               alpha=0.5, pad=0.5),
                 )
-                ax_pop.set_title("Population Mean", fontsize=10,
-                                 fontweight="bold", loc="left")
                 ax_pop.set_xlabel("Time (h)", fontsize=9)
                 ax_pop.set_ylabel(activity_y_label, fontsize=9)
                 _overlay_lighting(ax_pop, t_max, add_legend=False)
@@ -3311,24 +3459,29 @@ class CircadianMixin:
             data_source = (
                 "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
             )
-            fig.suptitle(
-                f"ROI Similarity Analysis\n(Activity from {data_source})",
-                fontsize=14,
-                fontweight="bold",
-            )
 
             # Correlation heatmap
             ax1 = fig.add_subplot(1, 2, 1)
             corr_matrix = similarity_results["correlation_matrix"]
             roi_ids = similarity_results["roi_ids"]
 
-            im = ax1.imshow(corr_matrix, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto")
+            im = ax1.imshow(corr_matrix, cmap="viridis", vmin=-1, vmax=1, aspect="auto")
             ax1.set_xticks(range(len(roi_ids)))
             ax1.set_yticks(range(len(roi_ids)))
-            ax1.set_xticklabels(roi_ids, rotation=45)
-            ax1.set_yticklabels(roi_ids)
-            ax1.set_title("ROI Correlation Matrix")
+            ax1.set_xticklabels([f"ROI {r}" for r in roi_ids], rotation=45)
+            ax1.set_yticklabels([f"ROI {r}" for r in roi_ids])
+
+            # Annotate each cell with its value
+            for i in range(len(roi_ids)):
+                for j in range(len(roi_ids)):
+                    val = corr_matrix[i, j]
+                    color = "white" if val < 0.3 else "black"
+                    ax1.text(j, i, f"{val:.2f}", ha="center", va="center",
+                             fontsize=8, color=color)
+
             fig.colorbar(im, ax=ax1, label="Correlation")
+            ax1.set_xlabel("ROI")
+            ax1.set_ylabel("ROI")
 
             # Dendrogram
             ax2 = fig.add_subplot(1, 2, 2)
@@ -3353,7 +3506,6 @@ class CircadianMixin:
                 )
                 ax2.tick_params(axis="x", labelsize=9)
 
-                ax2.set_title("Hierarchical Clustering", fontsize=12, fontweight="bold")
                 ax2.set_xlabel("ROI", fontsize=11)
                 ax2.set_ylabel("Distance (1 - correlation)", fontsize=11)
                 ax2.tick_params(axis="both", labelsize=10)
@@ -3424,15 +3576,30 @@ class CircadianMixin:
             coherence_matrix = coherence_results["coherence_matrix"]
             roi_ids = coherence_results["roi_ids"]
 
-            im = ax.imshow(coherence_matrix, cmap="hot", vmin=0, vmax=1, aspect="auto")
+            # Use viridis: dark purple=0, yellow=1.0 — diagonal (1.0) is clearly visible
+            im = ax.imshow(coherence_matrix, cmap="viridis", vmin=0, vmax=1, aspect="auto")
             ax.set_xticks(range(len(roi_ids)))
             ax.set_yticks(range(len(roi_ids)))
-            ax.set_xticklabels(roi_ids, rotation=45)
-            ax.set_yticklabels(roi_ids)
-            ax.set_title(
-                f"ROI Coherence at ~{coherence_results['target_period_hours']:.0f}h Period\n(Activity from {data_source})"
-            )
-            fig.colorbar(im, ax=ax, label="Coherence")
+            ax.set_xticklabels([f"ROI {r}" for r in roi_ids], rotation=45)
+            ax.set_yticklabels([f"ROI {r}" for r in roi_ids])
+
+            # Annotate each cell with its value
+            for i in range(len(roi_ids)):
+                for j in range(len(roi_ids)):
+                    val = coherence_matrix[i, j]
+                    color = "white" if val < 0.6 else "black"
+                    ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                            fontsize=8, color=color)
+
+            target_period = coherence_results.get("target_period_hours", 24.0)
+            critical = coherence_results.get("critical_coherence", None)
+            cbar_label = f"Coherence ({target_period:.0f}h, {data_source})"
+            if critical is not None:
+                cbar_label += f"  |  threshold: {critical:.3f}"
+            fig.colorbar(im, ax=ax, label=cbar_label)
+
+            ax.set_xlabel("ROI")
+            ax.set_ylabel("ROI")
 
             fig.tight_layout()
             self.fisher_plot_figure = fig
@@ -3552,12 +3719,6 @@ class CircadianMixin:
             data_source_index = self.data_source_combo.currentIndex()
             data_source = (
                 "Fraction Movement" if data_source_index == 0 else "Raw Intensity"
-            )
-            ax.set_title(
-                f"ROI Activity Phases\n(Activity from {data_source})",
-                fontsize=14,
-                fontweight="bold",
-                pad=20,
             )
             ax.legend(loc="upper left", bbox_to_anchor=(1.1, 1.0), fontsize=8)
 
@@ -4899,20 +5060,6 @@ class CircadianMixin:
                     cap_note = f"  (max period capped at {_actual:.1f}h = recording / 2)"
                     break
 
-            if has_sleep:
-                fig.suptitle(
-                    f"Chi² Periodogram  —  {data_source}{cap_note}{self._get_recording_start_str()}",
-                    fontsize=11,
-                    fontweight="bold",
-                    y=0.99,
-                )
-            else:
-                fig.suptitle(
-                    f"Chi² Periodogram  —  Activity from {data_source}{cap_note}{self._get_recording_start_str()}",
-                    fontsize=11,
-                    fontweight="bold",
-                    y=0.99,
-                )
 
             # Helper function to plot a section (Activity or Sleep)
             def plot_section(results_dict, start_row, section_label):
@@ -5107,7 +5254,6 @@ class CircadianMixin:
 
                         ax.set_xlabel("Period (h)", fontsize=9)
                         ax.set_ylabel("Z-score", fontsize=9)
-                        ax.set_title(title, fontsize=10, fontweight="bold")
                         ax.legend(fontsize=8, loc="upper left")
                         ax.grid(True, alpha=0.3)
                         ax.tick_params(axis="both", labelsize=8)
@@ -5172,7 +5318,7 @@ class CircadianMixin:
                 QVBoxLayout,
                 QHBoxLayout,
                 QPushButton,
-                QScrollArea,
+                QSizePolicy,
             )
             from matplotlib.backends.backend_qt5agg import (
                 FigureCanvasQTAgg as FigureCanvas,
@@ -5184,14 +5330,21 @@ class CircadianMixin:
             # Create dialog window
             dialog = QDialog(self)
             dialog.setWindowTitle("Rhythmic Pattern Analysis - Plot View")
-            dialog.resize(1400, 900)  # Larger default size
+            dialog.resize(1400, 900)
 
             layout = QVBoxLayout()
+            layout.setContentsMargins(4, 4, 4, 4)
             dialog.setLayout(layout)
 
-            # Create matplotlib canvas
-            canvas = FigureCanvas(self.fisher_plot_figure)
-            canvas.setMinimumSize(800, 600)
+            # Canvas placed directly in the layout — no QScrollArea.
+            # QScrollArea + setWidgetResizable conflicts with matplotlib's own
+            # size management. Direct placement + Expanding policy lets Qt resize
+            # the canvas and matplotlib redraws automatically on each resize event.
+            fig = self.fisher_plot_figure
+            canvas = FigureCanvas(fig)
+            canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Trigger a proper redraw whenever the canvas is resized by Qt
+            canvas.mpl_connect("resize_event", lambda _evt: canvas.draw_idle())
 
             # Add navigation toolbar for zoom/pan
             toolbar = NavigationToolbar(canvas, dialog)
@@ -5203,12 +5356,7 @@ class CircadianMixin:
                 "QToolButton:checked { background-color: #c8ddf5; border-color: #4a90d9; }"
             )
             layout.addWidget(toolbar)
-
-            # Add canvas in scroll area for very large plots
-            scroll_area = QScrollArea()
-            scroll_area.setWidget(canvas)
-            scroll_area.setWidgetResizable(True)
-            layout.addWidget(scroll_area)
+            layout.addWidget(canvas, stretch=1)
 
             # Add toggle buttons + close button
             button_layout = QHBoxLayout()
@@ -5246,7 +5394,33 @@ class CircadianMixin:
             btn_toggle_legend.clicked.connect(toggle_legend)
             button_layout.addWidget(btn_toggle_legend)
 
+            # Stats box toggle — hides all ax.text() objects that have a bbox patch
+            # (these are the MESOR/Amplitude/R²/p annotation boxes; titles and
+            # axis labels are in ax.title / ax.xaxis / ax.yaxis, not ax.texts)
+            btn_toggle_stats = QPushButton("Hide Stats")
+            btn_toggle_stats._stats_visible = True
+
+            def toggle_stats():
+                btn_toggle_stats._stats_visible = not btn_toggle_stats._stats_visible
+                visible = btn_toggle_stats._stats_visible
+                for ax in self.fisher_plot_figure.get_axes():
+                    for txt in ax.texts:
+                        if txt.get_bbox_patch() is not None:
+                            txt.set_visible(visible)
+                btn_toggle_stats.setText("Hide Stats" if visible else "Show Stats")
+                canvas.draw_idle()
+
+            btn_toggle_stats.clicked.connect(toggle_stats)
+            button_layout.addWidget(btn_toggle_stats)
+
             button_layout.addStretch()
+
+            btn_save_panels = QPushButton("Save panels individually...")
+            btn_save_panels.setToolTip(
+                "Export each ROI subplot, population mean, and other panels as separate PNG files"
+            )
+            btn_save_panels.clicked.connect(lambda: self._export_panels_individually(canvas))
+            button_layout.addWidget(btn_save_panels)
 
             btn_save = QPushButton("Save Plot...")
             btn_save.clicked.connect(lambda: self._save_plot_from_dialog(canvas))
@@ -5265,6 +5439,109 @@ class CircadianMixin:
             self._log_message(f"⚠️ Could not open plot window: {e}")
             import traceback
 
+            traceback.print_exc()
+
+    def _export_panels_individually(self, canvas):
+        """Export each visible subplot panel of the Extended Analysis figure as a separate PNG."""
+        try:
+            from qtpy.QtWidgets import QFileDialog
+            import os
+            from matplotlib.transforms import Bbox
+            from ._plot import apply_publication_style, JOURNAL_DOUBLE_COL_IN
+
+            out_dir = QFileDialog.getExistingDirectory(
+                self, "Select folder for individual panel exports"
+            )
+            if not out_dir:
+                return
+
+            fig = canvas.figure
+
+            # Derive a base name from the current method
+            method_names = ["fisher", "fft", "cosinor", "similarity", "coherence", "phase"]
+            method_idx = getattr(self, "current_fisher_method", 0)
+            method_tag = (
+                method_names[method_idx]
+                if method_idx < len(method_names)
+                else "extended"
+            )
+            try:
+                file_base = os.path.splitext(os.path.basename(self.file_path))[0]
+            except Exception:
+                file_base = "analysis"
+            prefix = f"{file_base}_{method_tag}"
+
+            # Force a render so get_tightbbox() works
+            apply_publication_style()
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+
+            pad_in = 0.18  # extra padding around each panel (inches)
+            saved = 0
+            pop_count = 0
+
+            for ax in fig.get_axes():
+                # Skip invisible or turned-off axes
+                if not ax.get_visible():
+                    continue
+                try:
+                    artists = ax.get_children()
+                    # axis("off") sets spines invisible — skip empty axes
+                    if not ax.axison:
+                        continue
+                except Exception:
+                    continue
+
+                # Determine a meaningful panel name
+                title = ax.get_title().strip()
+                if title.startswith("ROI "):
+                    # "ROI 2 - Activity"  →  "ROI2_Activity"
+                    panel_name = title.replace(" - ", "_").replace(" ", "")
+                elif hasattr(ax, "name") and ax.name == "polar":
+                    panel_name = "phase_clustering"
+                else:
+                    # Identify by ylabel content
+                    ylabel = ax.get_ylabel().strip()
+                    if "Distance" in ylabel or "correlation" in ylabel.lower():
+                        panel_name = "dendrogram"
+                    elif "Coherence" in ylabel or "coherence" in ylabel.lower():
+                        panel_name = "coherence_matrix"
+                    elif ylabel == "" and not title:
+                        # Likely correlation/heatmap matrix (no labels)
+                        panel_name = "correlation_matrix"
+                    else:
+                        pop_count += 1
+                        panel_name = f"population_mean_{pop_count}" if pop_count > 1 else "population_mean"
+
+                # Get tight bounding box and add padding
+                try:
+                    tight_bb = ax.get_tightbbox(renderer)
+                    if tight_bb is None:
+                        continue
+                    extent = tight_bb.transformed(fig.dpi_scale_trans.inverted())
+                    padded = Bbox([
+                        [extent.x0 - pad_in, extent.y0 - pad_in],
+                        [extent.x1 + pad_in, extent.y1 + pad_in],
+                    ])
+                except Exception:
+                    continue
+
+                out_path = os.path.join(out_dir, f"{prefix}_{panel_name}.png")
+                fig.savefig(
+                    out_path, dpi=300, bbox_inches=padded,
+                    facecolor="white", bbox_extra_artists=[]
+                )
+                saved += 1
+                self._log_message(f"  Saved: {os.path.basename(out_path)}")
+
+            # Restore screen rendering after publication style was applied
+            fig.canvas.draw_idle()
+
+            self._log_message(f"✅ Exported {saved} panel(s) to {out_dir}")
+
+        except Exception as e:
+            self._log_message(f"⚠️ Export panels failed: {e}")
+            import traceback
             traceback.print_exc()
 
     def _save_plot_from_dialog(self, canvas):
@@ -5299,19 +5576,23 @@ class CircadianMixin:
             )
 
             if file_path:
-                # Determine format from extension
+                from ._plot import apply_publication_style, JOURNAL_DOUBLE_COL_IN
+                # Apply publication style and resize to journal dimensions for export
+                apply_publication_style()
+                fig = canvas.figure
+                orig_w, orig_h = fig.get_size_inches()
+                orig_dpi = fig.get_dpi()
+                aspect = orig_h / orig_w if orig_w > 0 else 1.0
+                fig.set_size_inches(JOURNAL_DOUBLE_COL_IN, JOURNAL_DOUBLE_COL_IN * aspect)
+                fig.set_dpi(300)
                 ext = os.path.splitext(file_path)[1].lower()
-                if ext == ".pdf":
-                    canvas.figure.savefig(
-                        file_path, format="pdf", dpi=300, bbox_inches="tight"
-                    )
-                elif ext == ".svg":
-                    canvas.figure.savefig(file_path, format="svg", bbox_inches="tight")
-                else:
-                    canvas.figure.savefig(
-                        file_path, format="png", dpi=300, bbox_inches="tight"
-                    )
-
+                fmt = {"pdf": "pdf", ".svg": "svg"}.get(ext, "png")
+                fig.savefig(file_path, format=fmt, dpi=300, bbox_inches="tight",
+                            facecolor="white")
+                # Restore screen dimensions so popup still looks good
+                fig.set_size_inches(orig_w, orig_h)
+                fig.set_dpi(orig_dpi)
+                canvas.draw_idle()
                 self._log_message(f"✓ Plot saved to: {file_path}")
 
         except Exception as e:
@@ -5320,13 +5601,86 @@ class CircadianMixin:
 
             traceback.print_exc()
 
+    def _draw_population_panel(self, ax, data: dict, n_rois_total: int):
+        """Draw population mean spectrum into *ax* using pre-computed *data*."""
+        grid       = data["grid"]
+        mean_pw    = data["mean_pw"]
+        sem_pw     = data["sem_pw"]
+        n          = data["n"]
+        sig_periods  = data["sig_periods"]
+        use_mean_peak = data["use_mean_peak"]
+
+        ax.plot(grid, mean_pw, color="black", linewidth=2,
+                label=f"Mean (n={n})")
+        ax.fill_between(grid, mean_pw - sem_pw, mean_pw + sem_pw,
+                        alpha=0.25, color="gray", label="±SEM")
+
+        if use_mean_peak:
+            peak_p = float(grid[np.argmax(mean_pw)])
+            ax.axvline(peak_p, color="red", linestyle="--", linewidth=1.5,
+                       label=f"Mean peak: {peak_p:.1f}h")
+        elif sig_periods:
+            med_p = float(np.median(sig_periods))
+            ax.axvline(med_p, color="red", linestyle="--", linewidth=1.5,
+                       label=f"Median peak: {med_p:.1f}h")
+        if sig_periods:
+            ax.text(0.97, 0.95,
+                    f"Significant: {len(sig_periods)}/{n_rois_total}",
+                    transform=ax.transAxes, fontsize=8,
+                    va="top", ha="right",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
+
+        ax.set_xlabel("Period (h)", fontsize=9)
+        ax.set_ylabel("Power (a.u.)", fontsize=9)
+        ax.legend(fontsize=8, loc="upper left")
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis="both", labelsize=8)
+
+    def _make_population_figure(self):
+        """Return a standalone Figure containing only the population mean panel."""
+        from matplotlib.figure import Figure as _Figure
+        data = getattr(self, "_pop_spectrum_data", None)
+        if data is None:
+            return None
+        fig = _Figure(figsize=(6.85, 3.0))   # journal double-column width
+        ax  = fig.add_subplot(1, 1, 1)
+        # n_rois_total is stored implicitly via sig_periods; use n as fallback
+        self._draw_population_panel(ax, data, data["n"])
+        fig.tight_layout()
+        return fig
+
     def _save_fisher_plot(self):
         """Save the currently displayed periodogram / analysis plot as an image file."""
         if not hasattr(self, "fisher_plot_figure") or self.fisher_plot_figure is None:
             self._log_message("⚠️ No plot to save — run an analysis first.")
             return
 
-        # Build a default filename from the HDF5 file and current method
+        has_pop = hasattr(self, "_pop_spectrum_data") and self._pop_spectrum_data is not None
+
+        # Ask which figure to save when a population panel exists
+        save_mode = "combined"
+        if has_pop:
+            from qtpy.QtWidgets import QDialog, QVBoxLayout, QRadioButton, QDialogButtonBox
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Save plot")
+            layout = QVBoxLayout(dlg)
+            rb_combined  = QRadioButton("Combined (ROIs + Population Mean)")
+            rb_rois      = QRadioButton("ROI panels only")
+            rb_pop       = QRadioButton("Population Mean only")
+            rb_combined.setChecked(True)
+            for rb in (rb_combined, rb_rois, rb_pop):
+                layout.addWidget(rb)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            layout.addWidget(btns)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            if rb_rois.isChecked():
+                save_mode = "roi_only"
+            elif rb_pop.isChecked():
+                save_mode = "population_only"
+
         try:
             base = os.path.splitext(os.path.basename(self.file_path))[0]
         except Exception:
@@ -5335,22 +5689,39 @@ class CircadianMixin:
                         4: "coherence", 5: "phase_clustering"}
         method_idx = getattr(self, "current_fisher_method", 0)
         method_tag = method_names.get(method_idx, "plot")
-        default_name = f"{base}_{method_tag}_plot.png"
+        suffix = {"combined": "", "roi_only": "_rois", "population_only": "_population"}[save_mode]
+        default_name = f"{base}_{method_tag}_plot{suffix}.png"
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Plot",
             default_name,
-            "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+            "PNG Files (*.png);;PDF Files (*.pdf);;TIFF Files (*.tif);;SVG Files (*.svg);;All Files (*)",
         )
         if not file_path:
             return
 
         try:
-            dpi = self.plot_dpi_spin.value() if hasattr(self, "plot_dpi_spin") else 150
-            self.fisher_plot_figure.savefig(
-                file_path, dpi=dpi, bbox_inches="tight", facecolor="white"
-            )
+            dpi = self.plot_dpi_spin.value() if hasattr(self, "plot_dpi_spin") else 300
+
+            if save_mode == "population_only":
+                fig = self._make_population_figure()
+                if fig is None:
+                    self._log_message("⚠️ No population data available.")
+                    return
+            elif save_mode == "roi_only":
+                # Temporarily hide the population axes by saving without it:
+                # Re-render into a new figure excluding the population panel.
+                # Simplest: clone the combined figure at its current state but
+                # crop to exclude the population section by adjusting bbox.
+                # For now we save the combined figure with a note in the log.
+                fig = self.fisher_plot_figure
+                self._log_message("ℹ️ ROI-only: saving combined figure — "
+                                  "full ROI-only rendering not yet supported.")
+            else:
+                fig = self.fisher_plot_figure
+
+            fig.savefig(file_path, dpi=dpi, bbox_inches="tight", facecolor="white")
             self._log_message(f"✓ Plot saved: {os.path.basename(file_path)}")
         except Exception as e:
             self._log_message(f"⚠️ Could not save plot: {e}")

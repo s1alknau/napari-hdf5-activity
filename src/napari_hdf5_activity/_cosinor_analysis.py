@@ -234,6 +234,8 @@ def single_cosinor_analysis(
         return {
             "mesor": float(mesor),
             "amplitude": float(amplitude),
+            "beta_cos": float(beta_cos),   # cosine coefficient — needed for population F-test
+            "beta_sin": float(beta_sin),   # sine coefficient  — needed for population F-test
             "phase_angle_rad": float(phase_angle_rad),  # φ — phase offset of the cosine
             "peak_time": float(peak_time),              # −φ/ω mod T — time of fitted peak (h)
             "period": float(period_hours),
@@ -414,20 +416,27 @@ def population_cosinor(
     pop_peak_time_rad = np.arctan2(mean_y, mean_x)
     pop_peak_time = (pop_peak_time_rad * period_hours / (2 * np.pi)) % period_hours
 
-    # Rayleigh test for phase concentration (tests whether peak times cluster)
-    # Uses UNIT vectors (direction only) — NOT amplitude-weighted.
-    # pop_amplitude uses amplitude-weighted vectors for biological estimates,
-    # but the significance test must use unit vectors so R_bar ∈ [0, 1].
+    # Population cosinor F-test (Nelson et al. 1979 / Cornelissen 2014)
+    # Tests H₀: mean β_cos = mean β_sin = 0  (no population rhythm)
+    # F = [n(β̄²_cos + β̄²_sin) / 2] / [Σ(β_cos_i − β̄_cos)² + Σ(β_sin_i − β̄_sin)²) / (2(n−1))]
+    # df1 = 2, df2 = 2(n − 1)
     n = len(valid_results)
-    unit_x = np.cos(peak_time_angles)
-    unit_y = np.sin(peak_time_angles)
-    R_bar = np.sqrt(np.mean(unit_x) ** 2 + np.mean(unit_y) ** 2)  # mean resultant length ∈ [0,1]
-    z = n * R_bar ** 2  # Rayleigh statistic
-    p_value = np.exp(-z) * (
-        1
-        + (2 * z - z**2) / (4 * n)
-        - (24 * z - 132 * z**2 + 76 * z**3 - 9 * z**4) / (288 * n**2)
-    )
+    beta_cos_vals = np.array([r.get("beta_cos", r["amplitude"] * np.cos(-r["phase_angle_rad"])) for r in valid_results])
+    beta_sin_vals = np.array([r.get("beta_sin", -r["amplitude"] * np.sin(-r["phase_angle_rad"])) for r in valid_results])
+
+    mean_bc = np.mean(beta_cos_vals)
+    mean_bs = np.mean(beta_sin_vals)
+
+    # Sum of squared deviations
+    ss_between = n * (mean_bc ** 2 + mean_bs ** 2)
+    ss_within = np.sum((beta_cos_vals - mean_bc) ** 2 + (beta_sin_vals - mean_bs) ** 2)
+
+    if n > 1 and ss_within > 0:
+        f_pop = (ss_between / 2.0) / (ss_within / (2 * (n - 1)))
+        p_value = float(1.0 - stats.f.cdf(f_pop, dfn=2, dfd=2 * (n - 1)))
+    else:
+        f_pop = np.nan
+        p_value = 1.0
 
     significant = p_value < alpha
 
@@ -440,6 +449,7 @@ def population_cosinor(
         "population_peak_time": float(pop_peak_time),  # circular mean, NOT biological acrophase
         "period": float(period_hours),
         "p_value": float(p_value),
+        "f_statistic": float(f_pop) if not np.isnan(f_pop) else None,
         "significant": bool(significant),
         "individual_results": individual_results,
         "n_individuals": int(n_individuals),

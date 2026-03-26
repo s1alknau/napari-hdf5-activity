@@ -2,7 +2,7 @@
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Fisher Z-Transformation Periodogram](#fisher-z-transformation-periodogram)
+2. [Fisher/Chi² Periodogram](#fisherchi-periodogram)
 3. [FFT Power Spectrum](#fft-power-spectrum)
 4. [Cosinor Analysis](#cosinor-analysis)
 5. [ROI Similarity Matrix](#roi-similarity-matrix)
@@ -77,19 +77,19 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 
 | Method | Purpose | Best For | Output |
 |--------|---------|----------|--------|
-| Fisher Z-Transformation | Statistical period detection | Confirming significant rhythms | Z-scores, p-values |
-| FFT Power Spectrum | Frequency-domain analysis | Identifying all periodic components | Power spectrum, dominant peaks |
-| Cosinor Analysis | Rhythm quantification | Measuring amplitude, phase, MESOR | Fitted curves, confidence intervals |
-| ROI Similarity | Cross-correlation analysis | Finding synchronized ROIs | Correlation matrix, clusters |
-| Coherence Analysis | Frequency-specific synchronization | Identifying shared rhythms | Coherence heatmap |
-| Phase Clustering | Timing relationships | Detecting activity phases | Phase plot, timing offsets |
+| Fisher/Chi² Periodogram | Statistical period detection | Confirming significant rhythms | Chi² statistic (labeled Z-score), Bonferroni-corrected p-values |
+| FFT Power Spectrum | Frequency-domain analysis | Identifying all periodic components | Power spectrum (|FFT|², a.u.), permutation p-values |
+| Cosinor Analysis | Rhythm quantification | Measuring amplitude, phase, MESOR | Fitted curves, confidence intervals, Nelson F-test for population |
+| ROI Similarity | Cross-correlation analysis | Finding synchronized ROIs | Correlation matrix, clusters (Bonferroni-corrected) |
+| Coherence Analysis | Frequency-specific synchronization | Identifying shared rhythms | Coherence heatmap (Bonferroni-corrected) |
+| Phase Clustering | Timing relationships | Detecting activity phases | Phase plot, timing offsets (descriptive only) |
 
 ### Method Comparison: Strengths and Limitations
 
-| Feature | Fisher Z | FFT | Cosinor | ROI Similarity | Coherence | Phase Clustering |
-|---------|----------|-----|---------|----------------|-----------|------------------|
-| **Primary Output** | p-values, significance | Power spectrum | MESOR, Amplitude, Acrophase | Correlation matrix | Coherence values | Phase & amplitude |
-| **Statistical Testing** | ✅ Yes (p-values) | ❌ No | ✅ Yes (p-values, CIs) | ⚠️ Partial (correlation) | ❌ No | ❌ No |
+| Feature | Chi² Periodogram | FFT | Cosinor | ROI Similarity | Coherence | Phase Clustering |
+|---------|-----------------|-----|---------|----------------|-----------|------------------|
+| **Primary Output** | Z(T) statistic; Bonferroni-corrected | Power spectrum (|FFT|², a.u.) | MESOR, Amplitude, Acrophase | Correlation matrix | Coherence values | Phase & amplitude |
+| **Statistical Testing** | ✅ Yes (p-values) | ✅ Yes (permutation, 1000 shuffles) | ✅ Yes (p-values, CIs) | ✅ Yes (t-test + Bonferroni) | ✅ Yes (per-pair Bonferroni) | ❌ No (descriptive only) |
 | **Exploratory Analysis** | ⚠️ Limited | ✅ Excellent | ❌ Poor | ✅ Good | ⚠️ Moderate | ❌ Poor |
 | **Computational Speed** | ⚠️ Slow | ✅ Very fast | ✅ Fast | ⚠️ Moderate | ⚠️ Slow | ✅ Fast |
 | **Data Requirements** | ≥3 cycles | ≥2 cycles | ≥2 cycles | ≥2 cycles | ≥5 segments | ≥2 cycles |
@@ -98,13 +98,13 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 | **Handles Mixed Periods** | ✅ Yes | ✅ Yes | ⚠️ Tests multiple | ❌ Poor | ⚠️ Moderate | ❌ No |
 | **Multiple Rhythms** | ⚠️ Dominant only | ✅ All shown | ⚠️ Tests separately | ❌ N/A | ✅ All shown | ❌ Single period |
 | **Noise Robustness** | ✅ Good | ⚠️ Moderate | ✅ Good | ⚠️ Moderate | ✅ Good | ⚠️ Moderate |
-| **Interpretation** | ✅ Clear (p-value) | ⚠️ Subjective | ✅ Intuitive (parameters) | ✅ Intuitive | ⚠️ Complex | ✅ Visual |
+| **Interpretation** | ✅ Clear (Bonferroni threshold) | ⚠️ Requires permutation | ✅ Intuitive (parameters) | ✅ Intuitive | ⚠️ Complex | ✅ Visual |
 | **Rhythm Quantification** | ❌ No | ⚠️ Indirect (power) | ✅ Direct (Amp, MESOR) | ❌ No | ⚠️ Indirect | ⚠️ Amplitude only |
 
 ### Quick Decision Guide
 
-**Choose Fisher Z-Transformation when:**
-- You need statistical significance testing (p-values for publications)
+**Choose Chi² Periodogram when:**
+- You need statistical significance testing with Bonferroni correction built in
 - Confirming expected rhythms (hypothesis-driven research)
 - Comparing rhythm strength across experimental conditions
 - Data quality is moderate (method is noise-robust)
@@ -131,22 +131,22 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 - Need precise timing of activity peaks
 - Measuring circadian clock strength (not just presence)
 - Visualizing phase relationships for publication
-- All ROIs confirmed to share same period (from Fisher/FFT)
+- All ROIs confirmed to share same period (from Chi²/FFT)
 
 ### Recommended Workflow
 
 **Standard Analysis Pipeline:**
-1. **Fisher Z or FFT** → Detect periods and confirm rhythms exist
+1. **Chi² Periodogram or FFT** → Detect periods and confirm rhythms exist
 2. **Cross-validate** → Both methods should agree on period (±1 hour)
-3. **ROI Similarity** → Identify synchronized groups
+3. **ROI Similarity** → Identify synchronized groups (Bonferroni-corrected)
 4. **Coherence** (optional) → Verify frequency-specific synchronization
-5. **Phase Clustering** → Quantify timing relationships using confirmed period
+5. **Phase Clustering** → Descriptive timing relationships using confirmed period
 
 **Exploratory Pipeline:**
 1. **FFT** → Quick scan for any rhythms
-2. **Fisher Z** → Statistical confirmation of FFT findings
+2. **Chi² Periodogram** → Bonferroni-corrected statistical confirmation
 3. **ROI Similarity** → Look for clusters and relationships
-4. **Phase Clustering** → Detailed timing analysis
+4. **Phase Clustering** → Descriptive timing analysis
 
 **Troubleshooting Pipeline:**
 - If Fisher finds rhythm but FFT doesn't → Check data quality, harmonics
@@ -155,11 +155,11 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 
 ---
 
-## Fisher Z-Transformation Periodogram
+## Fisher/Chi² Periodogram
 
 ### What It Does
 
-Fisher's Z-transformation is a statistical method for detecting periodic patterns in time-series data. It tests whether activity follows a rhythmic pattern by correlating the signal with sine and cosine waves at different frequencies. The method provides formal statistical significance testing with p-values.
+The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method for detecting periodic patterns in time-series data. It tests whether activity follows a rhythmic pattern by correlating the signal with sine and cosine waves at different candidate periods. The method provides formal statistical significance testing with a Bonferroni-corrected threshold.
 
 ### How It Works
 
@@ -193,32 +193,40 @@ R²(T) = r_cos² + r_sin²
 
 This ranges from 0 (no periodic component) to ~1 (perfect sinusoidal fit). The sum of squared correlations arises because cosine and sine are orthogonal basis functions—their independent contributions to explained variance are additive.
 
-**Step 3: Fisher's Z-Transformation**
+**Step 3: Chi-Squared Test Statistic**
 
 Convert R² to a test statistic with known null distribution:
 
 ```
-Z(T) = n × R²(T)
+Z(T) = n × (r_cos² + r_sin²)
 ```
 
-where n is the number of observations.
+where n is the number of observations. **Note:** The y-axis in the plot is labeled "Z-score" but the quantity plotted is actually the chi-squared statistic Z(T), which directly follows χ²(df=2) under the null hypothesis.
 
 **Step 4: Statistical Significance**
 
-Under H₀ (no periodic component at frequency ω), Z follows a **chi-square distribution with 2 degrees of freedom**. The 2 df correspond to the two free parameters: the cosine coefficient and sine coefficient (equivalently, amplitude and phase).
+Under H₀ (no periodic component at frequency ω), Z(T) follows a **chi-square distribution with 2 degrees of freedom**. The 2 df correspond to the two free parameters: the cosine coefficient and sine coefficient (equivalently, amplitude and phase).
 
 This distributional result derives from: under H₀, √n·r_cos and √n·r_sin are asymptotically independent standard normal variables, and the sum of squares of two independent standard normals follows χ²₂.
 
-**Critical values:**
-- α = 0.05: χ²₂,₀.₉₅ = 5.991
-- α = 0.01: χ²₂,₀.₉₉ = 9.210
+**Bonferroni correction (m = 100 tested periods):**
+
+The plugin tests m = 100 candidate periods simultaneously. Without correction, α = 0.05 over 100 tests produces ~5 false positives on average. The Bonferroni-corrected threshold is:
+
+```
+threshold = χ²(1 − α/m, df=2) ≈ 15.2    (for α = 0.05, m = 100)
+```
+
+`is_significant` is set to True when Z(T) > 15.2 — **not** when a raw per-test p-value < 0.05.
+
+The "mean threshold" line on the population plot also shows this Bonferroni-corrected value.
 
 **p-value calculation (closed form for χ²₂):**
 ```
 p = 1 - F_χ²₂(Z) = e^(-Z/2)
 ```
 
-The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom.
+The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom. Reported p-values are per-test (not corrected); significance decisions use the Bonferroni threshold on Z(T).
 
 ### Parameters
 
@@ -229,37 +237,40 @@ The second equality uses the closed-form CDF of chi-square with 2 degrees of fre
 
 ### Output Interpretation
 
-#### Z-Score Plot
-- **Blue curve**: Z-scores across all tested periods
-- **Gray dashed line**: Significance threshold (p < 0.05)
+#### Chi² Statistic Plot
+
+**Note:** The y-axis is labeled "Z-score" in the plot, but the quantity displayed is the chi-squared statistic Z(T) = n × (r_cos² + r_sin²), which follows χ²(df=2) under H₀.
+
+- **Blue curve**: Chi-squared statistic Z(T) across all tested periods
+- **Gray dashed line**: Bonferroni-corrected significance threshold (≈ 15.2 for α=0.05, m=100)
 - **Colored vertical line**: Dominant period (if significant)
-- **Colored marker**: Peak Z-score value
+- **Colored marker**: Peak Z(T) value
 
 #### Statistical Metrics
-- **Dominant Period**: Period with highest Z-score (hours)
-- **Z-Score**: Strength of rhythm (higher = stronger)
-- **p-value**: Statistical significance (p < 0.05 = significant)
-- **Critical Z**: Threshold for significance (typically ~6.0 for p=0.05)
+- **Dominant Period**: Period with highest Z(T) (hours)
+- **Z(T) value**: Strength of rhythm (higher = stronger); labeled "Z-score" in output
+- **p-value**: Per-test p = e^(-Z/2); significance decision uses Bonferroni threshold
+- **Critical Z**: Bonferroni-corrected threshold ≈ 15.2 (for α=0.05, m=100 periods)
 
 #### What Values Mean
 
-| Z-Score | p-value | Interpretation |
-|---------|---------|----------------|
-| > 10 | < 0.01 | Very strong, highly significant rhythm |
-| 6-10 | 0.01-0.05 | Significant rhythm |
-| 3-6 | 0.05-0.22 | Weak, possibly significant |
-| < 3 | > 0.22 | No significant rhythm |
+| Z(T) value | Bonferroni significant | Interpretation |
+|------------|----------------------|----------------|
+| > 20 | Yes | Very strong, highly significant rhythm |
+| 15-20 | Yes (near threshold) | Significant rhythm |
+| 6-15 | No (below threshold) | Weak or marginal rhythm; not significant after correction |
+| < 6 | No | No significant rhythm |
 
 ### Example Results
 
 ```
 ROI 1:
-  ✓ Significant circadian rhythm detected (p=0.0001)
+  ✓ Significant circadian rhythm detected (Z=125.45 > threshold 15.2)
   Dominant period: 24.12 hours
-  Z-score: 125.45
+  Z(T): 125.45  (p = e^(-125.45/2) ≈ 0)
 ```
 
-**Interpretation**: This ROI shows a very strong 24-hour rhythm with extremely high statistical confidence.
+**Interpretation**: This ROI shows a very strong 24-hour rhythm. The chi-squared statistic (125.45) far exceeds the Bonferroni-corrected threshold (≈ 15.2), confirming significance with extremely high confidence.
 
 ### Advantages
 
@@ -288,7 +299,7 @@ ROI 1:
 ⚠️ **Computational Cost**
 - Slower than FFT for large datasets
 - Tests each period individually (100 periods = 100 tests)
-- Multiple comparison problem (need correction for many tests)
+- Multiple comparison problem is handled by Bonferroni correction (threshold ≈ 15.2 instead of 5.99)
 
 ⚠️ **Data Requirements**
 - Requires ≥3 complete cycles for statistical power
@@ -339,9 +350,9 @@ ROI 1:
    - Raw data at 5-second intervals → bin to 60 seconds
    - Reduces noise while preserving rhythmic patterns
 
-4. **Multiple Comparisons**: Adjust significance threshold when testing many periods
-   - Bonferroni correction: p_threshold = 0.05 / n_tests
-   - Or use False Discovery Rate (FDR) control
+4. **Multiple Comparisons**: Bonferroni correction for m=100 periods is applied automatically
+   - The significance threshold is χ²(1 − 0.05/100, df=2) ≈ 15.2
+   - No manual correction is needed; `is_significant` already reflects this
 
 ---
 
@@ -349,7 +360,7 @@ ROI 1:
 
 ### What It Does
 
-Fast Fourier Transform (FFT) converts time-series data into the frequency domain, revealing all periodic components simultaneously. Unlike Fisher Z which tests specific candidate periods, FFT provides a complete spectral decomposition that can reveal unexpected periodicities, harmonics, and the overall noise floor.
+Fast Fourier Transform (FFT) converts time-series data into the frequency domain, revealing all periodic components simultaneously. Unlike the Chi² periodogram which tests specific candidate periods, FFT provides a complete spectral decomposition that can reveal unexpected periodicities, harmonics, and the overall noise floor.
 
 ### How It Works
 
@@ -416,11 +427,11 @@ This improves apparent resolution by 4× without adding new information.
 
 ### Statistical Significance (Permutation Test)
 
-Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test:
+Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test with 1000 shuffles:
 
-1. Compute observed power P_obs at the dominant frequency
+1. Compute observed **maximum** power P_obs over the full tested period range
 2. Generate N_perm = 1000 surrogate time series by randomly shuffling sample order (destroys temporal structure, preserves amplitude distribution)
-3. For each surrogate, apply same preprocessing and compute FFT power at target frequency
+3. For each surrogate, apply same preprocessing and compute the **maximum** FFT power over the same period range
 4. Calculate p-value:
 
 ```
@@ -429,7 +440,7 @@ p = (1/N_perm) × Σᵢ 𝟙[P_perm,i ≥ P_obs]
 
 where 𝟙[·] is the indicator function.
 
-This p-value represents the probability of observing such strong spectral power by chance if the signal were non-periodic. With 1000 permutations, minimum achievable p-value is 0.001.
+Using the **maximum** power over the full period range (rather than power at a single frequency) correctly handles the multiple-comparisons problem inherent in scanning many frequencies. The p-value represents the probability that a shuffled (non-periodic) signal would produce as strong a spectral peak anywhere in the tested range. With 1000 permutations, the minimum achievable p-value is 0.001.
 
 ### Parameters
 
@@ -463,17 +474,17 @@ Power is in arbitrary units (AU²). Relative values matter more than absolute va
 | 2-5× higher | Clear rhythm |
 | Similar to others | Weak or multiple competing rhythms |
 
-### Comparison with Fisher Z-Transformation
+### Comparison with Chi² Periodogram
 
-| Feature | Fisher Z | FFT |
-|---------|----------|-----|
-| Output | Statistical significance | Power spectrum |
-| Strength | Tests specific hypotheses | Explores all frequencies |
-| Interpretation | p-values, clear yes/no | Relative power levels |
-| Use Case | Confirm expected rhythms | Discover unknown rhythms |
+| Feature | Chi² Periodogram | FFT |
+|---------|-----------------|-----|
+| Output | Bonferroni-corrected Z(T) statistic | Power spectrum (|FFT|², a.u.) |
+| Strength | Tests specific hypotheses, built-in correction | Explores all frequencies simultaneously |
+| Significance | Bonferroni-corrected threshold ≈ 15.2 | Permutation p-value (max-power test) |
+| Use Case | Confirm expected rhythms with rigorous correction | Discover unknown rhythms |
 
 **Agreement**: Both should identify the same dominant period. Typical differences:
-- Fisher: 24.0h
+- Chi² Periodogram: 24.0h
 - FFT: 23.7-24.3h (slightly different due to frequency resolution)
 
 Differences < 1 hour indicate excellent agreement.
@@ -507,10 +518,10 @@ Differences < 1 hour indicate excellent agreement.
 
 ### Limitations
 
-⚠️ **No Statistical Testing**
-- Power values are in arbitrary units
-- No p-values or significance thresholds
-- Subjective interpretation of "strong" vs "weak" peaks
+⚠️ **Arbitrary Units**
+- Power values are |FFT|² — arbitrary units (a.u.) that depend on signal amplitude and n
+- Absolute power values are not comparable across recordings with different durations or amplitudes
+- Use relative values (peak vs. background) and permutation p-values for interpretation
 
 ⚠️ **Spectral Leakage**
 - Non-integer number of cycles causes frequency spreading
@@ -547,10 +558,9 @@ Differences < 1 hour indicate excellent agreement.
 - Detecting harmonics and complex rhythms
 
 **Not Ideal For:**
-- Statistical hypothesis testing
-- Definitive yes/no rhythm detection
-- Very noisy data requiring significance testing
-- When absolute power values needed
+- When an analytic p-value is required (permutation test gives p-values but with minimum p = 0.001)
+- When absolute power values are needed (units are arbitrary)
+- Very short recordings with insufficient frequency resolution
 
 ### Best Practices
 
@@ -572,9 +582,9 @@ Differences < 1 hour indicate excellent agreement.
    - Check if secondary peaks are harmonics (integer divisors of dominant)
 
 4. **Validation**:
-   - Always cross-validate with Fisher Z-transformation
+   - Always cross-validate with the Chi² periodogram
    - Both methods should agree on dominant period (±1 hour)
-   - Use Fisher for statistical confirmation of FFT findings
+   - Use Chi² periodogram for Bonferroni-corrected statistical confirmation
 
 ---
 
@@ -686,25 +696,21 @@ SE(A) ≈ (1/A) × √[β̂₁²×Var(β̂₁) + β̂₂²×Var(β̂₂)]
 
 Confidence intervals: θ ± t_{n-3,1-α/2} × SE(θ)
 
-### Population-Mean Cosinor
+### Population-Mean Cosinor (Nelson et al. 1979)
 
-For multiple individuals (ROIs), population parameters use **vector averaging**:
+For multiple individuals (ROIs), the **population cosinor** uses the Nelson et al. (1979) F-test. Each individual ROI's OLS fit produces β_cos,j and β_sin,j. The population-level hypothesis H₀: mean(β_cos) = mean(β_sin) = 0 is tested with:
 
-Convert individual (Aⱼ, φⱼ) to Cartesian coordinates:
+```
+F(dfn=2, dfd=2(n−1))
+```
+
+where n = number of ROIs. The numerator is built from the mean β_cos and mean β_sin across all ROIs; the denominator uses the variance of those coefficients. This tests whether the population as a whole oscillates — not merely whether individual ROIs oscillate.
+
+Population amplitude and acrophase are derived via vector averaging of individual (Aⱼ, φⱼ):
 ```
 xⱼ = Aⱼ×cos(φⱼ),    yⱼ = Aⱼ×sin(φⱼ)
-```
-
-Population parameters:
-```
 x̄ = (1/J)Σⱼxⱼ,    ȳ = (1/J)Σⱼyⱼ
 A_pop = √(x̄² + ȳ²),    φ_pop = atan2(ȳ, x̄)
-```
-
-**Rayleigh Test** for population rhythm (H₀: uniform phase distribution):
-
-```
-R = J × A_pop,    p ≈ e^(-R²/J)    (for large J)
 ```
 
 ### Output Parameters
@@ -860,16 +866,16 @@ Population:
 
 ### Comparison with Other Methods
 
-| Feature | Cosinor | Fisher Z | FFT |
-|---------|---------|----------|-----|
+| Feature | Cosinor | Chi² Periodogram | FFT |
+|---------|---------|-----------------|-----|
 | **Primary Use** | Quantify rhythm parameters | Detect significant periods | Explore all frequencies |
-| **Output** | MESOR, Amplitude, Acrophase | p-values for periods | Full power spectrum |
-| **Best for** | Known periods, group comparisons | Period detection, hypothesis testing | Exploratory analysis |
+| **Output** | MESOR, Amplitude, Acrophase | Z(T) with Bonferroni threshold; Nelson F for population | Power spectrum (|FFT|², a.u.) |
+| **Best for** | Known periods, group comparisons | Period detection, Bonferroni-corrected testing | Exploratory analysis |
 | **Speed** | Very fast | Slow | Very fast |
-| **Statistics** | p-values + 95% CIs | p-values only | No built-in tests |
+| **Statistics** | p-values + 95% CIs; Nelson F-test | Bonferroni-corrected Z(T) threshold | Permutation p-values (max-power test) |
 | **Assumptions** | Sinusoidal rhythm | None (non-parametric) | Stationarity |
 
-**Recommendation**: Use **Cosinor** for quantifying known rhythms (e.g., testing 24h circadian), **Fisher Z** for detecting unknown periods with statistical validation, and **FFT** for broad exploratory analysis of all frequencies.
+**Recommendation**: Use **Cosinor** for quantifying known rhythms (e.g., testing 24h circadian), **Chi² Periodogram** for detecting unknown periods with Bonferroni-corrected statistical validation, and **FFT** for broad exploratory analysis of all frequencies.
 
 ### Tips and Best Practices
 
@@ -896,7 +902,7 @@ Population:
 5. **Validation**:
    - Always plot fitted curves over raw data (visual inspection critical)
    - Check that acrophase aligns with visible peaks
-   - Compare results with Fisher Z or FFT for consistency
+   - Compare results with Chi² periodogram or FFT for consistency
 
 6. **Common Pitfalls**:
    - **Testing too many periods**: Multiple comparison problem (adjust α or use best-fit)
@@ -978,6 +984,16 @@ r_crit = √[t²_crit / (n-2 + t²_crit)]
 
 where t_crit = F⁻¹_{t,ν}(1-α/2). This shows r_crit decreases as sample size increases.
 
+**Bonferroni correction for multiple pairs:**
+
+With N ROIs, there are N(N−1)/2 simultaneous pair tests. The corrected significance level is:
+
+```
+corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
+```
+
+`is_significant` is only set to True when the per-pair p-value < corrected_alpha.
+
 ### Hierarchical Clustering
 
 To identify groups with similar activity patterns, correlations are converted to distances:
@@ -988,7 +1004,9 @@ d_ij = 1 - r_ij
 
 Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
 
-**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. Cut the dendrogram at threshold d_cut (default 0.5, corresponding to r = 0.5) to define clusters.
+**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The default clustering threshold corresponds to r = 0.5 (adjustable via the GUI slider).
+
+**Important:** Hierarchical clustering is **exploratory and descriptive only**. Cluster assignments are not statistically tested and should not be used as primary statistical evidence. Use the Bonferroni-corrected pairwise correlations for significance claims.
 
 ### Parameters
 
@@ -1138,7 +1156,7 @@ Low Similarity:
 
 4. **Validation**:
    - Cross-check with Coherence analysis
-   - Verify period similarity with Fisher/FFT first
+   - Verify period similarity with Chi²/FFT first
    - Consider biological context (social species vs solitary)
 
 ---
@@ -1204,25 +1222,40 @@ More segments → lower threshold → more statistical power, but reduced freque
 
 For circadian analysis, extract coherence within ±20% of the target period (e.g., 24h) and compare to γ²_crit.
 
+### Bonferroni Correction for Multiple Pairs
+
+With N ROIs, coherence is computed for all N(N−1)/2 pairs simultaneously. The per-pair significance level is Bonferroni-corrected:
+
+```
+corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
+```
+
+The per-pair threshold then becomes:
+
+```
+γ²_crit = 1 − corrected_alpha^(1/(K−1))
+```
+
+where K is the number of Welch segments. This prevents inflation of false-positive pair detections.
+
 ### Parameters
 
-- **Segment Length**: Number of samples per segment (default: 256)
-- **Overlap**: Fraction of overlap between segments (default: 0.5)
-- **Window**: Window function (default: "hann")
+- **nperseg**: Samples per Welch segment — auto-selected based on `samples_per_period` (the number of samples per target period), minimum 16
+- **Overlap**: 50% overlap between segments
+- **Window**: Hann window (fixed)
 
 ### Output Interpretation
 
 #### Coherence Heatmap
-- **Blue**: High coherence (synchronized at specific frequency)
-- **Yellow**: Moderate coherence
-- **Red**: Low coherence (independent)
+
+The matrix uses a **viridis** colormap: 0 = dark purple (no coherence), 1 = yellow (perfect coherence). There is no title on the matrix plot; all information is provided in the colorbar label.
 
 | Coherence | Interpretation |
 |-----------|----------------|
 | 0.8-1.0 | Very strong synchronization at this frequency |
 | 0.6-0.8 | Strong synchronization |
 | 0.4-0.6 | Moderate synchronization |
-| < 0.4 | Weak or no synchronization |
+| < threshold | Below Bonferroni-corrected significance level |
 
 #### Coherence vs Correlation
 
@@ -1337,7 +1370,7 @@ For circadian analysis, extract coherence within ±20% of the target period (e.g
    - High coherence + low correlation = synchronized rhythm but different baselines
 
 3. **Validation**:
-   - Check if coherence peaks match Fisher/FFT dominant periods
+   - Check if coherence peaks match Chi²/FFT dominant periods
    - Compare coherence values across ROI pairs for consistency
    - Use shuffled/randomized data as null hypothesis control
 
@@ -1357,11 +1390,14 @@ Uses Hilbert transform to extract instantaneous phase and amplitude of activity 
 
 ### How It Works
 
-1. **Hilbert Transform**: Constructs analytic signal to extract instantaneous phase
-2. **Phase Extraction**: Computes instantaneous phase at each time point
-3. **Phase Locking Value**: Quantifies consistency of phase relationships
-4. **Phase Clustering**: Groups ROIs by mean phase into chronotype categories
-5. **Visualization**: Polar plot showing phase and amplitude
+1. **Mean subtraction**: Signal is mean-subtracted before applying the Hilbert transform
+2. **Hilbert Transform**: Constructs analytic signal to extract instantaneous phase
+3. **Phase Extraction**: Computes instantaneous phase at each time point via circular mean
+4. **Phase Locking Value (PLV)**: Quantifies consistency of phase relationships using heuristic thresholds (PLV > 0.8 = strong, > 0.5 = moderate, > 0.3 = weak) — no statistical significance test
+5. **Phase Clustering**: Groups ROIs by mean phase into 4 chronotype quadrants (period/4 each)
+6. **Visualization**: Polar plot showing phase and amplitude
+
+**Note:** Phase clustering is **purely descriptive**. There is no statistical significance test for cluster assignments or PLV values. Use Fisher/Chi² or Cosinor for statistically validated rhythm detection.
 
 ### Mathematical Foundation
 
@@ -1401,11 +1437,13 @@ PLV = |(1/N) × Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
 - Constant phase difference → all vectors point same direction → PLV = 1
 - Uniformly varying phase → vectors cancel → PLV ≈ 0
 
-**Interpretation guidelines:**
+**Interpretation guidelines (heuristic thresholds — not statistically derived):**
 - PLV > 0.8: Strong phase synchronization
 - PLV ∈ [0.5, 0.8]: Moderate synchronization
 - PLV ∈ [0.3, 0.5]: Weak synchronization
-- PLV < 0.3: No significant synchronization
+- PLV < 0.3: No meaningful synchronization
+
+These thresholds are conventional heuristics. No formal significance test is applied to PLV values.
 
 **Mean Phase Difference (circular mean):**
 
@@ -1432,7 +1470,7 @@ Convert to clock time (hours from recording start, modulo period T). ROIs are bi
 
 ### Parameters
 
-- **Dominant Period**: Period for filtering (from Fisher or FFT analysis)
+- **Dominant Period**: Period for filtering (from Chi² periodogram or FFT analysis)
 - **Bandwidth**: Filter bandwidth (default: ±10% of dominant period)
 - **Phase Threshold**: Clustering threshold (default: 45°)
 
@@ -1554,7 +1592,7 @@ This is a critical distinction:
 ### Limitations
 
 ⚠️ **Requires Known Period**
-- Must use predetermined dominant period from Fisher/FFT
+- Must use predetermined dominant period from Chi²/FFT
 - Cannot detect periods; only analyzes timing at known period
 - Not suitable for exploratory period finding
 
@@ -1598,7 +1636,7 @@ This is a critical distinction:
 - Visualizing phase relationships in publications
 
 **Not Ideal For:**
-- Exploratory period detection (use Fisher/FFT first)
+- Exploratory period detection (use Chi²/FFT first)
 - Mixed-period datasets
 - Arrhythmic or transient behaviors
 - When total activity level is more relevant than rhythm
@@ -1607,7 +1645,7 @@ This is a critical distinction:
 ### Best Practices
 
 1. **Period Selection**:
-   - **Always** use dominant period from Fisher or FFT analysis first
+   - **Always** use dominant period from Chi² periodogram or FFT analysis first
    - Verify all ROIs share similar period before phase clustering
    - Don't use phase clustering for exploratory period detection
    - Consider separate analyses if ROIs have different periods
@@ -1628,7 +1666,7 @@ This is a critical distinction:
 
 4. **Validation**:
    - Cross-check clusters with similarity matrix
-   - Verify period consistency with Fisher/FFT
+   - Verify period consistency with Chi²/FFT
    - Consider biological context (social species, group housing)
    - Use circular statistics for phase averaging and variance
 
@@ -1638,26 +1676,28 @@ This is a critical distinction:
 
 ### Comprehensive Analysis Workflow
 
-1. **Fisher Z-Transformation**: Confirm significant rhythms exist
-   - Check p-values (p < 0.05 = significant)
+1. **Chi² Periodogram**: Confirm significant rhythms exist
+   - Z(T) > 15.2 = Bonferroni-significant (α=0.05, m=100 tested periods)
    - Identify dominant period(s)
 
 2. **FFT Power Spectrum**: Validate period detection
-   - Should agree with Fisher (±1 hour)
+   - Should agree with Chi² periodogram (±1 hour)
    - Identify harmonics and secondary peaks
+   - Permutation p-value < 0.05 confirms significance
 
 3. **ROI Similarity**: Find synchronized groups
-   - High correlation = similar behavior
-   - Check lag values for phase relationships
+   - Bonferroni-corrected t-test determines significant pairs
+   - High correlation = similar behavior; check lag for phase offset
+   - Hierarchical clustering is exploratory only — not primary evidence
 
 4. **Coherence**: Verify frequency-specific synchronization
    - High coherence at dominant frequency confirms shared rhythm
    - Check for coherence at harmonics
 
-5. **Phase Clustering**: Quantify timing relationships
-   - Amplitude = rhythm strength
+5. **Phase Clustering**: Quantify timing relationships (descriptive only)
+   - Amplitude = rhythm strength (NOT total activity)
    - Phase = timing within cycle
-   - Clusters = behavioral groups
+   - Clusters = behavioral groups; PLV thresholds are heuristic (no significance test)
 
 ### Cross-Validation
 
@@ -1665,11 +1705,11 @@ This is a critical distinction:
 
 | Analysis | Output | Expected Agreement |
 |----------|--------|-------------------|
-| Fisher | Period: 24.0h | ✓ |
-| FFT | Period: 23.7h | ✓ (within 1h) |
-| Similarity | High r for ROIs 1-2 | ✓ (if synchronized) |
-| Coherence | High at 24h for ROIs 1-2 | ✓ (confirms shared rhythm) |
-| Phase | ROIs 1-2 at same angle | ✓ (confirms in-phase) |
+| Chi² Periodogram | Period: 24.0h, Z(T) > 15.2 | ✓ Bonferroni-significant |
+| FFT | Period: 23.7h, permutation p < 0.05 | ✓ (within 1h of Chi²) |
+| Similarity | High r for ROIs 1-2, Bonferroni-corrected | ✓ (if synchronized) |
+| Coherence | High at 24h for ROIs 1-2, Bonferroni-corrected | ✓ (confirms shared rhythm) |
+| Phase | ROIs 1-2 at same angle, PLV > 0.8 | ✓ (confirms in-phase; descriptive) |
 
 **Disagreement Indicates**:
 - Multiple competing rhythms
@@ -1680,14 +1720,14 @@ This is a critical distinction:
 
 **Dataset**: 6 animals, 72 hours of recording
 
-**Fisher Results**:
+**Chi² Periodogram Results**:
 ```
-ROI 1: 24.0h (p < 0.0001) ✓ Significant
-ROI 2: 24.0h (p < 0.0001) ✓ Significant
-ROI 3: 24.1h (p < 0.0001) ✓ Significant
-ROI 4: 24.1h (p < 0.0001) ✓ Significant
-ROI 5: 20.0h (p < 0.0001) ✓ Significant
-ROI 6: 20.1h (p < 0.0001) ✓ Significant
+ROI 1: 24.0h, Z=88.2  (> 15.2 → Bonferroni-significant) ✓
+ROI 2: 24.0h, Z=91.7  (> 15.2 → Bonferroni-significant) ✓
+ROI 3: 24.1h, Z=85.4  (> 15.2 → Bonferroni-significant) ✓
+ROI 4: 24.1h, Z=79.6  (> 15.2 → Bonferroni-significant) ✓
+ROI 5: 20.0h, Z=72.3  (> 15.2 → Bonferroni-significant) ✓
+ROI 6: 20.1h, Z=68.9  (> 15.2 → Bonferroni-significant) ✓
 ```
 
 **FFT Results**:
@@ -1744,19 +1784,19 @@ Located in the Extended Analysis tab, next to method selection.
 
 ### Excel Export Contents
 
-#### Fisher Z-Transformation
+#### Chi² Periodogram
 **Sheet 1 - Summary**:
 - ROI ID
 - Dominant Period (hours)
-- Z-Score
-- p-value
-- Significance (Yes/No)
+- Z(T) value (labeled "Z-Score" in output)
+- p-value (per-test: p = e^(-Z/2))
+- Significance (Yes/No, based on Bonferroni-corrected threshold ≈ 15.2)
 - Mean Activity
 - Std Activity
 
 **Sheet 2 - ROI_X_Periodogram** (one sheet per ROI):
 - Period_hours
-- Z_Score
+- Z_Score (chi-squared statistic)
 - Full periodogram for custom plotting
 
 **Sheet 3 - Parameters**:
@@ -1906,10 +1946,10 @@ ROI 10: #17becf (Cyan)
 
 ### Color Application
 
-**Fisher Z-Transformation**:
+**Chi² Periodogram**:
 - Periodogram curves: ROI-specific color
 - Dominant period marker: ROI-specific color with black edge
-- Significance threshold: Gray (shared across all ROIs)
+- Significance threshold: Gray dashed line (Bonferroni-corrected, ≈ 15.2)
 
 **FFT Power Spectrum**:
 - Power curves: ROI-specific color
@@ -1921,7 +1961,7 @@ ROI 10: #17becf (Cyan)
 
 **Heatmaps (Unchanged)**:
 - Similarity Matrix: Green colormap (shows correlation values)
-- Coherence Matrix: Red-Yellow-Blue colormap (shows coherence values)
+- Coherence Matrix: **viridis** colormap (0 = dark purple = no coherence, 1 = yellow = perfect coherence); no title on the matrix plot — information in colorbar label
 - Rationale: Heatmaps show pairwise relationships, not individual ROIs
 
 ### Benefits
@@ -1934,7 +1974,7 @@ ROI 10: #17becf (Cyan)
 ### Example Usage
 
 Looking at Fisher, FFT, and Phase plots together:
-- **Orange (ROI 2)** shows strong peak at 24h in Fisher → high power at 24h in FFT → phase at 0° with amplitude 102.7
+- **Orange (ROI 2)** shows strong peak at 24h in Chi² periodogram → high power at 24h in FFT → phase at 0° with amplitude 102.7
 - **All analyses tell the same story in the same color**
 
 ---
@@ -1991,9 +2031,10 @@ Looking at Fisher, FFT, and Phase plots together:
    ```
 
 2. **Significance Thresholds**:
-   - **Standard**: p < 0.05 (95% confidence)
-   - **Conservative**: p < 0.01 (Bonferroni correction for multiple comparisons)
-   - **Exploratory**: p < 0.10 (hypothesis generation)
+   - **Chi² Periodogram**: Bonferroni correction for m=100 periods is built in (threshold ≈ 15.2). The α setting adjusts this threshold — lower α = higher threshold = more conservative.
+   - **FFT**: Permutation test handles multiple frequencies; use p < 0.05 from the permutation result
+   - **Cosinor individual**: F(2, n−3) test at p < 0.05
+   - **Similarity/Coherence**: Bonferroni correction for N(N−1)/2 pairs is built in
 
 3. **Binning Guidelines**:
    ```
@@ -2005,9 +2046,9 @@ Looking at Fisher, FFT, and Phase plots together:
 ### Statistical Considerations
 
 1. **Multiple Comparisons**:
-   - Testing 6 ROIs × 100 periods = 600 tests
-   - Consider Bonferroni correction: p_threshold = 0.05 / 600 = 0.000083
-   - Or use False Discovery Rate (FDR) control
+   - The Chi² Periodogram applies Bonferroni correction across m=100 periods **automatically** — no manual correction needed per ROI
+   - The Similarity and Coherence matrices apply Bonferroni correction for N(N−1)/2 pairs **automatically**
+   - For cross-method or cross-experiment comparisons, consider additional correction if reporting many independent tests
 
 2. **Sample Size**:
    - **Power analysis**: Calculate required N for detecting expected effect size
@@ -2047,7 +2088,7 @@ Looking at Fisher, FFT, and Phase plots together:
 - Multiple rhythms may require different period ranges
 - Filter high-frequency noise
 
-#### Issue: Disagreement Between Fisher and FFT
+#### Issue: Disagreement Between Chi² Periodogram and FFT
 
 **Typical Scenarios**:
 ```
@@ -2099,18 +2140,20 @@ method, 256-sample segments, 50% overlap). Phase relationships were
 quantified using Hilbert transform-based phase clustering.
 
 Data were binned to 60-second intervals prior to analysis. Only ROIs
-showing significant circadian rhythms (Fisher Z-transformation,
-p < 0.05) were included in synchronization analyses.
+showing significant circadian rhythms (Chi² periodogram, Sokolove &
+Bushell 1978; Z(T) > 15.2, Bonferroni-corrected for m=100 periods,
+α=0.05) were included in synchronization analyses.
 ```
 
 #### Reporting Standards
 
-**Fisher Z-Transformation**:
+**Chi² Periodogram**:
 ```
 "All animals exhibited significant circadian rhythms
-(ROI 1: period = 24.2 ± 0.3 h, Z = 125.4, p < 0.0001;
-ROI 2: period = 23.8 ± 0.2 h, Z = 118.7, p < 0.0001;
-n = 6 animals)"
+(ROI 1: period = 24.2 ± 0.3 h, Z(T) = 125.4, Bonferroni-corrected
+threshold 15.2, p < 0.0001;
+ROI 2: period = 23.8 ± 0.2 h, Z(T) = 118.7, p < 0.0001;
+n = 6 animals; Chi² periodogram, Sokolove & Bushell 1978)"
 ```
 
 **Synchronization**:
@@ -2130,14 +2173,16 @@ anti-phase relationship (Δφ = 180 ± 12°, p < 0.001)"
 
 #### Figure Legends
 
-**Fisher Z-Transformation**:
+**Chi² Periodogram**:
 ```
-Figure 1. Circadian rhythm analysis using Fisher Z-transformation.
-(A-F) Periodograms for individual ROIs showing Z-score across tested
-periods (20-28 h). Colored curves represent Z-scores, with gray dashed
-lines indicating significance threshold (p = 0.05). Colored vertical
-lines and markers indicate dominant periods. All ROIs showed significant
-circadian rhythms (p < 0.0001).
+Figure 1. Circadian rhythm analysis using the Chi² periodogram
+(Sokolove & Bushell 1978).
+(A-F) Periodograms for individual ROIs showing Z(T) = n×(r_cos²+r_sin²)
+across tested periods (20-28 h). Colored curves represent Z(T); gray
+dashed lines indicate the Bonferroni-corrected significance threshold
+(≈ 15.2, α=0.05, m=100 periods). Colored vertical lines and markers
+indicate dominant periods. All ROIs showed significant circadian rhythms
+(Z(T) >> 15.2, p < 0.0001).
 ```
 
 **Phase Clustering**:
@@ -2275,7 +2320,8 @@ Before Extended Analysis:
 
 ### Scientific Background
 
-**Fisher Z-Transformation**:
+**Chi² Periodogram**:
+- Sokolove, P.G., & Bushell, W.N. (1978). "The chi square periodogram: its utility for analysis of circadian rhythms." Journal of Theoretical Biology, 72(1), 131–160.
 - Fisher, R.A. (1929). "Tests of significance in harmonic analysis." Proceedings of the Royal Society A.
 - Enright, J.T. (1965). "The search for rhythmicity in biological time-series." Journal of Theoretical Biology.
 
@@ -2296,7 +2342,7 @@ Before Extended Analysis:
 **Algorithms Used**:
 - NumPy FFT: `numpy.fft.rfft` with zero-padding
 - SciPy Signal Processing: `scipy.signal.welch`, `scipy.signal.find_peaks`, `scipy.signal.hilbert`
-- SciPy Statistics: `scipy.stats.chi2` for Fisher significance
+- SciPy Statistics: `scipy.stats.chi2` for Chi² periodogram significance and Bonferroni threshold
 - SciPy Clustering: `scipy.cluster.hierarchy` for dendrogram
 
 **Validation**:
@@ -2323,9 +2369,18 @@ Please include:
 
 ## Changelog
 
+### Version 1.2 (2025 — refactor/widget-split-zarr-support)
+- Population cosinor: replaced Rayleigh test with Nelson et al. (1979) F-test: F(dfn=2, dfd=2(n−1))
+- Chi² periodogram: Bonferroni correction explicitly documented (threshold ≈ 15.2, not 5.99)
+- FFT permutation test: clarified that max-power over full period range is used (handles multiple-frequency problem)
+- Coherence: viridis colormap, Bonferroni correction for N(N−1)/2 pairs documented
+- ROI Similarity: Bonferroni correction for N(N−1)/2 pairs documented; clustering labeled as exploratory only
+- Phase Clustering: labeled as descriptive only; PLV thresholds labeled as heuristic
+- Zarr support added alongside HDF5 and AVI
+
 ### Version 1.0 (2024)
 - Initial implementation of Extended Analysis tab
-- Fisher Z-Transformation periodogram
+- Chi² Periodogram (Sokolove & Bushell 1978) — previously referred to as "Fisher Z-transformation"
 - FFT Power Spectrum analysis
 - ROI Similarity Matrix with clustering
 - Coherence Analysis

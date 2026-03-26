@@ -25,15 +25,21 @@ statistically significant periodic components. For each candidate period T:
 3. Derive the Chi² statistic: `Q = n × (r²_cos + r²_sin)`
 4. Convert to Z-score for display
 
-### Z-score
+### Z-score (chi-squared statistic)
+
+The plot y-axis is labeled **"Z-score"** in the UI, but the quantity displayed is the
+chi-squared statistic:
 
 ```
-Z-score = f(Chi², n)
+Z(T) = n × (r²_cos + r²_sin)
 
 n = number of data points ∝ recording duration
 ```
 
-**Important:** The Z-score is NOT a pure measure of rhythm strength. It depends on
+Under H₀ this follows χ²(df=2). The name "Z-score" is a UI label convention — Z(T)
+is not a standard normal Z-score.
+
+**Important:** Z(T) is NOT a pure measure of rhythm strength. It depends on
 both rhythm quality AND sample size:
 
 - Longer recording → more data points (n↑) → higher Z-score for the same rhythm
@@ -44,8 +50,10 @@ both rhythm quality AND sample size:
 ### Significance threshold
 
 Under the null hypothesis (white noise), the Chi² statistic follows a chi-square
-distribution with 2 degrees of freedom. The critical Z-value at α = 0.05 is ~5.99
-(Bonferroni-corrected for the number of tested periods).
+distribution with 2 degrees of freedom. With Bonferroni correction for m = 100 tested
+periods, the critical threshold at α = 0.05 is χ²(1 − α/m, df=2) ≈ 15.2, **not** 5.99.
+The uncorrected α = 0.05 critical value (5.99) is far too lenient when testing 100 periods
+simultaneously and would produce many false positives.
 
 ### Period Range vs. Time Range
 
@@ -69,6 +77,8 @@ Shown automatically when ≥ 2 ROIs are analyzed:
 - A wide SEM band indicates heterogeneous periods across individuals (e.g., two
   sub-groups with different tau)
 - **Median peak** (blue dashed): median of individual dominant periods
+- **Horizontal dashed line**: The Bonferroni-corrected significance threshold (≈ 15.2 for
+  α = 0.05, m = 100 tested periods)
 
 ---
 
@@ -108,6 +118,18 @@ Each additional cycle reduces estimation error by √n:
 **Minimum: 7 cycles (= 7 days for 24h rhythm)**
 
 ### p-values in Cosinor
+
+**Individual fit**: significance is assessed by an F(2, n−3) test (two sine/cosine
+parameters vs. n observations).
+
+**Population cosinor**: uses the Nelson et al. (1979) F-test — F(dfn=2, dfd=2(n−1)) —
+which tests whether the mean β_cos and mean β_sin across all ROIs are simultaneously
+zero (H₀: no population-level rhythm). The individual β coefficients feed the
+numerator and denominator of this F-statistic.
+
+**Multi-period scan**: tests a fine-grained grid (~20 steps across the period range,
+with ≥ 1 h resolution) and selects the period with the best R² among those that pass
+the individual F-test.
 
 With large datasets (thousands of frames), p-values will be extremely small
 (p < 1e-300) even for biologically weak rhythms. Do not use p-value alone as

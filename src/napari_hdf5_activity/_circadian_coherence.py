@@ -174,8 +174,11 @@ def calculate_coherence(
             else 1.0 / (target_period_hours * 3600)
         )
 
-    # Calculate number of segments for significance threshold
-    n_segments = len(signal1) // nperseg
+    # Calculate actual number of Welch segments (50 % overlap: step = nperseg // 2)
+    # The non-overlapping formula (len // nperseg) underestimates by ~2×, which
+    # inflates the significance threshold and makes the test overly conservative.
+    step = nperseg - nperseg // 2  # effective step with noverlap = nperseg // 2
+    n_segments = max(1, (len(signal1) - nperseg) // step + 1)
     critical_coherence = coherence_significance_threshold(
         n_segments, significance_level
     )
@@ -249,6 +252,10 @@ def calculate_coherence_matrix(
     pairwise_coherence = {}
     critical_coherence = None
 
+    # Bonferroni correction: testing n_pairs simultaneously at α → α / n_pairs
+    n_pairs = max(1, n_rois * (n_rois - 1) // 2)
+    corrected_alpha = significance_level / n_pairs
+
     for i, roi1 in enumerate(roi_list):
         for j, roi2 in enumerate(roi_list):
             if i == j:
@@ -269,7 +276,7 @@ def calculate_coherence_matrix(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
                 target_period_hours=target_period_hours,
-                significance_level=significance_level,
+                significance_level=corrected_alpha,
             )
 
             if "error" not in result:
@@ -288,6 +295,8 @@ def calculate_coherence_matrix(
         "target_period_hours": target_period_hours,
         "critical_coherence": critical_coherence,
         "significance_level": significance_level,
+        "corrected_alpha": corrected_alpha,
+        "n_pairs_tested": n_pairs,
     }
 
 
@@ -429,14 +438,17 @@ def detect_phase_clusters(
         "night_active": [],
     }
 
+    # Quadrant boundaries scale with the dominant period (each quadrant = period/4)
+    q = dominant_period_hours / 4.0
+
     for roi_id, phase_info in roi_phases.items():
         phase_h = phase_info["phase_hours"]
 
-        if 0 <= phase_h < 6:
+        if phase_h < q:
             clusters["early_active"].append(roi_id)
-        elif 6 <= phase_h < 12:
+        elif phase_h < 2 * q:
             clusters["mid_active"].append(roi_id)
-        elif 12 <= phase_h < 18:
+        elif phase_h < 3 * q:
             clusters["late_active"].append(roi_id)
         else:
             clusters["night_active"].append(roi_id)
@@ -488,7 +500,9 @@ def generate_coherence_summary(coherence_results: Dict[str, Any]) -> str:
 
     coherent_pairs = sorted(coherent_pairs, key=lambda x: x["coherence"], reverse=True)
 
-    summary_lines.append(f"Synchronized pairs (coherence > 0.6): {len(coherent_pairs)}")
+    critical = coherence_results.get("critical_coherence", None)
+    crit_str = f"{critical:.3f}" if critical is not None else "0.6"
+    summary_lines.append(f"Synchronized pairs (coherence > {crit_str}): {len(coherent_pairs)}")
 
     if coherent_pairs:
         summary_lines.append("")

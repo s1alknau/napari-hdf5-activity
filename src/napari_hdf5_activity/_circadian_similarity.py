@@ -128,9 +128,9 @@ def calculate_cross_correlation(
     s1 = (signal1 - np.mean(signal1)) / (np.std(signal1) + 1e-10)
     s2 = (signal2 - np.mean(signal2)) / (np.std(signal2) + 1e-10)
 
-    # Calculate cross-correlation
+    # Calculate cross-correlation (raw sum, not yet normalized)
+    n = len(s1)
     correlation = signal.correlate(s1, s2, mode="same", method="auto")
-    correlation = correlation / len(s1)  # Normalize
 
     # Calculate lags
     max_lag_samples = int((max_lag_hours * 3600) / sampling_interval)
@@ -139,9 +139,19 @@ def calculate_cross_correlation(
     center = len(correlation) // 2
     lag_range = slice(center - max_lag_samples, center + max_lag_samples + 1)
 
-    correlation_window = correlation[lag_range]
+    correlation_window = correlation[lag_range].copy()
     lag_samples = np.arange(-max_lag_samples, max_lag_samples + 1)
     lag_hours = lag_samples * sampling_interval / 3600.0
+
+    # Normalize each lag by the actual number of overlapping samples so the
+    # result is always a proper Pearson-r equivalent in [-1, 1].
+    # (scipy gives the raw dot-product sum; at lag k only n-|k| pairs overlap.)
+    for idx, k in enumerate(lag_samples):
+        n_overlap = n - abs(int(k))
+        if n_overlap > 0:
+            correlation_window[idx] /= n_overlap
+        else:
+            correlation_window[idx] = 0.0
 
     # Find maximum correlation
     max_corr_idx = np.argmax(correlation_window)
@@ -214,6 +224,10 @@ def calculate_roi_correlation_matrix(
     significance_matrix = np.zeros((n_rois, n_rois), dtype=bool)
     pairwise_results = {}
 
+    # Bonferroni correction: testing n_pairs simultaneously at α → α / n_pairs
+    n_pairs = max(1, n_rois * (n_rois - 1) // 2)
+    corrected_alpha = significance_level / n_pairs
+
     for i, roi1 in enumerate(roi_list):
         for j, roi2 in enumerate(roi_list):
             if i == j:
@@ -238,7 +252,7 @@ def calculate_roi_correlation_matrix(
                 sampling_interval=(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
-                significance_level=significance_level,
+                significance_level=corrected_alpha,
             )
 
             if "error" not in result:
@@ -257,6 +271,8 @@ def calculate_roi_correlation_matrix(
         "pairwise_results": pairwise_results,
         "n_rois": n_rois,
         "significance_level": significance_level,
+        "corrected_alpha": corrected_alpha,
+        "n_pairs_tested": n_pairs,
     }
 
 
@@ -294,7 +310,10 @@ def find_similar_roi_pairs(
 
 
 def hierarchical_clustering(
-    correlation_matrix: np.ndarray, roi_ids: List[int], method: str = "average"
+    correlation_matrix: np.ndarray,
+    roi_ids: List[int],
+    method: str = "average",
+    threshold: float = 0.5,
 ) -> Dict[str, Any]:
     """
     Perform hierarchical clustering on ROIs based on correlation.
@@ -317,8 +336,8 @@ def hierarchical_clustering(
     # Perform hierarchical clustering
     linkage_matrix = hierarchy.linkage(condensed_dist, method=method)
 
-    # Cut tree to get clusters (e.g., at 0.5 distance = 0.5 correlation threshold)
-    cluster_labels = hierarchy.fcluster(linkage_matrix, t=0.5, criterion="distance")
+    # Cut tree at the caller-supplied distance threshold (default 0.5 → r ≥ 0.5)
+    cluster_labels = hierarchy.fcluster(linkage_matrix, t=threshold, criterion="distance")
 
     # Group ROIs by cluster
     clusters = {}
@@ -408,6 +427,7 @@ def calculate_phase_difference(
 def generate_similarity_summary(
     correlation_results: Dict[str, Any],
     clustering_results: Optional[Dict[str, Any]] = None,
+    threshold: float = 0.7,
 ) -> str:
     """
     Generate human-readable summary of similarity analysis.
@@ -432,10 +452,10 @@ def generate_similarity_summary(
     summary_lines.append(f"Total pairwise comparisons: {n_rois * (n_rois - 1) // 2}")
     summary_lines.append("")
 
-    # Find similar pairs
-    similar_pairs = find_similar_roi_pairs(correlation_results, threshold=0.7)
+    # Find similar pairs using the caller-supplied threshold
+    similar_pairs = find_similar_roi_pairs(correlation_results, threshold=threshold)
 
-    summary_lines.append(f"Highly similar pairs (r > 0.7): {len(similar_pairs)}")
+    summary_lines.append(f"Highly similar pairs (r > {threshold:.2f}): {len(similar_pairs)}")
     if similar_pairs:
         summary_lines.append("")
         summary_lines.append("Top 5 most similar ROI pairs:")

@@ -20,6 +20,83 @@ from matplotlib import ticker
 from matplotlib.figure import Figure
 from typing import Dict, List, Tuple, Optional
 
+# ---------------------------------------------------------------------------
+# Publication-quality figure standards
+# Standard journal column widths in inches (e.g. 85 / 114 / 174 mm)
+# ---------------------------------------------------------------------------
+JOURNAL_SINGLE_COL_IN = 3.35   # 85 mm
+JOURNAL_1P5_COL_IN    = 4.49   # 114 mm
+JOURNAL_DOUBLE_COL_IN = 6.85   # 174 mm
+
+PUBLICATION_STYLE_RC = {
+    "font.family":       "sans-serif",
+    "font.sans-serif":   ["Arial", "Helvetica", "DejaVu Sans"],
+    "font.size":         8,
+    "axes.labelsize":    8,
+    "axes.titlesize":    8,
+    "xtick.labelsize":   8,
+    "ytick.labelsize":   8,
+    "legend.fontsize":   8,
+    "legend.frameon":    False,
+    "axes.linewidth":    0.5,
+    "xtick.major.width": 0.5,
+    "ytick.major.width": 0.5,
+    "xtick.minor.width": 0.5,
+    "ytick.minor.width": 0.5,
+    "xtick.major.size":  3,
+    "ytick.major.size":  3,
+    "lines.linewidth":   1.0,
+    "axes.spines.top":   True,
+    "axes.spines.right": True,
+    "xtick.top":         True,
+    "ytick.right":       True,
+    "xtick.direction":   "in",
+    "ytick.direction":   "in",
+    "figure.dpi":        300,
+    "savefig.dpi":       300,
+    "savefig.bbox":      "tight",
+    "savefig.facecolor": "white",
+}
+
+
+def apply_publication_style() -> dict:
+    """Apply publication-quality matplotlib rcParams globally.
+
+    Returns the previous rcParams snapshot so callers can restore them::
+
+        prev = apply_publication_style()
+        # ... create / save figures ...
+        plt.rcParams.update(prev)
+    """
+    prev = {k: plt.rcParams[k] for k in PUBLICATION_STYLE_RC if k in plt.rcParams}
+    plt.rcParams.update(PUBLICATION_STYLE_RC)
+    return prev
+
+
+def publication_fig(n_rows: int = 1, col_width: str = "double",
+                    height_per_row: float = 1.5) -> Figure:
+    """Create a Figure sized for journal submission.
+
+    Args:
+        n_rows:         Number of subplot rows (used for height calculation).
+        col_width:      ``"single"`` (85 mm), ``"1.5"`` (114 mm), or
+                        ``"double"`` (174 mm, default).
+        height_per_row: Height in inches per subplot row (default 1.5 in).
+
+    Returns:
+        A :class:`~matplotlib.figure.Figure` with publication dimensions and
+        style already applied.
+    """
+    widths = {
+        "single": JOURNAL_SINGLE_COL_IN,
+        "1.5":    JOURNAL_1P5_COL_IN,
+        "double": JOURNAL_DOUBLE_COL_IN,
+    }
+    w = widths.get(col_width, JOURNAL_DOUBLE_COL_IN)
+    h = max(n_rows * height_per_row, 1.5)
+    apply_publication_style()
+    return plt.figure(figsize=(w, h), dpi=300)
+
 try:
     from ._calc import bin_activity_data_for_lighting
 
@@ -78,10 +155,21 @@ class PlotGenerator:
             # Clear any cached renderers
             self.figure._cachedRenderer = None
 
-            # Set figure properties
-            dpi = plot_config.get("dpi", 100)
-            fig_width = plot_config.get("fig_width", 10.0)
-            height_per_roi = plot_config.get("height_per_roi", 0.6)
+            # Export mode controls DPI, dimensions and publication style.
+            # Screen rendering uses relaxed settings for readability;
+            # publication settings are applied only when exporting.
+            export_mode = plot_config.get("export_mode", False)
+
+            if export_mode:
+                dpi = plot_config.get("dpi", 300)
+                fig_width = plot_config.get("fig_width", JOURNAL_DOUBLE_COL_IN)
+                height_per_roi = plot_config.get("height_per_roi", 1.5)
+                if plot_config.get("publication_style", True):
+                    apply_publication_style()
+            else:
+                dpi = 100  # screen DPI — content stays readable at actual display size
+                fig_width = 10.0  # wider than journal column for screen comfort
+                height_per_roi = max(2.5, plot_config.get("height_per_roi", 1.5))
 
             self.figure.set_dpi(dpi)
 
@@ -116,7 +204,8 @@ class PlotGenerator:
                 return False
 
         except Exception as e:
-            print(f"Error generating plot: {str(e)}")
+            import traceback as _tb
+            print(f"Error generating plot ({plot_type}): {e}\n{_tb.format_exc()}")
             return False
 
     def _plot_raw_intensity_enhanced(
@@ -165,7 +254,8 @@ class PlotGenerator:
         n_rois = len(sorted_rois)
 
         if n_rois == 0:
-            self.figure.suptitle("No intensity data available", fontsize=14)
+            self.figure.text(0.5, 0.5, "No intensity data available",
+                             ha="center", va="center")
             return False
 
         # Create subplot grid
@@ -178,7 +268,6 @@ class PlotGenerator:
             if i == 0:
                 ax_roi = self.figure.add_subplot(gs[i, 0])
                 title = "ROI Intensity with Hysteresis Detection System"
-                ax_roi.set_title(title, fontsize=12)
             else:
                 ax_roi = self.figure.add_subplot(gs[i, 0], sharex=axes[0])
 
@@ -556,7 +645,8 @@ class PlotGenerator:
             n_rois = len(sorted_rois)
 
             if n_rois == 0:
-                self.figure.suptitle("No lighting data available", fontsize=14)
+                self.figure.text(0.5, 0.5, "No lighting data available",
+                                 ha="center", va="center")
                 return False
 
             # Create gridspec for subplots
@@ -568,7 +658,6 @@ class PlotGenerator:
                 # Create subplot with shared x-axis
                 if i == 0:
                     ax_roi = self.figure.add_subplot(gs[i, 0])
-                    ax_roi.set_title(plot_title, fontsize=12)
                 else:
                     ax_roi = self.figure.add_subplot(gs[i, 0], sharex=axes[0])
 
@@ -664,8 +753,9 @@ class PlotGenerator:
 
                 # Add gridlines and clean up spines
                 ax_roi.grid(True, alpha=0.3)
-                ax_roi.spines["top"].set_visible(False)
-                ax_roi.spines["right"].set_visible(False)
+                if not plot_config.get("export_mode", False):
+                    ax_roi.spines["top"].set_visible(False)
+                    ax_roi.spines["right"].set_visible(False)
 
                 # Add legend only to first subplot, and only if there are labeled elements
                 if i == 0:
@@ -731,7 +821,8 @@ class PlotGenerator:
             # Get the metric data
             metric_data = data_dict.get(sleep_metric, {})
             if not metric_data:
-                self.figure.suptitle(f"No {sleep_metric} data available", fontsize=14)
+                self.figure.text(0.5, 0.5, f"No {sleep_metric} data available",
+                                 ha="center", va="center")
                 return False
 
             # Time range (in hours)
@@ -746,7 +837,8 @@ class PlotGenerator:
             n_rois = len(sorted_rois)
 
             if n_rois == 0:
-                self.figure.suptitle("No ROI data available", fontsize=14)
+                self.figure.text(0.5, 0.5, "No ROI data available",
+                                 ha="center", va="center")
                 return False
 
             gs = self.figure.add_gridspec(n_rois, 1, hspace=0.4)
@@ -756,7 +848,6 @@ class PlotGenerator:
             for i, roi in enumerate(sorted_rois):
                 if i == 0:
                     ax_roi = self.figure.add_subplot(gs[i, 0])
-                    ax_roi.set_title(config["title"], fontsize=12)
                 else:
                     ax_roi = self.figure.add_subplot(gs[i, 0], sharex=axes[0])
                 axes.append(ax_roi)
@@ -868,6 +959,121 @@ class PlotGenerator:
             print(f"Error generating sleep quality plot: {e}")
             return False
 
+    def _plot_population_mean(
+        self, data_dict: Dict, roi_colors: Dict, plot_config: Dict, **kwargs
+    ) -> bool:
+        """Plot the population mean ± SEM across all ROIs on a single axis.
+
+        Each ROI's time series is resampled onto a common uniform grid before
+        averaging.  The shaded band shows ± 1 SEM (standard error of the mean).
+        Individual ROI traces are drawn transparently in the background so the
+        reader can judge variability.
+
+        Args:
+            data_dict:   ``{roi_id: [(time_min, value), ...]}`` — same format
+                         used by every other plot method.
+            roi_colors:  Mapping from ROI id to colour string (not used for
+                         the mean line itself, but individual traces use it).
+            plot_config: Standard plot configuration dict.
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            if not data_dict:
+                self.figure.text(0.5, 0.5, "No data available",
+                                 ha="center", va="center")
+                return False
+
+            start_t = plot_config.get("start_time", 0.0)
+            end_t   = plot_config.get("end_time", 1e6)
+            y_label = kwargs.get("y_label", "Activity")
+            title   = kwargs.get("title", "Population Mean")
+            error_type = plot_config.get("population_error", "sem")  # "sem" or "sd"
+            show_individuals = plot_config.get("show_individual_rois", True)
+
+            ax = self.figure.add_subplot(1, 1, 1)
+
+            # Build common time grid (minutes)
+            all_times = []
+            for data in data_dict.values():
+                all_times.extend(t for t, _ in data
+                                 if start_t <= t <= end_t)
+            if not all_times:
+                ax.text(0.5, 0.5, "No data in selected time range",
+                        ha="center", va="center", transform=ax.transAxes)
+                return False
+
+            t_min = min(all_times)
+            t_max = max(all_times)
+            n_points = min(2000, max(200, int((t_max - t_min) / 1.0)))
+            t_grid = np.linspace(t_min, t_max, n_points)
+
+            # Interpolate each ROI onto the common grid
+            roi_arrays = []
+            for roi, data in data_dict.items():
+                pts = [(t, v) for t, v in data if start_t <= t <= end_t]
+                if len(pts) < 2:
+                    continue
+                ts = np.array([p[0] for p in pts])
+                vs = np.array([p[1] for p in pts])
+                sort_idx = np.argsort(ts)
+                ts, vs = ts[sort_idx], vs[sort_idx]
+                interp = np.interp(t_grid, ts, vs,
+                                   left=np.nan, right=np.nan)
+                roi_arrays.append((roi, interp))
+
+                if show_individuals:
+                    color = roi_colors.get(roi, f"C{(roi - 1) % 10}")
+                    ax.plot(t_grid / 60.0, interp, color=color,
+                            linewidth=0.5, alpha=0.3, zorder=1)
+
+            if not roi_arrays:
+                ax.text(0.5, 0.5, "Insufficient data for population mean",
+                        ha="center", va="center", transform=ax.transAxes)
+                return False
+
+            matrix = np.vstack([arr for _, arr in roi_arrays])  # (n_roi, n_points)
+            mean   = np.nanmean(matrix, axis=0)
+            n_valid = np.sum(~np.isnan(matrix), axis=0).astype(float)
+            if error_type == "sd":
+                error = np.nanstd(matrix, axis=0, ddof=1)
+                band_label = "± SD"
+            else:
+                std   = np.nanstd(matrix, axis=0, ddof=1)
+                error = np.where(n_valid > 1, std / np.sqrt(n_valid), np.nan)
+                band_label = "± SEM"
+
+            t_hours = t_grid / 60.0
+            ax.plot(t_hours, mean, color="black", linewidth=1.0,
+                    zorder=3, label=f"Mean (n={len(roi_arrays)})")
+            ax.fill_between(t_hours, mean - error, mean + error,
+                            color="black", alpha=0.2, zorder=2,
+                            label=band_label)
+
+            # Lighting overlay
+            if kwargs.get("led_data") is not None:
+                self._add_lighting_periods(ax, t_min / 60.0, t_max / 60.0,
+                                           add_legend=True, led_data=kwargs["led_data"],
+                                           time_divisor=3600.0)
+
+            ax.set_xlabel("Time (h)")
+            ax.set_ylabel(y_label)
+            if not plot_config.get("export_mode", False):
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+            n_rois_label = len(roi_arrays)
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc="upper right")
+
+            self.figure.tight_layout()
+            return True
+
+        except Exception as e:
+            print(f"Error generating population mean plot: {e}")
+            return False
+
     def _plot_binary_data(
         self,
         data_dict: Dict,
@@ -895,7 +1101,8 @@ class PlotGenerator:
         n_rois = len(sorted_rois)
 
         if n_rois == 0:
-            self.figure.suptitle(f"No {title.lower()} available", fontsize=14)
+            self.figure.text(0.5, 0.5, f"No {title.lower()} available",
+                             ha="center", va="center")
             return False
 
         gs = self.figure.add_gridspec(n_rois, 1, hspace=0.3)
@@ -905,14 +1112,6 @@ class PlotGenerator:
         for i, roi in enumerate(sorted_rois):
             if i == 0:
                 ax_roi = self.figure.add_subplot(gs[i, 0])
-                if zt_mode:
-                    ax_roi.set_title(
-                        f"{title} — ZT {start_display:.1f}h to ZT {end_display:.1f}h"
-                    )
-                else:
-                    ax_roi.set_title(
-                        f"{title} from {start_display:.1f} to {end_display:.1f} min"
-                    )
             else:
                 ax_roi = self.figure.add_subplot(gs[i, 0], sharex=axes[0])
 
@@ -1010,7 +1209,8 @@ class PlotGenerator:
         n_rois = len(sorted_rois)
 
         if n_rois == 0:
-            self.figure.suptitle(f"No {title.lower()} available", fontsize=14)
+            self.figure.text(0.5, 0.5, f"No {title.lower()} available",
+                             ha="center", va="center")
             return False
 
         gs = self.figure.add_gridspec(n_rois, 1, hspace=0.3)
@@ -1020,14 +1220,6 @@ class PlotGenerator:
         for i, roi in enumerate(sorted_rois):
             if i == 0:
                 ax_roi = self.figure.add_subplot(gs[i, 0])
-                if zt_mode:
-                    ax_roi.set_title(
-                        f"{title} — ZT {start_display:.1f}h to ZT {end_display:.1f}h"
-                    )
-                else:
-                    ax_roi.set_title(
-                        f"{title} from {start_display:.1f} to {end_display:.1f} min"
-                    )
             else:
                 ax_roi = self.figure.add_subplot(gs[i, 0], sharex=axes[0])
 
@@ -1143,8 +1335,22 @@ class PlotGenerator:
                 if robust_scaling:
                     lower_percentile = plot_config.get("lower_percentile", 5.0)
                     upper_percentile = plot_config.get("upper_percentile", 95.0)
-                    y_min = np.percentile(values, lower_percentile)
-                    y_max = np.percentile(values, upper_percentile)
+                    # IQR-based bounds (Tukey's fence) adapt automatically to the
+                    # data distribution.  For clean data this is ~99th percentile;
+                    # for recordings with extreme artifact frames it clips much
+                    # tighter than a fixed percentile ever could.
+                    # The user's Upper/Lower % still act as a ceiling/floor.
+                    q1, q3 = np.percentile(values, [25, 75])
+                    iqr = q3 - q1
+                    if iqr > 0:
+                        y_min = max(q1 - 1.5 * iqr,
+                                    np.percentile(values, lower_percentile))
+                        y_max = min(q3 + 1.5 * iqr,
+                                    np.percentile(values, upper_percentile))
+                    else:
+                        # All values identical — fall back to percentiles
+                        y_min = np.percentile(values, lower_percentile)
+                        y_max = np.percentile(values, upper_percentile)
                 else:
                     y_min = np.min(values)
                     y_max = np.max(values)
@@ -1189,10 +1395,11 @@ class PlotGenerator:
             ax_roi.xaxis.label.set_fontsize(11)
             ax_roi.tick_params(axis="x", labelsize=10)
 
-        # Add gridlines and clean up spines
+        # Add gridlines; in export mode keep all 4 spines for a frame
         ax_roi.grid(True, alpha=0.3)
-        ax_roi.spines["top"].set_visible(False)
-        ax_roi.spines["right"].set_visible(False)
+        if not plot_config.get("export_mode", False):
+            ax_roi.spines["top"].set_visible(False)
+            ax_roi.spines["right"].set_visible(False)
 
     def _format_shared_axes_minutes(
         self, axes: List, start_t_minutes: float, end_t_minutes: float
@@ -1330,12 +1537,18 @@ class PlotGenerator:
     ):
         """Add lighting period indicators to the plot based on HDF5 LED data or fallback to 12h cycles."""
 
-        if led_data is not None and isinstance(led_data, dict) and led_data:
+        if led_data is None:
+            return  # Lighting not requested
+        if isinstance(led_data, dict) and led_data.get("times") and led_data.get("white_powers"):
             # Use LED data from HDF5 file
             self._add_lighting_periods_from_hdf5(
                 ax_roi, start_display, end_display, add_legend, led_data, time_divisor
             )
-        # else: led_data is None or empty → no LED metadata available (e.g. AVI) → skip overlay
+        else:
+            # No white LED channel available — fall back to legacy 12h cycles (lights-on at ZT 0)
+            self._add_lighting_periods_legacy(
+                ax_roi, start_display, end_display, add_legend, time_divisor, light_start_hour=0
+            )
 
     def _add_lighting_periods_from_hdf5(
         self,
@@ -1510,9 +1723,9 @@ def create_plot_config(widget_instance=None, **kwargs) -> Dict:
         Dictionary containing plot configuration
     """
     config = {
-        "dpi": 100,
-        "fig_width": 10.0,
-        "height_per_roi": 0.6,
+        "dpi": 300,
+        "fig_width": JOURNAL_DOUBLE_COL_IN,  # 174 mm — journal double column
+        "height_per_roi": 1.5,  # inches per ROI row (readable at 8 pt font)
         "start_time": 0.0,  # in minutes
         "end_time": 1000.0,  # in minutes
         "auto_scale_y": True,
@@ -1652,20 +1865,43 @@ def create_hysteresis_kwargs(widget_instance=None, use_real_amplitude=False, **k
     return hysteresis_kwargs
 
 
-def save_plot(figure: Figure, file_path: str, dpi: int = 100) -> bool:
-    """
-    Save a matplotlib figure to file.
+def save_plot(figure: Figure, file_path: str, dpi: int = 300,
+              publication_style: bool = False) -> bool:
+    """Save a matplotlib figure to file.
 
     Args:
-        figure: matplotlib Figure to save
-        file_path: Path where to save the file
-        dpi: DPI for saving
+        figure:            matplotlib Figure to save.
+        file_path:         Destination path.  Recommended formats for journals:
+                           TIFF (.tif/.tiff), PDF, EPS, PNG.
+        dpi:               Resolution in DPI (default 300, journals require ≥ 300).
+        publication_style: If True, enforce publication rcParams and clamp the
+                           figure to double-column width (174 mm) before saving,
+                           then restore original settings afterward.
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise.
     """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _pub_ctx(fig):
+        if not publication_style:
+            yield
+            return
+        prev_rc   = apply_publication_style()
+        orig_size = fig.get_size_inches()
+        if orig_size[0] > JOURNAL_DOUBLE_COL_IN:
+            fig.set_size_inches(JOURNAL_DOUBLE_COL_IN, orig_size[1])
+        try:
+            yield
+        finally:
+            plt.rcParams.update(prev_rc)
+            fig.set_size_inches(*orig_size)
+
     try:
-        figure.savefig(file_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+        with _pub_ctx(figure):
+            figure.savefig(file_path, dpi=dpi, bbox_inches="tight",
+                           facecolor="white")
         return True
     except Exception as e:
         print(f"Error saving plot: {str(e)}")

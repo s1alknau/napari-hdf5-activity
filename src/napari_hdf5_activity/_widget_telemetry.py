@@ -589,10 +589,6 @@ class TelemetryMixin:
         if n_plots > 0:
             axes[-1, 0].set_xlabel(x_label, fontsize=9)
 
-        self.telemetry_figure.suptitle(
-            f"HDF5 Telemetry — {os.path.basename(getattr(self, 'file_path', '') or '')}",
-            fontsize=10, y=1.0,
-        )
         self.telemetry_figure.tight_layout()
         self.telemetry_canvas.draw()
         self._log_message(f"Plotted {n_plots} telemetry timeseries ({x_label})")
@@ -676,7 +672,6 @@ class TelemetryMixin:
                 unit_str = f" [{unit}]" if unit else ""
                 ax.set_ylabel(f"{ds_name}{unit_str}", fontsize=9)
                 ax.set_xlabel(x_label, fontsize=9)
-                ax.set_title(f"{ds_name} ({cat_name})", fontsize=10)
                 ax.grid(True, alpha=0.3)
                 fig.tight_layout()
 
@@ -715,9 +710,6 @@ class TelemetryMixin:
 
             if n_plots > 0:
                 axes[-1, 0].set_xlabel(x_label, fontsize=9)
-            fig_combined.suptitle(
-                f"HDF5 Telemetry Overview — {base_name}", fontsize=11, y=1.0,
-            )
             fig_combined.tight_layout()
 
             combined_path = os.path.join(out_dir, f"{base_name}_telemetry_all.png")
@@ -762,6 +754,9 @@ class TelemetryMixin:
 
     def _debug_hdf5_structure(self):
         """Print detailed HDF5 structure to the log."""
+        from napari_hdf5_activity import __version__ as _plugin_version
+        self._log_message(f"  Analysis plugin : napari-hdf5-activity v{_plugin_version}")
+
         if DUAL_STRUCTURE_AVAILABLE:
             try:
                 structure_info = detect_hdf5_structure_type(self.file_path)
@@ -786,9 +781,25 @@ class TelemetryMixin:
                 elif structure_info["type"] == "error":
                     self._log_message(f"  ERROR: {structure_info['error']}")
 
-                # Additional root-level keys
+                # File version + compatibility check
                 import h5py
                 with h5py.File(self.file_path, "r") as f:
+                    file_ver = str(f.attrs.get("file_version", "unknown"))
+                    creator  = str(f.attrs.get("creator", f.attrs.get("software", "unknown")))
+                    self._log_message(f"  File version    : {file_ver}  (creator: {creator})")
+
+                    # Compatibility assessment
+                    try:
+                        fv = float(file_ver)
+                        if fv >= 2.2:
+                            self._log_message("  Compatibility   : ✅ Modern format (≥ 2.2) — fully supported")
+                        elif fv >= 2.0:
+                            self._log_message("  Compatibility   : ⚠️ Older format (2.0–2.1) — legacy mode, some telemetry may be missing")
+                        else:
+                            self._log_message("  Compatibility   : ⚠️ Legacy format (< 2.0) — basic analysis only")
+                    except (ValueError, TypeError):
+                        self._log_message("  Compatibility   : ❓ Unknown file version — assuming legacy mode")
+
                     root_keys = list(f.keys())
                     self._log_message(f"  Root keys: {root_keys}")
                     if "timeseries" in f:

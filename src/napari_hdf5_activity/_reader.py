@@ -3425,9 +3425,7 @@ def _process_single_chunk_dual_structure(
         return start_idx, chunk_results
 
     except Exception as e:
-        logger.error(
-            f"Error processing dual-structure chunk {start_idx}-{end_idx}: {e}"
-        )
+        logger.error(f"Error processing dual-structure chunk {start_idx}-{end_idx}: {e}")
         masks = _worker_masks or []
         return start_idx, {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
