@@ -5338,6 +5338,11 @@ class CircadianMixin:
                         ax.grid(True, alpha=0.3)
                         ax.tick_params(axis="both", labelsize=8)
                         ax.set_ylim(bottom=0)
+                        # Extend x-axis to the full requested period range so the
+                        # curve fills edge-to-edge (intersection clipping leaves gaps)
+                        req_min = self.fisher_min_period.value()
+                        req_max = self.fisher_max_period.value()
+                        ax.set_xlim(req_min, req_max)
                         return True
                 ax.text(0.5, 0.5, "Not enough valid ROIs for population mean",
                         ha="center", va="center", transform=ax.transAxes, fontsize=9)
@@ -5841,6 +5846,10 @@ class CircadianMixin:
         ax.legend(fontsize=8, loc="upper left")
         ax.grid(True, alpha=0.3)
         ax.tick_params(axis="both", labelsize=8)
+        # Extend x-axis to the full requested period range
+        req_min = self.fisher_min_period.value()
+        req_max = self.fisher_max_period.value()
+        ax.set_xlim(req_min, req_max)
 
     def _make_population_figure(self):
         """Return a standalone Figure containing only the population mean panel."""
