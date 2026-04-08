@@ -2677,7 +2677,7 @@ class CircadianMixin:
 
             if has_population:
                 _pop_h   = 2.8   # inches for population axes
-                _gap_h   = 1.8   # inches gap between data section and population panel
+                _gap_h   = 0.35  # inches gap between data section and population panel
                 _bot_pad = 0.85  # inches bottom margin (x-axis label + tick room)
                 _top_pad = 0.55  # inches top margin
                 _row_h   = 4.0   # inches per data row
@@ -5044,7 +5044,7 @@ class CircadianMixin:
             #   cannot span them), so use generous fixed margins instead.
             if has_population:
                 _pop_h   = 2.8   # inches for population axes
-                _gap_h   = 1.8   # inches gap between data section and population panel
+                _gap_h   = 0.35  # inches gap between data section and population panel
                 _bot_pad = 0.85  # inches bottom margin (x-axis label + tick room)
                 _top_pad = 0.55  # inches top margin
                 _row_h   = 4.0   # inches per data row
