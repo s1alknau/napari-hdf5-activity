@@ -2677,10 +2677,10 @@ class CircadianMixin:
 
             if has_population:
                 _pop_h   = 2.8   # inches for population axes
-                _gap_h   = 0.35  # inches gap between data section and population panel
+                _gap_h   = 0.70  # inches gap between data section and population panel
                 _bot_pad = 0.85  # inches bottom margin (x-axis label + tick room)
                 _top_pad = 0.55  # inches top margin
-                _row_h   = 4.0   # inches per data row
+                _row_h   = 3.5   # inches per data row
                 fig_height = _top_pad + _row_h * total_rows + _gap_h + _pop_h + _bot_pad
                 _pop_bot = _bot_pad / fig_height
                 _pop_top = (_pop_h + _bot_pad) / fig_height
@@ -2690,7 +2690,7 @@ class CircadianMixin:
                 gs = _GridSpec(total_rows, n_cols, figure=fig,
                                left=0.12, right=0.97,
                                top=_dat_top, bottom=_dat_bot,
-                               hspace=1.0, wspace=0.40)
+                               hspace=0.45, wspace=0.40)
                 gs_pop = _GridSpec(1, n_cols, figure=fig,
                                    left=0.12, right=0.97,
                                    top=_pop_top, bottom=_pop_bot,
@@ -5044,10 +5044,10 @@ class CircadianMixin:
             #   cannot span them), so use generous fixed margins instead.
             if has_population:
                 _pop_h   = 2.8   # inches for population axes
-                _gap_h   = 0.35  # inches gap between data section and population panel
+                _gap_h   = 0.70  # inches gap between data section and population panel
                 _bot_pad = 0.85  # inches bottom margin (x-axis label + tick room)
                 _top_pad = 0.55  # inches top margin
-                _row_h   = 4.0   # inches per data row
+                _row_h   = 3.5   # inches per data row
                 fig_height = _top_pad + _row_h * total_rows + _gap_h + _pop_h + _bot_pad
                 _pop_bot = _bot_pad / fig_height
                 _pop_top = (_pop_h + _bot_pad) / fig_height
@@ -5057,7 +5057,7 @@ class CircadianMixin:
                 gs = _GridSpec(total_rows, n_cols, figure=fig,
                                left=0.12, right=0.97,
                                top=_dat_top, bottom=_dat_bot,
-                               hspace=1.0, wspace=0.40)
+                               hspace=0.45, wspace=0.40)
                 gs_pop = _GridSpec(1, n_cols, figure=fig,
                                    left=0.12, right=0.97,
                                    top=_pop_top, bottom=_pop_bot,
