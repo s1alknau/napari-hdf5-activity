@@ -2986,27 +2986,39 @@ class CircadianMixin:
             has_population = show_population and "error" not in pop_result
 
             fig_width = max(6, n_cols * 5)
-            fig_height = 4.5 * n_rows_per_section + 1 + (3.5 if has_population else 0)
             from matplotlib.figure import Figure as _Figure
             from matplotlib.gridspec import GridSpec as _GridSpec
-            fig = _Figure(figsize=(fig_width, fig_height))
 
             if has_population:
-                gs = _GridSpec(
-                    n_rows_per_section + 1, n_cols, figure=fig,
-                    height_ratios=[1] * n_rows_per_section + [0.8],
-                    left=0.10, right=0.97, top=0.95, bottom=0.07,
-                    hspace=0.85, wspace=0.35,
-                )
+                _pop_h   = 3.5   # inches for population axes
+                _gap_h   = 0.70  # inches gap between ROI section and population panel
+                _bot_pad = 0.85  # inches bottom margin
+                _top_pad = 0.55  # inches top margin
+                _row_h   = 3.5   # inches per ROI row
+                fig_height = _top_pad + _row_h * n_rows_per_section + _gap_h + _pop_h + _bot_pad
+                _pop_bot = _bot_pad / fig_height
+                _pop_top = (_pop_h + _bot_pad) / fig_height
+                _dat_bot = (_pop_h + _bot_pad + _gap_h) / fig_height
+                _dat_top = 1.0 - _top_pad / fig_height
+                fig = _Figure(figsize=(fig_width, fig_height))
+                gs = _GridSpec(n_rows_per_section, n_cols, figure=fig,
+                               left=0.10, right=0.97,
+                               top=_dat_top, bottom=_dat_bot,
+                               hspace=0.45, wspace=0.35)
+                gs_pop = _GridSpec(1, 1, figure=fig,
+                                   left=0.10, right=0.97,
+                                   top=_pop_top, bottom=_pop_bot)
                 axes = np.array(
                     [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
                      for r in range(n_rows_per_section)]
                 )
-                ax_pop = fig.add_subplot(gs[n_rows_per_section, :])
+                ax_pop = fig.add_subplot(gs_pop[0, 0])
             else:
+                fig_height = 4.0 * n_rows_per_section + 0.5
+                fig = _Figure(figsize=(fig_width, fig_height))
                 gs = _GridSpec(n_rows_per_section, n_cols, figure=fig,
                                left=0.10, right=0.97, top=0.95, bottom=0.07,
-                               hspace=0.85, wspace=0.35)
+                               hspace=0.45, wspace=0.35)
                 axes = np.array(
                     [[fig.add_subplot(gs[r, c]) for c in range(n_cols)]
                      for r in range(n_rows_per_section)]
