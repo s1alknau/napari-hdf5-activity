@@ -89,3 +89,23 @@ venv/
 # Publication documents (internal use only)
 PUBLICATION_SUMMARY.md
 PUBLICATION_SUMMARY_EN.md
+
+# Internal research documents — not part of the plugin
+*.lyx
+*.lyx~
+*.bib
+nul
+docs/entrainment_protocol*.txt
+docs/*.pptx
+docs/make_pptx.py
+docs/make_results_pptx.py
+nematostella_*
+
+# Local test data and scripts
+tests/inspect_hdf5.py
+tests/test_chunk_error.py
+tests/test_zarr_parallel.py
+tests/test_zarr_pipeline.py
+tests/test_data_6rois.zarr
+tests/test_data_6rois_dir.zarr/
+tests/test_nematostella_6rois_dir.zarr/

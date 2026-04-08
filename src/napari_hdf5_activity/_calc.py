@@ -1937,6 +1937,22 @@ def run_baseline_analysis(
     if num_processes is None or num_processes < 1:
         num_processes = max(1, cpu_count() - 1)
     num_processes = min(num_processes, num_rois)  # Don't use more than ROIs
+
+    # Check available RAM: each worker needs ~300 MB for Python + modules on Windows.
+    # If free RAM < num_processes * 350 MB, fall back to sequential to avoid OOM hang.
+    try:
+        import psutil
+        free_mb = psutil.virtual_memory().available / (1024 ** 2)
+        required_mb = num_processes * 350
+        if free_mb < required_mb:
+            logger.warning(
+                f"Low RAM ({free_mb:.0f} MiB free, {required_mb:.0f} MiB needed for "
+                f"{num_processes} workers) — forcing sequential processing"
+            )
+            num_processes = 1
+    except ImportError:
+        pass
+
     use_parallel = num_processes > 1 and num_rois >= 2
 
     analysis_results = {
@@ -2071,9 +2087,15 @@ def run_baseline_analysis(
         ]
 
         logger.debug(f"Starting Pool with {num_processes} processes...")
-        with Pool(processes=num_processes) as pool:
-            roi_results = pool.map(_process_single_roi_movement, roi_args)
-        logger.debug(f"Pool complete: {len(roi_results)} results")
+        try:
+            with Pool(processes=num_processes) as pool:
+                roi_results = pool.map(_process_single_roi_movement, roi_args)
+            logger.debug(f"Pool complete: {len(roi_results)} results")
+        except (MemoryError, OSError) as exc:
+            logger.warning(
+                f"Parallel Pool failed ({exc}); falling back to sequential processing"
+            )
+            roi_results = [_process_single_roi_movement(a) for a in roi_args]
 
         # Aggregate results from parallel workers
         movement_data = {}

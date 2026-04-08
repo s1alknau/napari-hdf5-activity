@@ -31,9 +31,9 @@ JOURNAL_DOUBLE_COL_IN = 6.85   # 174 mm
 PUBLICATION_STYLE_RC = {
     "font.family":       "sans-serif",
     "font.sans-serif":   ["Arial", "Helvetica", "DejaVu Sans"],
-    "font.size":         8,
-    "axes.labelsize":    8,
-    "axes.titlesize":    8,
+    "font.size":         9,
+    "axes.labelsize":    9,
+    "axes.titlesize":    10,
     "xtick.labelsize":   8,
     "ytick.labelsize":   8,
     "legend.fontsize":   8,
@@ -52,6 +52,7 @@ PUBLICATION_STYLE_RC = {
     "ytick.right":       True,
     "xtick.direction":   "in",
     "ytick.direction":   "in",
+    "axes.labelpad":     2,
     "figure.dpi":        300,
     "savefig.dpi":       300,
     "savefig.bbox":      "tight",
@@ -169,13 +170,17 @@ class PlotGenerator:
             else:
                 dpi = 100  # screen DPI — content stays readable at actual display size
                 fig_width = 10.0  # wider than journal column for screen comfort
-                height_per_roi = max(2.5, plot_config.get("height_per_roi", 1.5))
+                height_per_roi = plot_config.get("height_per_roi", 2.5)
 
             self.figure.set_dpi(dpi)
 
             # Calculate figure height based on number of ROIs
+            # If caller already computed the canvas-fitted height, use it directly
             num_rois = len(data_dict)
-            fig_height = max(1.0, height_per_roi * num_rois)
+            if "fig_height" in plot_config:
+                fig_height = plot_config["fig_height"]
+            else:
+                fig_height = max(1.0, height_per_roi * num_rois)
             self.figure.set_size_inches(fig_width, fig_height)
 
             # Route to appropriate plotting method
@@ -231,6 +236,7 @@ class PlotGenerator:
         roi_band_widths = kwargs.get("roi_band_widths", {})
         roi_upper_thresholds = kwargs.get("roi_upper_thresholds", {})
         roi_lower_thresholds = kwargs.get("roi_lower_thresholds", {})
+        per_roi_y_limits = kwargs.get("per_roi_y_limits", {})
 
         # Visualization options
         show_baseline_mean = kwargs.get("show_baseline_mean", True)
@@ -378,77 +384,79 @@ class PlotGenerator:
                     y_max_plot = 1.0
                     baseline_visible = False
 
-                # Plot baseline mean line
-                if show_baseline_mean:
-                    linestyle = "-" if baseline_visible else "--"
-                    alpha = 0.8 if baseline_visible else 0.5
-                    ax_roi.axhline(
-                        y=baseline_mean,
-                        linestyle=linestyle,
-                        color="red",
-                        alpha=alpha,
-                        linewidth=2.0,
-                        zorder=4,
-                        label=baseline_label,
-                    )
-
-                # Plot hysteresis band
+                # Plot hysteresis band first (lowest zorder so lines draw on top)
                 if show_deviation_band:
-                    alpha_band = 0.2 if baseline_visible else 0.1
                     ax_roi.fill_between(
                         times_display,
                         lower_threshold,
                         upper_threshold,
-                        alpha=alpha_band,
-                        color="orange",
+                        alpha=0.15,
+                        color="#FFA500",   # orange
                         zorder=2,
                         label=band_label,
                     )
 
-                # Plot detection thresholds
+                # Plot baseline mean line — navy blue for strong contrast against orange data
+                if show_baseline_mean:
+                    ax_roi.axhline(
+                        y=baseline_mean,
+                        linestyle="-",
+                        color="#0055AA",   # navy blue
+                        alpha=0.9,
+                        linewidth=1.8,
+                        zorder=6,
+                        label=baseline_label,
+                    )
+
+                # Plot detection thresholds — dark magenta dashed, drawn last for visibility
                 if show_detection_threshold:
-                    linestyle = "--" if baseline_visible else ":"
-                    alpha_thresh = 0.9 if baseline_visible else 0.5
                     ax_roi.axhline(
                         y=upper_threshold,
-                        linestyle=linestyle,
-                        color="darkred",
-                        alpha=alpha_thresh,
-                        linewidth=2.0,
-                        zorder=5,
+                        linestyle="--",
+                        color="#880088",   # dark magenta
+                        alpha=0.9,
+                        linewidth=1.5,
+                        zorder=7,
                         label=threshold_label,
                     )
                     ax_roi.axhline(
                         y=lower_threshold,
-                        linestyle=linestyle,
-                        color="darkred",
-                        alpha=alpha_thresh,
-                        linewidth=2.0,
-                        zorder=5,
+                        linestyle="--",
+                        color="#880088",
+                        alpha=0.9,
+                        linewidth=1.5,
+                        zorder=7,
                     )
 
-                # Add statistics text if requested
+                # Statistics text box — always in axes coordinates so it's always visible
                 if show_threshold_stats:
-                    # Use scientific notation for small values, decimal for large
                     def fmt(v):
-                        if abs(v) < 0.1 and v != 0:
+                        if v != 0 and abs(v) < 0.01:
                             return f"{v:.2e}"
-                        return f"{v:.3f}"
+                        return f"{v:.4g}"
 
                     stats_text = (
                         f"Baseline: {fmt(baseline_mean)}\n"
                         f"Upper:    {fmt(upper_threshold)}\n"
                         f"Lower:    {fmt(lower_threshold)}\n"
-                        f"Band: ±{fmt(band_width)}"
+                        f"Band:   ±{fmt(band_width)}"
                     )
                     ax_roi.text(
-                        0.02,
-                        0.98,
+                        0.01, 0.97,
                         stats_text,
                         transform=ax_roi.transAxes,
                         verticalalignment="top",
+                        horizontalalignment="left",
                         fontsize=8,
-                        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+                        fontfamily="monospace",
+                        zorder=10,
+                        bbox=dict(
+                            boxstyle="round,pad=0.3",
+                            facecolor="white",
+                            edgecolor="#0055AA",
+                            alpha=0.85,
+                            linewidth=0.8,
+                        ),
                     )
 
             # Format subplot
@@ -466,26 +474,22 @@ class PlotGenerator:
                 span = target_max - target_min
                 abs_ref = max(abs(target_max), abs(target_min))
                 if span < max(abs_ref * 1e-6, 1e-15):
-                    # All values effectively identical — use relative fallback
                     fallback = abs_ref * 0.1 if abs_ref > 0 else 1e-9
                     ax_roi.set_ylim(target_min - fallback, target_max + fallback)
                 else:
                     margin = span * 0.05
                     ax_roi.set_ylim(target_min - margin, target_max + margin)
 
+            # Per-ROI manual override — applied last so it wins over everything else
+            if roi in per_roi_y_limits:
+                ax_roi.set_ylim(*per_roi_y_limits[roi])
+
         # Format shared axes
         if zt_mode:
             self._format_shared_axes_hours(axes, start_display, end_display, xlabel="ZT (h)")
         else:
             self._format_shared_axes_minutes(axes, start_t_minutes, end_t_minutes)
-        self.figure.text(
-            0.04,
-            0.5,
-            "Normalized Intensity Change",
-            va="center",
-            rotation="vertical",
-            fontsize=11,
-        )
+        axes[len(axes) // 2].set_ylabel("Normalized Intensity Change", fontsize=9, labelpad=4)
 
         return True
 
@@ -748,8 +752,8 @@ class PlotGenerator:
                     )
                 else:
                     ax_roi.set_xlabel("Time (hours)")
-                    ax_roi.xaxis.label.set_fontsize(11)
-                    ax_roi.tick_params(axis="x", labelsize=10)
+                    ax_roi.xaxis.label.set_fontsize(9)
+                    ax_roi.tick_params(axis="x", labelsize=8)
 
                 # Add gridlines and clean up spines
                 ax_roi.grid(True, alpha=0.3)
@@ -767,9 +771,7 @@ class PlotGenerator:
             self._format_shared_axes_hours(axes, start_hours, end_hours)
 
             # Add Y-axis label (now dynamic based on data type)
-            self.figure.text(
-                0.01, 0.5, y_label, va="center", rotation="vertical", fontsize=11
-            )
+            axes[len(axes) // 2].set_ylabel(y_label, fontsize=9, labelpad=4)
 
             return True
 
@@ -948,10 +950,7 @@ class PlotGenerator:
             )
 
             # Y-axis label
-            self.figure.text(
-                0.01, 0.5, config["y_label"],
-                va="center", rotation="vertical", fontsize=11,
-            )
+            axes[len(axes) // 2].set_ylabel(config["y_label"], fontsize=9, labelpad=4)
 
             return True
 
@@ -1176,9 +1175,7 @@ class PlotGenerator:
             self._format_shared_axes_hours(axes, start_display, end_display, xlabel="ZT (h)")
         else:
             self._format_shared_axes_minutes(axes, start_display, end_display)
-        self.figure.text(
-            0.02, 0.5, y_axis_label, va="center", rotation="vertical", fontsize=12
-        )
+        axes[len(axes) // 2].set_ylabel(y_axis_label, fontsize=9, labelpad=4)
 
         return True
 
@@ -1293,9 +1290,7 @@ class PlotGenerator:
             self._format_shared_axes_hours(axes, start_display, end_display, xlabel="ZT (h)")
         else:
             self._format_shared_axes_minutes(axes, start_display, end_display)
-        self.figure.text(
-            0.02, 0.5, y_axis_label, va="center", rotation="vertical", fontsize=12
-        )
+        axes[len(axes) // 2].set_ylabel(y_axis_label, fontsize=9, labelpad=4)
 
         return True
 
@@ -1392,8 +1387,8 @@ class PlotGenerator:
             )
         else:
             ax_roi.set_xlabel("Time (min)")
-            ax_roi.xaxis.label.set_fontsize(11)
-            ax_roi.tick_params(axis="x", labelsize=10)
+            ax_roi.xaxis.label.set_fontsize(9)
+            ax_roi.tick_params(axis="x", labelsize=8)
 
         # Add gridlines; in export mode keep all 4 spines for a frame
         ax_roi.grid(True, alpha=0.3)
@@ -1979,7 +1974,8 @@ def save_all_plot_types(
                 file_path = os.path.join(output_directory, filename)
 
                 if save_plot(
-                    plot_generator.figure, file_path, plot_config.get("dpi", 100)
+                    plot_generator.figure, file_path,
+                    plot_config.get("dpi", 300), publication_style=True
                 ):
                     saved_files.append(file_path)
                     print(f"Saved: {filename}")

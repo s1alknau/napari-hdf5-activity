@@ -62,64 +62,51 @@ def fisher_z_periodogram(
     n_periods = 100
     periods = np.linspace(min_period, max_period, n_periods)
 
+    n = len(time_series)
     z_scores = np.zeros(n_periods)
 
-    # Calculate Z-score for each period
+    # Pre-compute time indices (same for all periods)
+    t = np.arange(n)
+
     for idx, period_hours in enumerate(periods):
-        # Convert period to number of samples
         period_samples = period_hours / sampling_hours
+        omega = 2 * np.pi / period_samples
 
-        # Calculate frequency (cycles per sample)
-        freq = 1.0 / period_samples
-
-        # Calculate angular frequency
-        omega = 2 * np.pi * freq
-
-        # Create time indices
-        t = np.arange(len(time_series))
-
-        # Calculate cosine and sine components
         cos_component = np.cos(omega * t)
         sin_component = np.sin(omega * t)
 
-        # Calculate correlation with time series
         r_cos = np.corrcoef(time_series, cos_component)[0, 1]
         r_sin = np.corrcoef(time_series, sin_component)[0, 1]
 
-        # Handle NaN correlations
         if np.isnan(r_cos):
-            r_cos = 0
+            r_cos = 0.0
         if np.isnan(r_sin):
-            r_sin = 0
+            r_sin = 0.0
 
-        # Calculate squared coherence (power)
-        coherence_sq = r_cos**2 + r_sin**2
+        # Classical chi² periodogram statistic: Z = n × (r²_cos + r²_sin)
+        # Under H0, Z ~ chi²(df=2). Larger n (more data) yields larger Z
+        # for the same rhythm strength, which is statistically correct —
+        # more data genuinely increases detection power.
+        z_scores[idx] = n * (r_cos**2 + r_sin**2)
 
-        # Chi² periodogram test statistic: n × (r_cos² + r_sin²)
-        # Follows chi-square distribution with df=2 under null hypothesis of no periodicity
-        n = len(time_series)
-        z_scores[idx] = n * coherence_sq
+    # Bonferroni-corrected critical value: chi²(1-α/m, df=2)
+    m = len(periods)
+    corrected_alpha = significance_level / m
+    chi2_crit = stats.chi2.ppf(1 - corrected_alpha, df=2)
+    critical_z = chi2_crit
 
-    # Find dominant period
+    significant_mask = z_scores > critical_z
+    significant_periods = periods[significant_mask].tolist()
+
     max_z_idx = np.argmax(z_scores)
     dominant_period = periods[max_z_idx]
     max_z_score = z_scores[max_z_idx]
 
-    # Calculate p-value using chi-square distribution (df=2)
-    # Raw single-frequency p-value (for display)
     p_value = 1 - stats.chi2.cdf(max_z_score, df=2)
-
-    # Bonferroni-corrected threshold: testing m periods simultaneously
-    # chi²(1 - alpha/m, df=2) — guards against false positives across the periodogram
-    m = len(periods)
-    corrected_alpha = significance_level / m
-    critical_z = stats.chi2.ppf(1 - corrected_alpha, df=2)
-    significant_mask = z_scores > critical_z
-    significant_periods = periods[significant_mask].tolist()
 
     return {
         "periods": periods,
-        "test_periods": periods.tolist(),   # alias expected by generate_circadian_summary
+        "test_periods": periods.tolist(),
         "z_scores": z_scores,
         "significant_periods": significant_periods,
         "dominant_period": dominant_period,
@@ -127,6 +114,7 @@ def fisher_z_periodogram(
         "p_value": p_value,
         "is_significant": max_z_score > critical_z,
         "critical_z": critical_z,
+        "n_samples": n,
         "n_periods_tested": m,
         "sampling_hours": sampling_hours,
         "total_duration_hours": total_duration_hours,

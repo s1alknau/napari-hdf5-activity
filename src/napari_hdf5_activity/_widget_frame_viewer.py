@@ -1020,14 +1020,15 @@ class FrameViewerMixin:
                 color = (0, 0, 255) if is_excluded else (0, 255, 0)
                 cv2.circle(frame, (cx, cy), r, color, 2)
 
-                # ROI number label
+                # ROI number label — placed outside the circle (top-right edge)
                 label = f"{idx + 1}"
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 1.8
                 thickness = 3
                 (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-                text_x = cx - tw // 2
-                text_y = cy + th // 2
+                offset = int(r / 1.414) + 4  # diagonal offset to circle edge
+                text_x = cx + offset
+                text_y = cy - offset
                 # Dark background for readability
                 cv2.rectangle(
                     frame,
@@ -1067,8 +1068,9 @@ class FrameViewerMixin:
             font_scale = 1.8
             thickness = 3
             (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            text_x = cx - tw // 2
-            text_y = cy + th // 2
+            offset = int(r / 1.414) + 4  # diagonal offset to circle edge
+            text_x = cx + offset
+            text_y = cy - offset
             cv2.rectangle(
                 frame,
                 (text_x - 4, text_y - th - 4),
@@ -1249,7 +1251,13 @@ class FrameViewerMixin:
 
         # Check if we have analysis data
         if not hasattr(self, "merged_results") or not self.merged_results:
-            self._log_message("⚠️ No analysis data for synchronized plots")
+            self._log_message("⚠️ No analysis data for synchronized plots — run Main Analysis first")
+            self.sync_figure.clear()
+            ax = self.sync_figure.add_subplot(111)
+            ax.text(0.5, 0.5, "No analysis data.\nRun Main Analysis first.",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=12, color="gray")
+            ax.axis("off")
+            self.sync_canvas.draw()
             return
 
         from ._plot import PlotGenerator, create_plot_config, create_hysteresis_kwargs
@@ -1257,7 +1265,14 @@ class FrameViewerMixin:
         plot_type, data_dict = self._get_sync_plot_data()
 
         if not data_dict:
-            self._log_message(f"⚠️ No {self.sync_plot_type.currentText()} data available")
+            msg = f"No {self.sync_plot_type.currentText()} data available"
+            self._log_message(f"⚠️ {msg}")
+            self.sync_figure.clear()
+            ax = self.sync_figure.add_subplot(111)
+            ax.text(0.5, 0.5, msg, ha="center", va="center",
+                    transform=ax.transAxes, fontsize=12, color="gray")
+            ax.axis("off")
+            self.sync_canvas.draw()
             return
 
         # Get ROI colors
@@ -1281,9 +1296,22 @@ class FrameViewerMixin:
 
         # Create plot configuration from widget settings (same as Analysis tab)
         plot_config = create_plot_config(self)
-        # Calculate optimal height per ROI based on available space
+        # Fit all ROIs exactly into the available canvas height
         plot_config["height_per_roi"] = max(0.6, fig_height / n_rois) if n_rois > 0 else 0.8
         plot_config["fig_width"] = fig_width
+        plot_config["fig_height"] = fig_height  # prevent generate_plot from overriding
+
+        # Resolve ZT mode and lighting overlay (same logic as Analysis tab)
+        zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+        show_lighting = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+        if show_lighting:
+            _raw_led = getattr(self, "led_data", None)
+            if _raw_led and isinstance(_raw_led, dict) and _raw_led.get("times") and _raw_led.get("white_powers"):
+                led_data_for_plot = _raw_led
+            else:
+                led_data_for_plot = {}  # empty dict → legacy 12h fallback
+        else:
+            led_data_for_plot = None
 
         # Get kwargs for specific plot types
         if plot_type == "Raw Intensity Changes":
@@ -1294,11 +1322,25 @@ class FrameViewerMixin:
         else:
             hysteresis_kwargs = {}
 
+        # Always include ZT mode and lighting in kwargs
+        hysteresis_kwargs["zt_mode"] = zt_mode
+        hysteresis_kwargs["led_data"] = led_data_for_plot
+
         # Use PlotGenerator (same as Analysis tab)
         plot_generator = PlotGenerator(self.sync_figure)
-        plot_generator.generate_plot(
-            plot_type, data_dict, roi_colors, plot_config, **hysteresis_kwargs
-        )
+        try:
+            plot_generator.generate_plot(
+                plot_type, data_dict, roi_colors, plot_config, **hysteresis_kwargs
+            )
+        except Exception as e:
+            self._log_message(f"ERROR in sync plot: {e}")
+            self.sync_figure.clear()
+            ax = self.sync_figure.add_subplot(111)
+            ax.text(0.5, 0.5, f"Plot error:\n{e}", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=10, color="red", wrap=True)
+            ax.axis("off")
+            self.sync_canvas.draw()
+            return
 
         # Store time markers for each subplot
         self.sync_time_markers = []
@@ -1333,12 +1375,14 @@ class FrameViewerMixin:
         if not hasattr(self, "viewer_frame_interval"):
             return
 
-        # Calculate time in minutes
-        time_minutes = (frame_idx * self.viewer_frame_interval) / 60.0
+        # Calculate time in the same unit as the x-axis (hours if ZT mode, else minutes)
+        zt_mode = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+        time_seconds = frame_idx * self.viewer_frame_interval
+        time_x = time_seconds / 3600.0 if zt_mode else time_seconds / 60.0
 
         # Update all markers
         for marker in self.sync_time_markers:
-            marker.set_xdata([time_minutes, time_minutes])
+            marker.set_xdata([time_x, time_x])
 
         # Redraw canvas (use blit for performance if available)
         try:
@@ -1451,6 +1495,20 @@ class FrameViewerMixin:
         else:
             hysteresis_kwargs = {}
 
+        # Resolve ZT mode and lighting overlay (same logic as Analysis tab)
+        zt_mode_export = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+        show_lighting_export = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+        if show_lighting_export:
+            _raw_led = getattr(self, "led_data", None)
+            if _raw_led and isinstance(_raw_led, dict) and _raw_led.get("times") and _raw_led.get("white_powers"):
+                led_data_export = _raw_led
+            else:
+                led_data_export = {}  # empty dict → legacy 12h fallback
+        else:
+            led_data_export = None
+        hysteresis_kwargs["zt_mode"] = zt_mode_export
+        hysteresis_kwargs["led_data"] = led_data_export
+
         try:
             for i, frame_idx in enumerate(range(start_frame, end_frame)):
                 if progress.wasCanceled():
@@ -1500,10 +1558,11 @@ class FrameViewerMixin:
                     plot_type, data_dict, roi_colors, base_plot_config, **hysteresis_kwargs
                 )
 
-                # Add red time marker to all subplots
+                # Add red time marker to all subplots (use hours if ZT mode, else minutes)
+                time_x = time_seconds / 3600.0 if zt_mode_export else time_minutes
                 for ax in plot_fig.get_axes():
                     ax.axvline(
-                        x=time_minutes, color="red", linewidth=2,
+                        x=time_x, color="red", linewidth=2,
                         linestyle="--", alpha=0.9, zorder=100
                     )
 
@@ -2108,6 +2167,20 @@ class FrameViewerMixin:
         else:
             hysteresis_kwargs = {}
 
+        # Resolve ZT mode and lighting overlay (same logic as Analysis tab)
+        zt_mode_gif = self.chk_zt_axis.isChecked() if hasattr(self, "chk_zt_axis") else False
+        show_lighting_gif = self.chk_show_lighting.isChecked() if hasattr(self, "chk_show_lighting") else False
+        if show_lighting_gif:
+            _raw_led = getattr(self, "led_data", None)
+            if _raw_led and isinstance(_raw_led, dict) and _raw_led.get("times") and _raw_led.get("white_powers"):
+                led_data_gif = _raw_led
+            else:
+                led_data_gif = {}  # empty dict → legacy 12h fallback
+        else:
+            led_data_gif = None
+        hysteresis_kwargs["zt_mode"] = zt_mode_gif
+        hysteresis_kwargs["led_data"] = led_data_gif
+
         frames_for_gif = []
 
         try:
@@ -2159,10 +2232,11 @@ class FrameViewerMixin:
                     plot_type, data_dict, roi_colors, base_plot_config, **hysteresis_kwargs
                 )
 
-                # Add red time marker to all subplots
+                # Add red time marker to all subplots (use hours if ZT mode, else minutes)
+                time_x_gif = time_seconds / 3600.0 if zt_mode_gif else time_minutes
                 for ax in plot_fig.get_axes():
                     ax.axvline(
-                        x=time_minutes, color="red", linewidth=2,
+                        x=time_x_gif, color="red", linewidth=2,
                         linestyle="--", alpha=0.9, zorder=100
                     )
 

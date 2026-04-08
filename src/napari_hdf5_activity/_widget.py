@@ -44,6 +44,30 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
 )
 
+class _ScaledPixmapLabel(QLabel):
+    """QLabel that scales its pixmap to fit while preserving aspect ratio."""
+
+    def __init__(self):
+        super().__init__()
+        self._raw_pixmap = None
+        self.setAlignment(Qt.AlignCenter)
+
+    def setPixmap(self, pixmap):
+        self._raw_pixmap = pixmap
+        self._refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self):
+        if self._raw_pixmap and not self._raw_pixmap.isNull():
+            scaled = self._raw_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            super().setPixmap(scaled)
+
+
 try:
     from ._reader import (
         detect_hdf5_structure_type,
@@ -850,8 +874,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         self.chunk_size = QSpinBox()
         self.chunk_size.setRange(1, 10000)
-        self.chunk_size.setValue(20)
-        self.chunk_size.setToolTip("Number of frames to process in each chunk")
+        self.chunk_size.setValue(10)
+        self.chunk_size.setToolTip("Number of frames to process in each chunk (lower = less RAM)")
         analysis_layout.addRow("Chunk Size:", self.chunk_size)
 
         self.num_processes = QSpinBox()
@@ -1276,9 +1300,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.results_label = QLabel("Results will be displayed here.")
         layout.addWidget(self.results_label)
 
-        # Matplotlib figure
-        self.figure = Figure(figsize=(10, 6))
+        # Matplotlib figure — use a modest initial size; the canvas expands to fill
+        # the tab and tight_layout() is called after each draw to use available space
+        self.figure = Figure(figsize=(8, 4))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.canvas)
 
         try:
@@ -1362,8 +1388,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         )
 
         self.plot_dpi_spin = QSpinBox()
-        self.plot_dpi_spin.setRange(50, 600)
-        self.plot_dpi_spin.setValue(100)
+        self.plot_dpi_spin.setRange(50, 1200)
+        self.plot_dpi_spin.setValue(600)
 
         basic_row.addWidget(QLabel("Plot Type:"))
         basic_row.addWidget(self.plot_type_combo)
@@ -1521,6 +1547,57 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         plot_config_layout.addWidget(y_axis_group)
 
+        # Per-ROI Y-axis limits (Raw Intensity only)
+        self.per_roi_y_group = QGroupBox("Per-ROI Y-Axis Limits (Raw Intensity only)")
+        self.per_roi_y_group.setCheckable(True)
+        self.per_roi_y_group.setChecked(False)
+        self.per_roi_y_group.setToolTip(
+            "Set individual Y-axis limits for each ROI subplot.\n"
+            "Enable the group, then click 'Read from Plot' to pre-fill\n"
+            "current limits, adjust, and click Apply per ROI."
+        )
+        per_roi_outer_layout = QVBoxLayout()
+        self.per_roi_y_group.setLayout(per_roi_outer_layout)
+
+        # Scrollable area for the per-ROI rows
+        self.per_roi_scroll = QScrollArea()
+        self.per_roi_scroll.setWidgetResizable(True)
+        self.per_roi_scroll.setMaximumHeight(180)
+        self.per_roi_scroll.setFrameShape(self.per_roi_scroll.NoFrame)
+        self.per_roi_inner = QWidget()
+        self.per_roi_inner_layout = QVBoxLayout()
+        self.per_roi_inner_layout.setSpacing(2)
+        self.per_roi_inner_layout.setContentsMargins(0, 0, 0, 0)
+        self.per_roi_inner.setLayout(self.per_roi_inner_layout)
+        self.per_roi_scroll.setWidget(self.per_roi_inner)
+        per_roi_outer_layout.addWidget(self.per_roi_scroll)
+
+        per_roi_btn_row = QHBoxLayout()
+        self.btn_per_roi_read = QPushButton("Read from Plot")
+        self.btn_per_roi_read.setToolTip(
+            "Copy the current Y-axis limits from each ROI subplot into the fields below."
+        )
+        self.btn_per_roi_read.clicked.connect(self._read_current_ylimits)
+        self.btn_per_roi_reset = QPushButton("Reset All")
+        self.btn_per_roi_reset.setToolTip("Clear all per-ROI limits (revert to auto-scaling).")
+        self.btn_per_roi_reset.clicked.connect(self._reset_per_roi_ylimits)
+        self.btn_per_roi_refresh = QPushButton("Refresh ROI List")
+        self.btn_per_roi_refresh.setToolTip(
+            "Rebuild the ROI list from the currently loaded data."
+        )
+        self.btn_per_roi_refresh.clicked.connect(self._refresh_per_roi_controls)
+        per_roi_btn_row.addWidget(self.btn_per_roi_read)
+        per_roi_btn_row.addWidget(self.btn_per_roi_reset)
+        per_roi_btn_row.addWidget(self.btn_per_roi_refresh)
+        per_roi_btn_row.addStretch()
+        per_roi_outer_layout.addLayout(per_roi_btn_row)
+
+        plot_config_layout.addWidget(self.per_roi_y_group)
+
+        # Internal state for per-ROI limits
+        self.per_roi_y_limits: dict = {}        # {roi_id: (y_min, y_max)}
+        self._per_roi_y_widgets: dict = {}      # {roi_id: (y_min_spin, y_max_spin)}
+
         # Time range selection
         time_range_group = QGroupBox("Time Range Selection")
         time_range_layout = QHBoxLayout()
@@ -1543,7 +1620,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         time_range_layout.addWidget(self.btn_apply_time_range)
 
         # Plot binning configuration (separate from analysis binning)
-        plot_binning_group = QGroupBox("Plot Binning (Visualization Only)")
+        plot_binning_group = QGroupBox("Plot Binning (Quiescence & Sleep re-derived from rebinned data)")
         plot_binning_layout = QHBoxLayout()
         plot_binning_group.setLayout(plot_binning_layout)
 
@@ -1727,6 +1804,31 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         fisher_params_layout.addRow("Significance Level (α):", self.fisher_significance)
 
         layout.addWidget(fisher_params_group)
+
+        # Target period for Similarity / Coherence / Phase Clustering
+        target_period_group = QGroupBox("Target Period (Similarity / Coherence / Phase)")
+        target_period_layout = QFormLayout()
+        target_period_group.setLayout(target_period_layout)
+
+        self.target_period = QDoubleSpinBox()
+        self.target_period.setRange(0.5, 200.0)
+        self.target_period.setValue(24.0)
+        self.target_period.setSingleStep(1.0)
+        self.target_period.setDecimals(1)
+        self.target_period.setSuffix(" hours")
+        self.target_period.setToolTip(
+            "Expected rhythm period for Similarity Matrix, Coherence Analysis\n"
+            "and Phase Clustering.\n\n"
+            "• 24 h — circadian (default)\n"
+            "• 12 h — semidiurnal / tidal\n"
+            "• 8 h — ultradian\n\n"
+            "This is independent of the chi² period search range above.\n"
+            "It controls the cross-correlation lag window (±T/2) and the\n"
+            "Welch segment length used for coherence estimation."
+        )
+        target_period_layout.addRow("Target Period:", self.target_period)
+
+        layout.addWidget(target_period_group)
 
         # Quick preset buttons
         preset_group = QGroupBox("Quick Presets")
@@ -1952,20 +2054,21 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         # Bin size spinbox
         self.analysis_bin_size = QSpinBox()
-        self.analysis_bin_size.setRange(10, 3600)  # 10 sec to 60 min
+        self.analysis_bin_size.setRange(60, 7200)  # 1 min to 2 h
         self.analysis_bin_size.setValue(
-            60
-        )  # Default: 60s (matches main analysis default)
+            1800
+        )  # Default: 30 min — recommended for chi²/FFT periodogram
         self.analysis_bin_size.setSingleStep(10)
         self.analysis_bin_size.setSuffix(" sec")
         self.analysis_bin_size.setToolTip(
-            "Bin size for extended analysis (10 sec – 60 min).\n"
-            "Larger bins reduce noise but lose temporal resolution.\n\n"
+            "Bin size for extended analysis (1 min – 2 h).\n"
+            "IMPORTANT: The chi² Z-score scales with n (number of bins).\n"
+            "Smaller bins → larger n → inflated Z-scores → false positives.\n\n"
             "Recommendations by method:\n"
-            "• Chi² / FFT: 60–300 s (1–5 min)\n"
-            "• Cosinor: 300–600 s (5–10 min) — reduces saturation at 1.0\n"
-            "• Similarity: 300–1800 s (5–30 min)\n"
-            "• Coherence: 1800–3600 s (30–60 min) — improves frequency resolution\n"
+            "• Chi² Periodogram: 1800 s (30 min) — standard for circadian analysis\n"
+            "• FFT Power Spectrum: 1800 s (30 min)\n"
+            "• Cosinor: 300–1800 s (5–30 min)\n"
+            "• Similarity / Coherence: 1800–3600 s (30–60 min)\n"
             "• Phase Clustering: 300–1800 s (5–30 min)\n\n"
             "Data will be automatically re-binned if different from original."
         )
@@ -2023,6 +2126,13 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.btn_bin_30min.clicked.connect(lambda: self._set_analysis_bin_preset(1800))
         binning_controls.addWidget(self.btn_bin_30min)
 
+        self.btn_bin_60min = QPushButton("60 min")
+        self.btn_bin_60min.setToolTip(
+            "60 minute bins - recommended for Coherence and PLV analysis"
+        )
+        self.btn_bin_60min.clicked.connect(lambda: self._set_analysis_bin_preset(3600))
+        binning_controls.addWidget(self.btn_bin_60min)
+
         binning_controls.addStretch()
 
         rebinning_layout.addLayout(binning_controls)
@@ -2060,43 +2170,6 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         )
         self.data_source_combo.currentIndexChanged.connect(self._on_data_source_changed)
         data_source_layout.addWidget(self.data_source_combo)
-
-        # Checkbox to calculate both activity and sleep phases
-        self.chk_calculate_sleep_phase = QCheckBox("Also calculate Sleep Phase")
-        self.chk_calculate_sleep_phase.setChecked(True)
-        self.chk_calculate_sleep_phase.setToolTip(
-            "Calculate both Acrophase (peak activity) and Sleep Phase (peak sleep).\n"
-            "Requires main analysis to be run first."
-        )
-        data_source_layout.addWidget(self.chk_calculate_sleep_phase)
-
-        # Sleep data source selector
-        self.sleep_source_combo = QComboBox()
-        self.sleep_source_combo.addItems([
-            "Quiescence (comparable)",
-            "Sleep (≥8min sustained)",
-        ])
-        self.sleep_source_combo.setCurrentIndex(1)  # Default: Sleep ≥8min (differs from activity spectrum)
-        self.sleep_source_combo.setToolTip(
-            "Choose data source for sleep rhythm analysis:\n"
-            "• Quiescence: Binary rest state (movement < threshold), same temporal\n"
-            "  resolution as activity data — best for direct period comparison.\n"
-            "• Sleep (≥8min sustained): Only sustained quiescence episodes ≥8 min\n"
-            "  are counted as sleep. Acts as a low-pass filter (~16 min cutoff).\n"
-            "  More biologically strict, but not directly comparable to activity."
-        )
-        data_source_layout.addWidget(self.sleep_source_combo)
-
-        sleep_info = QLabel(
-            "ℹ Sleep is derived from Activity:\n"
-            "Activity → Movement detection → Quiescence → Sleep (≥8 min)\n"
-            "Both periodograms are not independent — dominant periods will\n"
-            "often overlap. Sleep analysis confirms whether the rhythm also\n"
-            "appears in consolidated rest, not as an independent test."
-        )
-        sleep_info.setStyleSheet("color: #666; font-size: 10px;")
-        sleep_info.setWordWrap(True)
-        data_source_layout.addWidget(sleep_info)
 
         data_source_layout.addStretch()
 
@@ -2285,13 +2358,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         fisher_plot_layout.addLayout(plot_header_layout)
 
-        self.fisher_plot_canvas = QLabel()
+        self.fisher_plot_canvas = _ScaledPixmapLabel()
         self.fisher_plot_canvas.setMinimumSize(400, 300)
-        self.fisher_plot_canvas.setScaledContents(True)  # Auto-scale to label size
         self.fisher_plot_canvas.setStyleSheet(
             "border: 1px solid #ccc; background-color: white;"
         )
-        self.fisher_plot_canvas.setAlignment(Qt.AlignCenter)
         fisher_plot_layout.addWidget(self.fisher_plot_canvas, 1)  # Allow expansion
 
         splitter.addWidget(self.fisher_plot_widget)
@@ -4215,24 +4286,50 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 if getattr(layer, "name", "").startswith("ROI Centres (edit)"):
                     self.viewer.layers.remove(layer)
 
+            # Ensure the raw first-frame image is visible as background reference
+            for layer in self.viewer.layers:
+                name = getattr(layer, "name", "")
+                if "first_frame" in name or "frame" in name.lower():
+                    if "ROI" not in name and "edit" not in name:
+                        layer.visible = True
+
+            # Hide ROI annotation layer(s) to avoid double-circle overlap
+            for layer in self.viewer.layers:
+                name = getattr(layer, "name", "")
+                if "ROI" in name and "edit" not in name and hasattr(layer, "visible"):
+                    layer.visible = False
+
             scale = self.roi_scale.value()
             avg_r = float(np.mean(circles[:, 2])) * scale
 
             self._roi_edit_layer = self.viewer.add_points(
                 centres,
                 name="ROI Centres (edit)",
-                size=avg_r * 2,        # visual diameter matches circle size
-                symbol="ring",         # ring so the centre is visible
+                size=avg_r * 2,
+                symbol="ring",
                 face_color="transparent",
-                edge_color="lime",
-                edge_width=0.05,       # napari uses fraction of size
+                border_color="lime",
+                border_width=0.05,
             )
-            self._roi_edit_layer.mode = "select"
+            self._roi_edit_layer.visible = True
+
+            # Select the edit layer so the user can immediately drag points
+            try:
+                self.viewer.layers.selection.active = self._roi_edit_layer
+            except Exception:
+                pass
+
+            # Set select mode so individual points can be dragged
+            try:
+                self._roi_edit_layer.mode = "select"
+            except Exception:
+                pass
 
             self.btn_apply_roi_edits.setEnabled(True)
             self._log_message(
-                f"✏️ {len(centres)} circle centres added. "
-                "Drag points to reposition, then click 'Apply Edits'."
+                f"✏️ {len(centres)} ROI centres loaded into edit layer. "
+                "Press S (select mode) then drag individual points. "
+                "Click 'Apply Edits' when done."
             )
 
         except Exception as e:
@@ -5056,6 +5153,19 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     self.avi_batch_interval,
                 )
             else:
+                # Recalculate safe process count from current available RAM
+                try:
+                    available_mb = psutil.virtual_memory().available / (1024 * 1024)
+                    usable_mb = max(0, available_mb - 1024)  # keep 1 GB headroom
+                    safe_processes = max(1, min(self.num_processes.value(), int(usable_mb / 800)))
+                    if safe_processes < self.num_processes.value():
+                        self._log_message(
+                            f"⚠️ Low RAM ({available_mb:.0f} MB free) — reducing workers "
+                            f"from {self.num_processes.value()} to {safe_processes}"
+                        )
+                except Exception:
+                    safe_processes = self.num_processes.value()
+
                 # Process complete dataset using reader (HDF5)
                 _, merged_results, _ = process_single_file_in_parallel_dual_structure(
                     file_to_process,
@@ -5063,7 +5173,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     self.chunk_size.value(),
                     progress_callback,
                     self.frame_interval.value(),
-                    self.num_processes.value(),
+                    safe_processes,
                 )
 
             # Remap ROI indices to preserve original numbering when ROIs are excluded
@@ -5650,6 +5760,116 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             if hasattr(self, "chk_divide_by_pixels"):
                 self.chk_divide_by_pixels.setEnabled(self.show_real_amplitude.isChecked())
 
+    # ------------------------------------------------------------------
+    # Per-ROI Y-axis limit helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_per_roi_controls(self):
+        """Rebuild per-ROI Y-limit rows from the currently loaded ROI data."""
+        if not hasattr(self, "merged_results") or not self.merged_results:
+            self._log_message("No data loaded — run analysis first.")
+            return
+        roi_ids = sorted(self.merged_results.keys())
+        self._rebuild_per_roi_y_controls(roi_ids)
+
+    def _rebuild_per_roi_y_controls(self, roi_ids):
+        """Create one Min/Max row per ROI inside the scrollable area."""
+        from qtpy.QtWidgets import QHBoxLayout, QDoubleSpinBox, QLabel, QPushButton, QWidget
+
+        # Clear previous rows
+        while self.per_roi_inner_layout.count():
+            item = self.per_roi_inner_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._per_roi_y_widgets = {}
+
+        for roi_id in roi_ids:
+            color = self.roi_colors.get(roi_id, "#888888") if hasattr(self, "roi_colors") else "#888888"
+
+            row_widget = QWidget()
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            row_widget.setLayout(row)
+
+            lbl = QLabel(f"ROI {roi_id}")
+            lbl.setStyleSheet(
+                f"color: {color}; font-weight: bold; min-width: 50px;"
+            )
+
+            y_min_spin = QDoubleSpinBox()
+            y_min_spin.setRange(-1e9, 1e9)
+            y_min_spin.setDecimals(5)
+            y_min_spin.setSingleStep(0.0001)
+            y_min_spin.setValue(self.per_roi_y_limits.get(roi_id, (0.0, 1.0))[0])
+            y_min_spin.setFixedWidth(95)
+
+            y_max_spin = QDoubleSpinBox()
+            y_max_spin.setRange(-1e9, 1e9)
+            y_max_spin.setDecimals(5)
+            y_max_spin.setSingleStep(0.0001)
+            y_max_spin.setValue(self.per_roi_y_limits.get(roi_id, (0.0, 1.0))[1])
+            y_max_spin.setFixedWidth(95)
+
+            btn_apply = QPushButton("Apply")
+            btn_apply.setFixedWidth(52)
+            btn_apply.clicked.connect(
+                lambda _, r=roi_id, mn=y_min_spin, mx=y_max_spin:
+                    self._apply_single_roi_ylimit(r, mn, mx)
+            )
+
+            row.addWidget(lbl)
+            row.addWidget(QLabel("Min:"))
+            row.addWidget(y_min_spin)
+            row.addWidget(QLabel("Max:"))
+            row.addWidget(y_max_spin)
+            row.addWidget(btn_apply)
+            row.addStretch()
+
+            self.per_roi_inner_layout.addWidget(row_widget)
+            self._per_roi_y_widgets[roi_id] = (y_min_spin, y_max_spin)
+
+    def _apply_single_roi_ylimit(self, roi_id, y_min_spin, y_max_spin):
+        """Store the limit for one ROI and regenerate the plot."""
+        lo, hi = y_min_spin.value(), y_max_spin.value()
+        if lo >= hi:
+            self._log_message(f"⚠️ ROI {roi_id}: Y Min must be < Y Max")
+            return
+        self.per_roi_y_limits[roi_id] = (lo, hi)
+        self.generate_plot()
+
+    def _read_current_ylimits(self):
+        """Populate per-ROI spinboxes from the current y-axis limits in the plot."""
+        if not hasattr(self, "_per_roi_y_widgets") or not self._per_roi_y_widgets:
+            self._refresh_per_roi_controls()
+            return
+        roi_ids = sorted(self._per_roi_y_widgets.keys())
+        # Collect only non-colorbar, non-polar visible axes in draw order
+        axes = [
+            ax for ax in self.figure.get_axes()
+            if ax.get_visible() and ax.get_label() != "<colorbar>"
+        ]
+        for i, roi_id in enumerate(roi_ids):
+            if i >= len(axes):
+                break
+            ymin, ymax = axes[i].get_ylim()
+            y_min_spin, y_max_spin = self._per_roi_y_widgets[roi_id]
+            y_min_spin.setValue(ymin)
+            y_max_spin.setValue(ymax)
+        self._log_message(
+            f"Read Y-limits from plot for {min(len(roi_ids), len(axes))} ROI(s)"
+        )
+
+    def _reset_per_roi_ylimits(self):
+        """Clear all per-ROI limits and regenerate with auto-scaling."""
+        self.per_roi_y_limits = {}
+        # Reset spinbox display values
+        for (y_min_spin, y_max_spin) in self._per_roi_y_widgets.values():
+            y_min_spin.setValue(0.0)
+            y_max_spin.setValue(1.0)
+        self.generate_plot()
+
     def generate_plot(self):
         """Generate plot using PlotGenerator."""
         if not hasattr(self, "merged_results") or not self.merged_results:
@@ -5774,6 +5994,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 kwargs["zt_mode"] = zt_mode
                 kwargs["led_data"] = led_data_for_plot
 
+                # Per-ROI Y-axis limits (only when the group is enabled)
+                if (
+                    hasattr(self, "per_roi_y_group")
+                    and self.per_roi_y_group.isChecked()
+                    and self.per_roi_y_limits
+                ):
+                    kwargs["per_roi_y_limits"] = self.per_roi_y_limits
+                    # Auto-rebuild the ROI list if not yet done
+                    if not self._per_roi_y_widgets:
+                        self._rebuild_per_roi_y_controls(sorted(data_dict.keys()))
+
             elif plot_type == "Movement":
                 data_dict = getattr(self, "movement_data", {})
                 kwargs = {"zt_mode": zt_mode, "led_data": led_data_for_plot}
@@ -5867,7 +6098,15 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             )
 
             if success:
-                # Force complete canvas refresh
+                # Force complete canvas refresh; suppress the UserWarning that
+                # tight_layout emits when subplots_adjust was already applied
+                import warnings as _warnings
+                try:
+                    with _warnings.catch_warnings():
+                        _warnings.simplefilter("ignore", UserWarning)
+                        self.figure.tight_layout()
+                except Exception:
+                    pass
                 self.canvas.draw()
                 self.canvas.flush_events()
                 self.results_label.setText(f"Generated {plot_type} plot successfully.")
@@ -6064,7 +6303,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         if file_path:
             dpi = self.plot_dpi_spin.value()
-            success = save_plot(self.figure, file_path, dpi)
+            success = save_plot(self.figure, file_path, dpi, publication_style=(dpi >= 300))
 
             if success:
                 self._log_message(f"Plot saved: {os.path.basename(file_path)}")
@@ -6128,12 +6367,18 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             single_colors = {roi_id: roi_colors.get(roi_id, f"C{(roi_id - 1) % 10}")}
 
             from matplotlib.figure import Figure as _Figure
-            fig = _Figure()
+            from ._plot import JOURNAL_SINGLE_COL_IN, apply_publication_style
+            fig = _Figure(figsize=(JOURNAL_SINGLE_COL_IN, 2.5))
             gen = PlotGenerator(fig)
             gen.generate_plot(plot_type, single_data, single_colors, plot_config, **kwargs)
 
             out_path = os.path.join(out_dir, f"{base}_{plot_slug}_ROI{roi_id}.png")
-            fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+            prev_rc = apply_publication_style()
+            try:
+                fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+            finally:
+                import matplotlib.pyplot as _plt
+                _plt.rcParams.update(prev_rc)
             saved += 1
 
         self._log_message(f"✅ Saved {saved} individual ROI plot(s) to {out_dir}")

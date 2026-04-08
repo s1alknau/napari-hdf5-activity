@@ -461,6 +461,8 @@ def detect_phase_clusters(
     }
 
 
+
+
 def generate_coherence_summary(coherence_results: Dict[str, Any]) -> str:
     """
     Generate human-readable summary of coherence analysis.
