@@ -3990,8 +3990,11 @@ class CircadianMixin:
 
         try:
             from ._circadian_similarity import export_similarity_to_excel
+            import pandas as pd
             excel_path = f"{base_path}.xlsx"
             export_similarity_to_excel(excel_path, self.fisher_analysis_results)
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+                self._autofit_excel(writer)
             self._log_message(f"✓ Exported Similarity results to Excel: {excel_path}")
         except Exception as e:
             self._log_message(f"⚠️ Similarity Excel export error: {e}")
@@ -4004,8 +4007,11 @@ class CircadianMixin:
 
         try:
             from ._circadian_coherence import export_coherence_to_excel
+            import pandas as pd
             excel_path = f"{base_path}.xlsx"
             export_coherence_to_excel(excel_path, self.fisher_analysis_results)
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+                self._autofit_excel(writer)
             self._log_message(f"✓ Exported Coherence results to Excel: {excel_path}")
         except Exception as e:
             self._log_message(f"⚠️ Coherence Excel export error: {e}")
@@ -4555,6 +4561,7 @@ class CircadianMixin:
                 }
             )
             params_df.to_excel(writer, sheet_name="Parameters", index=False)
+            self._autofit_excel(writer)
 
     # ------------------------------------------------------------------ #
     #  Shared Excel formatting helper                                      #
