@@ -5015,8 +5015,9 @@ class CircadianMixin:
             }
             n_rois = len(roi_only_results)
 
-            # Determine layout - max 3 columns
-            n_cols = min(3, n_rois)
+            # Determine layout — same formula as FFT plot for consistency
+            import math as _math
+            n_cols = n_rois if n_rois <= 3 else min(3, _math.ceil(_math.sqrt(n_rois)))
             n_rows_per_section = (n_rois + n_cols - 1) // n_cols
 
             has_population = (
