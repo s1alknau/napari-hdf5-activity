@@ -5737,11 +5737,13 @@ class CircadianMixin:
                                 pass
                     extent = tight_bb.transformed(fig.dpi_scale_trans.inverted())
 
-                    # Pad outward but clamp: x uses tight extent, y uses axes
-                    # GridSpec boundaries so we never capture adjacent rows.
+                    # Pad outward: use tight extent for x and y bottom (so
+                    # x-axis labels / tick labels below the spine are included),
+                    # but clamp y top to the axes GridSpec boundary so we never
+                    # bleed into the panel above.
                     padded = Bbox([
                         [max(extent.x0 - pad_in, 0.0),
-                         max(ax_y0 - pad_in, 0.0)],
+                         max(extent.y0 - pad_in, 0.0)],
                         [min(extent.x1 + pad_in, fig_w),
                          min(ax_y1 + pad_in, fig_h)],
                     ])
