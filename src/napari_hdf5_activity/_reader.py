@@ -2354,11 +2354,43 @@ def _read_chunk_zarr(
     end_idx: int,
     structure_info: Dict[str, Any],
 ) -> Optional[np.ndarray]:
-    """Low-level Zarr chunk reader used by :func:`read_chunk_data_dual_structure`."""
-    from ._io_abstraction import open_file_reader
+    """Low-level Zarr chunk reader used by :func:`read_chunk_data_dual_structure`.
 
+    Uses the worker-local cached store (_worker_zarr_store) when called from a
+    worker process — avoids opening/closing the store on every chunk.
+    Falls back to opening the file directly when called from the main process.
+    """
+    stype = structure_info["type"]
+
+    # Fast path: use the per-worker cached store (set by _worker_init)
+    store = _worker_zarr_store
+    if store is not None:
+        try:
+            if stype == "stacked_frames":
+                dataset_path = structure_info.get("dataset_name", "frames")
+                return np.asarray(store[dataset_path][start_idx:end_idx])
+            if stype == "individual_frames":
+                key_template = structure_info.get("key_template")
+                chunk_keys = (
+                    [key_template.format(i) for i in range(start_idx, end_idx)]
+                    if key_template
+                    else structure_info["frame_keys"][start_idx:end_idx]
+                )
+                frames = []
+                for k in chunk_keys:
+                    node = store[f"images/{k}"]
+                    import zarr as _zarr
+                    frames.append(np.asarray(node[0] if isinstance(node, _zarr.Array) else node))
+                return np.stack(frames, axis=0) if frames else None
+            if stype == "alternative_dataset":
+                return np.asarray(store[structure_info["dataset_name"]][start_idx:end_idx])
+        except Exception as e:
+            logger.warning(f"Cached Zarr read failed, falling back to file open: {e}")
+            # Fall through to the open-every-time path below
+
+    # Slow path (main process or cache miss): open the store for this chunk only
+    from ._io_abstraction import open_file_reader
     with open_file_reader(file_path) as r:
-        stype = structure_info["type"]
         if stype == "stacked_frames":
             dataset_path = structure_info.get("dataset_name", "frames")
             return r.read_slice(dataset_path, start_idx, end_idx)
@@ -3391,11 +3423,41 @@ def get_frame_norm_factor(file_path: str) -> float:
 # so masks are NOT re-pickled and re-sent through the IPC pipe for every chunk.
 _worker_masks: Optional[List] = None
 
+# Worker-local Zarr store — opened once per worker, reused for every chunk.
+# Avoids the repeated open/close overhead that makes Zarr analysis slow.
+_worker_zarr_store = None  # zarr.Group or zarr.Array
+
 
 def _worker_init_masks(masks: List) -> None:
     """Pool initializer: store masks in the worker process once at startup."""
     global _worker_masks
     _worker_masks = masks
+
+
+def _worker_init(masks: List, file_path: str, structure_info: Dict) -> None:
+    """Pool initializer for Zarr: open the store once per worker and cache masks."""
+    global _worker_masks, _worker_zarr_store
+    _worker_masks = masks
+    if structure_info.get("file_format") == "zarr":
+        try:
+            import zarr, os
+            if os.path.isfile(file_path):
+                ZipStore = (
+                    getattr(zarr, "ZipStore", None)
+                    or getattr(getattr(zarr, "storage", None), "ZipStore", None)
+                )
+                if ZipStore is not None:
+                    try:
+                        _worker_zarr_store = zarr.open(ZipStore(file_path, mode="r"), mode="r")
+                    except TypeError:
+                        _worker_zarr_store = zarr.open(ZipStore(file_path), mode="r")
+                else:
+                    _worker_zarr_store = zarr.open(file_path, mode="r")
+            else:
+                _worker_zarr_store = zarr.open(file_path, mode="r")
+        except Exception as e:
+            logger.warning(f"Worker could not open Zarr store: {e}")
+            _worker_zarr_store = None
 
 
 def _process_single_chunk_dual_structure(
@@ -3512,11 +3574,21 @@ def process_single_file_in_parallel_dual_structure(
 
     completed = 0
 
+    # For Zarr files use the extended initializer that caches the store per worker.
+    # For HDF5 use the lightweight mask-only initializer.
+    is_zarr = structure_info.get("file_format") == "zarr"
+    if is_zarr:
+        _pool_init    = _worker_init
+        _pool_initargs = (masks, file_path, structure_info)
+    else:
+        _pool_init    = _worker_init_masks
+        _pool_initargs = (masks,)
+
     try:
         with ProcessPoolExecutor(
             max_workers=num_processes,
-            initializer=_worker_init_masks,
-            initargs=(masks,),
+            initializer=_pool_init,
+            initargs=_pool_initargs,
         ) as executor:
             # OPTIMIZED: Dynamic queue size based on available RAM
             # Systems with lots of RAM can process more chunks in parallel
