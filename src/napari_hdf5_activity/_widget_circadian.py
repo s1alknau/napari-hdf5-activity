@@ -3833,22 +3833,18 @@ class CircadianMixin:
             traceback.print_exc()
 
     def export_all_circadian_results(self):
-        """Export all available circadian analysis results into one Excel file."""
+        """Export all available circadian analysis results into one Excel file.
+
+        Each method is exported via its full export function into a temp file.
+        All sheets are then merged into the final workbook with a method prefix,
+        so every sheet from every individual export is preserved.
+        """
         import os
-        import pandas as pd
+        import tempfile
+        import shutil
         from qtpy.QtWidgets import QFileDialog
 
-        # Check if any results exist at all
-        method_results = {
-            0: "Chi² Periodogram",
-            1: "FFT Spectrum",
-            2: "Cosinor",
-            3: "ROI Similarity",
-            4: "Coherence",
-            5: "Phase Clustering",
-        }
-
-        if not hasattr(self, "fisher_analysis_results"):
+        if not hasattr(self, "_all_method_results") or not self._all_method_results:
             self._log_message("⚠️ No circadian analysis results available. Run an analysis first.")
             return
 
@@ -3863,122 +3859,121 @@ class CircadianMixin:
         if not file_path.endswith(".xlsx"):
             file_path += ".xlsx"
 
-        base = os.path.splitext(file_path)[0]
-        exported = []
-        errors = []
-
-        # We write all methods into one workbook using a shared ExcelWriter.
-        # Each method adds its own sheets via a temp file, then we merge them.
-        # Simpler: write each method to the same file sequentially using append mode.
-
-        # Track which sheet names we've written to avoid duplicates across methods
-        used_sheet_names = set()
-
-        def _safe_sheet(name, used):
-            """Truncate to 31 chars and deduplicate."""
-            name = name[:31]
-            if name not in used:
-                used.add(name)
-                return name
-            i = 1
-            while True:
-                candidate = f"{name[:28]}_{i}"
-                if candidate not in used:
-                    used.add(candidate)
-                    return candidate
-                i += 1
-
         try:
-            with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-
-                # --- Chi² / Fisher ---
-                try:
-                    results_backup = self.fisher_analysis_results
-                    # Try to get fisher results (may already be loaded or need re-run)
-                    r = getattr(self, "_all_method_results", {})
-                    fisher_r = r.get(0)
-                    if fisher_r:
-                        self.fisher_analysis_results = fisher_r
-                    # Export sheets inline to the shared writer
-                    self._write_fisher_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("Chi² Periodogram")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"Chi²: {e}")
-
-                # --- FFT ---
-                try:
-                    r = getattr(self, "_all_method_results", {})
-                    fft_r = r.get(1)
-                    if fft_r:
-                        self.fisher_analysis_results = fft_r
-                    self._write_fft_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("FFT Spectrum")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"FFT: {e}")
-
-                # --- Cosinor ---
-                try:
-                    r = getattr(self, "_all_method_results", {})
-                    cos_r = r.get(2)
-                    if cos_r:
-                        self.fisher_analysis_results = cos_r
-                    self._write_cosinor_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("Cosinor")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"Cosinor: {e}")
-
-                # --- Similarity ---
-                try:
-                    r = getattr(self, "_all_method_results", {})
-                    sim_r = r.get(3)
-                    if sim_r:
-                        self.fisher_analysis_results = sim_r
-                    self._write_similarity_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("ROI Similarity")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"Similarity: {e}")
-
-                # --- Coherence ---
-                try:
-                    r = getattr(self, "_all_method_results", {})
-                    coh_r = r.get(4)
-                    if coh_r:
-                        self.fisher_analysis_results = coh_r
-                    self._write_coherence_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("Coherence")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"Coherence: {e}")
-
-                # --- Phase Clustering ---
-                try:
-                    r = getattr(self, "_all_method_results", {})
-                    ph_r = r.get(5)
-                    if ph_r:
-                        self.fisher_analysis_results = ph_r
-                    self._write_phase_clustering_sheets_to_writer(writer, used_sheet_names)
-                    exported.append("Phase Clustering")
-                    self.fisher_analysis_results = results_backup
-                except Exception as e:
-                    errors.append(f"Phase Clustering: {e}")
-
-                self._autofit_excel(writer)
-
-        except Exception as e:
-            self._log_message(f"❌ Export All failed: {e}")
-            import traceback; traceback.print_exc()
+            import openpyxl
+        except ImportError:
+            self._log_message("❌ openpyxl not installed. Run: pip install openpyxl")
             return
 
-        # Report
-        if exported:
-            self._log_message(f"✓ Export All complete: {', '.join(exported)} → {os.path.basename(file_path)}")
+        # Method metadata: index → (label, prefix, export_fn)
+        method_info = {
+            0: ("Chi² Periodogram", "Chi2",     self._export_fisher_to_excel),
+            1: ("FFT Spectrum",     "FFT",      self._export_fft_to_excel),
+            2: ("Cosinor",          "Cosinor",  self._export_cosinor_to_excel),
+            4: ("Coherence",        "Coh",      None),   # external module
+            5: ("Phase Clustering", "Phase",    self._export_phase_clustering_to_excel),
+        }
+
+        results_backup = self.fisher_analysis_results
+        exported = []
+        errors = []
+        temp_files = []
+
+        try:
+            # Export each method to a temp file using its full export function
+            for method_idx, (label, prefix, export_fn) in method_info.items():
+                method_res = self._all_method_results.get(method_idx)
+                if method_res is None:
+                    continue
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                    tmp.close()
+                    temp_files.append((tmp.name, prefix, label))
+
+                    self.fisher_analysis_results = method_res
+                    if export_fn is not None:
+                        export_fn(tmp.name)
+                    elif method_idx == 4:
+                        from ._circadian_coherence import export_coherence_to_excel
+                        import pandas as pd
+                        export_coherence_to_excel(tmp.name, method_res)
+                        with pd.ExcelWriter(tmp.name, engine="openpyxl", mode="a",
+                                            if_sheet_exists="overlay") as w:
+                            self._autofit_excel(w)
+                    exported.append(label)
+                    self._log_message(f"  ✓ {label} exported")
+                except Exception as e:
+                    errors.append(f"{label}: {e}")
+                    self._log_message(f"  ⚠️ {label} failed: {e}")
+                finally:
+                    self.fisher_analysis_results = results_backup
+
+            # Similarity (method 3) — separate handling
+            sim_res = self._all_method_results.get(3)
+            if sim_res is not None:
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                    tmp.close()
+                    temp_files.append((tmp.name, "Sim", "ROI Similarity"))
+                    self.fisher_analysis_results = sim_res
+                    from ._circadian_similarity import export_similarity_to_excel
+                    import pandas as pd
+                    export_similarity_to_excel(tmp.name, sim_res)
+                    with pd.ExcelWriter(tmp.name, engine="openpyxl", mode="a",
+                                        if_sheet_exists="overlay") as w:
+                        self._autofit_excel(w)
+                    exported.append("ROI Similarity")
+                    self._log_message("  ✓ ROI Similarity exported")
+                except Exception as e:
+                    errors.append(f"ROI Similarity: {e}")
+                    self._log_message(f"  ⚠️ ROI Similarity failed: {e}")
+                finally:
+                    self.fisher_analysis_results = results_backup
+
+            if not temp_files:
+                self._log_message("❌ No results to export.")
+                return
+
+            # Merge all temp workbooks into the final file
+            final_wb = openpyxl.Workbook()
+            final_wb.remove(final_wb.active)  # remove default empty sheet
+            used_sheet_names = set()
+
+            for tmp_path, prefix, label in temp_files:
+                try:
+                    src_wb = openpyxl.load_workbook(tmp_path)
+                    for src_sheet_name in src_wb.sheetnames:
+                        # Prefix each sheet name with the method abbreviation
+                        new_name = self._safe_sn(f"{prefix}_{src_sheet_name}", used_sheet_names)
+                        src_ws = src_wb[src_sheet_name]
+                        dst_ws = final_wb.create_sheet(title=new_name)
+                        for row in src_ws.iter_rows():
+                            for cell in row:
+                                dst_ws[cell.coordinate].value = cell.value
+                                if cell.has_style:
+                                    dst_ws[cell.coordinate]._style = cell._style
+                        # Copy column widths
+                        for col_letter, cd in src_ws.column_dimensions.items():
+                            dst_ws.column_dimensions[col_letter].width = cd.width
+                    src_wb.close()
+                except Exception as e:
+                    self._log_message(f"  ⚠️ Could not merge {label}: {e}")
+
+            final_wb.save(file_path)
+            self._log_message(f"✓ Export All complete: {len(exported)} methods, "
+                              f"{len(final_wb.sheetnames)} sheets → {os.path.basename(file_path)}")
+
+        finally:
+            # Clean up temp files
+            for tmp_path, _, _ in temp_files:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
         if errors:
             for err in errors:
-                self._log_message(f"⚠️ Skipped (no data): {err}")
+                self._log_message(f"⚠️ Skipped: {err}")
 
     # ------------------------------------------------------------------
     # Shared writer helpers used by export_all_circadian_results
