@@ -2371,11 +2371,16 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         splitter.setSizes([600, 400])
         layout.addWidget(splitter)
 
-        # Export button
-        self.btn_export_fisher = QPushButton("Export Rhythmic Pattern Results")
+        # Export buttons
+        self.btn_export_fisher = QPushButton("Export Current Analysis (Excel)")
         self.btn_export_fisher.clicked.connect(self.export_fisher_results)
         self.btn_export_fisher.setEnabled(False)
         layout.addWidget(self.btn_export_fisher)
+
+        self.btn_export_all_circadian = QPushButton("Export All Analyses (Excel)")
+        self.btn_export_all_circadian.clicked.connect(self.export_all_circadian_results)
+        self.btn_export_all_circadian.setEnabled(False)
+        layout.addWidget(self.btn_export_all_circadian)
 
         layout.addStretch()
     def _connect_signals(self):
@@ -2837,6 +2842,9 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
             # Clear any existing ROI detection
             self.masks = []
+
+            # Mark batch as loaded so downstream code picks the right source
+            self.avi_batch_loaded = True
 
             # Update end time for analysis
             self.update_end_time()

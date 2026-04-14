@@ -166,49 +166,36 @@ class ExportMixin:
             self.results_label.setText("⚠️ Incomplete analysis data detected.")
             self._log_message("Warning: Saving with incomplete behavioral analysis")
 
-        # Get base filename from user
+        # Get filename from user — Excel only
         from qtpy.QtWidgets import QFileDialog
 
-        base_path, _ = QFileDialog.getSaveFileName(
+        excel_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Analysis Results",
-            f"analysis_results_{int(time.time())}",  # No extension - we'll add them
-            "All Files (*)",
+            f"analysis_results_{int(time.time())}.xlsx",
+            "Excel Files (*.xlsx)",
         )
 
-        if not base_path:
+        if not excel_path:
             self._log_message("Save cancelled by user")
             return
 
-        # Remove any extension from base_path to ensure clean naming
-        base_path = os.path.splitext(base_path)[0]
+        if not excel_path.endswith(".xlsx"):
+            excel_path += ".xlsx"
 
         saved_files = []
         sheets_created = []
 
         try:
-            # === SAVE CSV VERSION ===
-            csv_path = f"{base_path}.csv"
-            self._log_message(f"Saving CSV version: {csv_path}")
-
-            try:
-                self._save_results_csv(csv_path)
-                saved_files.append(("CSV", csv_path))
-                self._log_message("✅ CSV saved successfully")
-            except Exception as e:
-                self._log_message(f"❌ CSV save failed: {e}")
-
-            # === SAVE COMPLETE EXCEL VERSION (if possible) ===
+            # === SAVE COMPLETE EXCEL VERSION ===
             try:
                 import pandas as pd
                 import openpyxl
 
-                excel_path = f"{base_path}.xlsx"
                 self._log_message(
-                    f"Saving complete Excel version with all sheets: {excel_path}"
+                    f"Saving Excel with all sheets: {os.path.basename(excel_path)}"
                 )
 
-                # Use the complete Excel save method
                 self._save_results_excel_to_path(excel_path)
                 saved_files.append(("Excel", excel_path))
 
@@ -766,11 +753,14 @@ class ExportMixin:
 
                     summary_data.append(row_data)
 
-                summary_df = pd.DataFrame(summary_data)
+                # Transpose: metrics as rows, one column per ROI
+                summary_df = pd.DataFrame(summary_data).set_index("ROI").T.reset_index()
+                summary_df.rename(columns={"index": "Metric"}, inplace=True)
+                summary_df.columns = ["Metric"] + [f"ROI_{roi}" for roi in sorted_rois]
                 summary_df.to_excel(writer, sheet_name="Summary", index=False, startrow=1)
                 writer.sheets["Summary"].cell(row=1, column=1).value = (
                     "Summary of ROI statistics: movement events, sleep bins, and detection "
-                    "thresholds per ROI. One row per ROI."
+                    "thresholds per ROI. One column per ROI."
                 )
 
                 # === SHEET 2: RAW INTENSITY ===
@@ -1084,17 +1074,8 @@ class ExportMixin:
                 writer.writerow([f"Number of ROIs: {len(sorted_rois)}"])
                 writer.writerow([])  # Empty row
 
-                # === ROI SUMMARY TABLE ===
+                # === ROI SUMMARY TABLE (one column per ROI) ===
                 writer.writerow(["ROI SUMMARY"])
-                summary_headers = [
-                    "ROI",
-                    "Baseline Mean",
-                    "Upper Threshold",
-                    "Lower Threshold",
-                    "Movement %",
-                    "Sleep Time (min)",
-                ]
-                writer.writerow(summary_headers)
 
                 roi_baseline_means = getattr(self, "roi_baseline_means", {})
                 roi_upper_thresholds = getattr(self, "roi_upper_thresholds", {})
@@ -1102,8 +1083,10 @@ class ExportMixin:
                 movement_data = getattr(self, "movement_data", {})
                 sleep_data = getattr(self, "sleep_data", {})
 
+                # Pre-calculate per-ROI stats
+                movement_pcts = {}
+                sleep_minutes_map = {}
                 for roi in sorted_rois:
-                    # Calculate statistics
                     movement_pct = 0
                     if roi in movement_data and movement_data[roi]:
                         movement_values = [m for _, m in movement_data[roi]]
@@ -1112,25 +1095,32 @@ class ExportMixin:
                             if movement_values
                             else 0
                         )
+                    movement_pcts[roi] = movement_pct
 
-                    sleep_minutes = 0
+                    sleep_min = 0
                     if roi in sleep_data and sleep_data[roi]:
                         sleep_values = [s for _, s in sleep_data[roi]]
-                        total_sleep_bins = sum(sleep_values)
-                        sleep_minutes = (
-                            total_sleep_bins * self.bin_size_seconds.value()
-                        ) / 60
+                        sleep_min = (sum(sleep_values) * self.bin_size_seconds.value()) / 60
+                    sleep_minutes_map[roi] = sleep_min
 
-                    writer.writerow(
-                        [
-                            roi,
-                            f"{roi_baseline_means.get(roi, 0):.3f}",
-                            f"{roi_upper_thresholds.get(roi, 0):.3f}",
-                            f"{roi_lower_thresholds.get(roi, 0):.3f}",
-                            f"{movement_pct:.1f}",
-                            f"{sleep_minutes:.1f}",
-                        ]
-                    )
+                # Header row: Metric, ROI_x, ROI_y, ...
+                writer.writerow(["Metric"] + [f"ROI_{roi}" for roi in sorted_rois])
+                # One row per metric
+                writer.writerow(
+                    ["Baseline Mean"] + [f"{roi_baseline_means.get(roi, 0):.3f}" for roi in sorted_rois]
+                )
+                writer.writerow(
+                    ["Upper Threshold"] + [f"{roi_upper_thresholds.get(roi, 0):.3f}" for roi in sorted_rois]
+                )
+                writer.writerow(
+                    ["Lower Threshold"] + [f"{roi_lower_thresholds.get(roi, 0):.3f}" for roi in sorted_rois]
+                )
+                writer.writerow(
+                    ["Movement %"] + [f"{movement_pcts[roi]:.1f}" for roi in sorted_rois]
+                )
+                writer.writerow(
+                    ["Sleep Time (min)"] + [f"{sleep_minutes_map[roi]:.1f}" for roi in sorted_rois]
+                )
 
                 writer.writerow([])  # Empty row
                 writer.writerow([])  # Empty row
@@ -1231,36 +1221,26 @@ class ExportMixin:
             self.results_label.setText("No results to save.")
             return
 
-        # Ask user for format
-        file_path, file_type = QFileDialog.getSaveFileName(
+        # Excel only
+        file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Results",
             "",
-            "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)",
+            "Excel Files (*.xlsx)",
         )
 
         if not file_path:
             return
 
+        if not file_path.endswith(".xlsx"):
+            file_path += ".xlsx"
+
         try:
-            if file_path.endswith(".xlsx") or "Excel" in file_type:
-                # Ensure .xlsx extension
-                if not file_path.endswith(".xlsx"):
-                    file_path += ".xlsx"
-                self._save_results_excel_to_path(file_path)
-                self.results_label.setText(
-                    f"Results saved to {os.path.basename(file_path)}"
-                )
-                self._log_message(f"Excel results saved: {file_path}")
-            else:
-                # Default to CSV
-                if not file_path.endswith(".csv"):
-                    file_path += ".csv"
-                self._save_results_csv(file_path)
-                self.results_label.setText(
-                    f"Results saved to {os.path.basename(file_path)}"
-                )
-                self._log_message(f"CSV results saved: {file_path}")
+            self._save_results_excel_to_path(file_path)
+            self.results_label.setText(
+                f"Results saved to {os.path.basename(file_path)}"
+            )
+            self._log_message(f"Excel results saved: {file_path}")
 
         except Exception as e:
             self.results_label.setText(f"Error saving results: {str(e)}")
@@ -1437,6 +1417,8 @@ class ExportMixin:
             return
 
         base_path = os.path.splitext(base_path)[0]
+        # Ensure .xlsx extension for the main export
+        excel_path_meta = f"{base_path}_metadata.xlsx"
         saved_files = []
 
         try:
@@ -1558,42 +1540,26 @@ class ExportMixin:
 
             self._log_message("Metadata extraction with legacy enhancement completed")
 
-            # Save CSV with enhanced metadata
-            csv_path = f"{base_path}_metadata.csv"
-            self._log_message(
-                f"Saving enhanced CSV with metadata: {os.path.basename(csv_path)}"
-            )
-
-            try:
-                self._save_results_csv_with_metadata(
-                    csv_path, metadata_dict, has_analysis_results
-                )
-                saved_files.append(("Enhanced CSV with Metadata", csv_path))
-                self._log_message("Enhanced CSV with metadata saved successfully")
-            except Exception as e:
-                self._log_message(f"CSV save failed: {e}")
-
-            # Save Excel with enhanced metadata (if pandas available)
+            # Save Excel with enhanced metadata
             try:
                 import pandas as pd
 
-                excel_path = f"{base_path}_metadata.xlsx"
                 self._log_message(
-                    f"Saving enhanced Excel with metadata: {os.path.basename(excel_path)}"
+                    f"Saving Excel with metadata: {os.path.basename(excel_path_meta)}"
                 )
 
                 if has_analysis_results:
                     # Step 1: Write all analysis sheets (Movement, Sleep, etc.)
-                    self._save_results_excel_to_path(excel_path)
+                    self._save_results_excel_to_path(excel_path_meta)
                     # Step 2: Append HDF5 sensor timeseries sheets to same file
-                    self._append_hdf5_sheets_to_excel(excel_path, metadata_dict)
+                    self._append_hdf5_sheets_to_excel(excel_path_meta, metadata_dict)
                 else:
                     # No analysis data — write HDF5 metadata only
                     self._save_results_excel_with_metadata(
-                        excel_path, metadata_dict, False
+                        excel_path_meta, metadata_dict, False
                     )
-                saved_files.append(("Enhanced Excel with Metadata", excel_path))
-                self._log_message("Enhanced Excel with metadata saved successfully")
+                saved_files.append(("Excel with Metadata", excel_path_meta))
+                self._log_message("Excel with metadata saved successfully")
 
             except ImportError:
                 self._log_message(

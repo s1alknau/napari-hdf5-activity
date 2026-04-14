@@ -841,6 +841,8 @@ class CircadianMixin:
             ):
                 if hasattr(self, "btn_export_fisher"):
                     self.btn_export_fisher.setEnabled(True)
+                if hasattr(self, "btn_export_all_circadian"):
+                    self.btn_export_all_circadian.setEnabled(True)
 
         except Exception as e:
             self.fisher_results_text.setPlainText(
@@ -1372,8 +1374,15 @@ class CircadianMixin:
                 tau_hours = self._get_actogram_tau(results, method_index)
                 self._run_actogram(analysis_data, bin_size, tau_hours)
 
-            # Enable export button
+            # Store results per method for Export All
+            if not hasattr(self, "_all_method_results"):
+                self._all_method_results = {}
+            self._all_method_results[method_index] = results
+
+            # Enable export buttons
             self.btn_export_fisher.setEnabled(True)
+            if hasattr(self, "btn_export_all_circadian"):
+                self.btn_export_all_circadian.setEnabled(True)
 
             self._log_message(f"✓ Rhythmic pattern analysis complete ({method_name})")
 
@@ -3796,56 +3805,389 @@ class CircadianMixin:
 
             traceback.print_exc()
 
-    def _export_fisher_method_results(self, base_path):
-        """Export Chi² Periodogram results to CSV and Excel."""
-        # Export to CSV
-        csv_path = f"{base_path}.csv"
-        self._export_fisher_to_csv(csv_path)
-        self._log_message(f"✓ Exported Fisher results to CSV: {csv_path}")
+    def export_all_circadian_results(self):
+        """Export all available circadian analysis results into one Excel file."""
+        import os
+        import pandas as pd
+        from qtpy.QtWidgets import QFileDialog
 
-        # Export to Excel
+        # Check if any results exist at all
+        method_results = {
+            0: "Chi² Periodogram",
+            1: "FFT Spectrum",
+            2: "Cosinor",
+            3: "ROI Similarity",
+            4: "Coherence",
+            5: "Phase Clustering",
+        }
+
+        if not hasattr(self, "fisher_analysis_results"):
+            self._log_message("⚠️ No circadian analysis results available. Run an analysis first.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export All Circadian Results",
+            "all_circadian_results.xlsx",
+            "Excel Files (*.xlsx)",
+        )
+        if not file_path:
+            return
+        if not file_path.endswith(".xlsx"):
+            file_path += ".xlsx"
+
+        base = os.path.splitext(file_path)[0]
+        exported = []
+        errors = []
+
+        # We write all methods into one workbook using a shared ExcelWriter.
+        # Each method adds its own sheets via a temp file, then we merge them.
+        # Simpler: write each method to the same file sequentially using append mode.
+
+        # Track which sheet names we've written to avoid duplicates across methods
+        used_sheet_names = set()
+
+        def _safe_sheet(name, used):
+            """Truncate to 31 chars and deduplicate."""
+            name = name[:31]
+            if name not in used:
+                used.add(name)
+                return name
+            i = 1
+            while True:
+                candidate = f"{name[:28]}_{i}"
+                if candidate not in used:
+                    used.add(candidate)
+                    return candidate
+                i += 1
+
         try:
-            import pandas as pd
+            with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
 
+                # --- Chi² / Fisher ---
+                try:
+                    results_backup = self.fisher_analysis_results
+                    # Try to get fisher results (may already be loaded or need re-run)
+                    r = getattr(self, "_all_method_results", {})
+                    fisher_r = r.get(0)
+                    if fisher_r:
+                        self.fisher_analysis_results = fisher_r
+                    # Export sheets inline to the shared writer
+                    self._write_fisher_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("Chi² Periodogram")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"Chi²: {e}")
+
+                # --- FFT ---
+                try:
+                    r = getattr(self, "_all_method_results", {})
+                    fft_r = r.get(1)
+                    if fft_r:
+                        self.fisher_analysis_results = fft_r
+                    self._write_fft_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("FFT Spectrum")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"FFT: {e}")
+
+                # --- Cosinor ---
+                try:
+                    r = getattr(self, "_all_method_results", {})
+                    cos_r = r.get(2)
+                    if cos_r:
+                        self.fisher_analysis_results = cos_r
+                    self._write_cosinor_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("Cosinor")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"Cosinor: {e}")
+
+                # --- Similarity ---
+                try:
+                    r = getattr(self, "_all_method_results", {})
+                    sim_r = r.get(3)
+                    if sim_r:
+                        self.fisher_analysis_results = sim_r
+                    self._write_similarity_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("ROI Similarity")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"Similarity: {e}")
+
+                # --- Coherence ---
+                try:
+                    r = getattr(self, "_all_method_results", {})
+                    coh_r = r.get(4)
+                    if coh_r:
+                        self.fisher_analysis_results = coh_r
+                    self._write_coherence_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("Coherence")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"Coherence: {e}")
+
+                # --- Phase Clustering ---
+                try:
+                    r = getattr(self, "_all_method_results", {})
+                    ph_r = r.get(5)
+                    if ph_r:
+                        self.fisher_analysis_results = ph_r
+                    self._write_phase_clustering_sheets_to_writer(writer, used_sheet_names)
+                    exported.append("Phase Clustering")
+                    self.fisher_analysis_results = results_backup
+                except Exception as e:
+                    errors.append(f"Phase Clustering: {e}")
+
+                self._autofit_excel(writer)
+
+        except Exception as e:
+            self._log_message(f"❌ Export All failed: {e}")
+            import traceback; traceback.print_exc()
+            return
+
+        # Report
+        if exported:
+            self._log_message(f"✓ Export All complete: {', '.join(exported)} → {os.path.basename(file_path)}")
+        if errors:
+            for err in errors:
+                self._log_message(f"⚠️ Skipped (no data): {err}")
+
+    # ------------------------------------------------------------------
+    # Shared writer helpers used by export_all_circadian_results
+    # ------------------------------------------------------------------
+
+    def _write_fisher_sheets_to_writer(self, writer, used_names: set):
+        """Write Chi² periodogram sheets into an open ExcelWriter."""
+        import pandas as pd
+        results = self.fisher_analysis_results
+        roi_results = {k: v for k, v in results.items() if isinstance(k, int)}
+        if not roi_results:
+            return
+
+        summary_rows = []
+        for roi_id, roi_data in sorted(roi_results.items()):
+            summary_rows.append({
+                "ROI": roi_id,
+                "Dominant Period (h)": roi_data.get("dominant_period_hours", "N/A"),
+                "Max Z-Score": roi_data.get("max_z_score", "N/A"),
+                "P-Value": roi_data.get("p_value", "N/A"),
+                "Significant": roi_data.get("is_significant", False),
+            })
+        pd.DataFrame(summary_rows).to_excel(
+            writer, sheet_name=self._safe_sn("Chi2_Summary", used_names), index=False
+        )
+
+        for roi_id, roi_data in sorted(roi_results.items()):
+            periods = roi_data.get("periods", [])
+            z_scores = roi_data.get("z_scores", [])
+            if periods and z_scores:
+                pd.DataFrame({"Period (h)": periods, "Z-Score": z_scores}).to_excel(
+                    writer, sheet_name=self._safe_sn(f"Chi2_ROI_{roi_id}", used_names), index=False
+                )
+
+    def _write_fft_sheets_to_writer(self, writer, used_names: set):
+        """Write FFT spectrum sheets into an open ExcelWriter."""
+        import pandas as pd
+        results = self.fisher_analysis_results
+        roi_results = {k: v for k, v in results.items() if isinstance(k, int)}
+        if not roi_results:
+            return
+
+        summary_rows = []
+        for roi_id, result in sorted(roi_results.items()):
+            summary_rows.append({
+                "ROI": roi_id,
+                "Dominant Period (h)": result.get("dominant_period_hours", "N/A"),
+                "Dominant Frequency (Hz)": result.get("dominant_frequency_hz", "N/A"),
+                "Spectral Power": result.get("dominant_power", "N/A"),
+                "Number of Peaks": result.get("n_peaks", "N/A"),
+                "Mean Activity": result.get("mean_activity", "N/A"),
+                "Std Activity": result.get("std_activity", "N/A"),
+            })
+        pd.DataFrame(summary_rows).to_excel(
+            writer, sheet_name=self._safe_sn("FFT_Summary", used_names), index=False
+        )
+
+        # Top peaks per ROI in one sheet
+        peak_rows = []
+        for roi_id, result in sorted(roi_results.items()):
+            for peak in result.get("top_peaks", []):
+                peak_rows.append({
+                    "ROI": roi_id,
+                    "Period (h)": peak.get("period_hours"),
+                    "Frequency (Hz)": peak.get("frequency_hz"),
+                    "Power": peak.get("power"),
+                    "Prominence": peak.get("prominence"),
+                })
+        if peak_rows:
+            pd.DataFrame(peak_rows).to_excel(
+                writer, sheet_name=self._safe_sn("FFT_Peaks", used_names), index=False
+            )
+
+    def _write_cosinor_sheets_to_writer(self, writer, used_names: set):
+        """Write Cosinor sheets into an open ExcelWriter."""
+        import pandas as pd
+        results = self.fisher_analysis_results
+        roi_results = {k: v for k, v in results.get("roi_results", {}).items() if isinstance(k, int)}
+        sleep_results = results.get("sleep_phase_results", {})
+        sleep_roi = {k: v for k, v in sleep_results.get("roi_results", {}).items() if isinstance(k, int)} if sleep_results else {}
+
+        if roi_results:
+            rows = []
+            for roi_id, roi_data in sorted(roi_results.items()):
+                best = roi_data.get("best_result", {})
+                if "error" in best:
+                    continue
+                rows.append({
+                    "ROI": roi_id,
+                    "Best Period (h)": roi_data.get("best_period", "N/A"),
+                    "Peak Time (h)": best.get("peak_time", "N/A"),
+                    "MESOR": best.get("mesor", "N/A"),
+                    "Amplitude": best.get("amplitude", "N/A"),
+                    "R-squared": best.get("r_squared", "N/A"),
+                    "P-value": best.get("p_value", "N/A"),
+                    "Significant": best.get("significant", False),
+                })
+            if rows:
+                pd.DataFrame(rows).to_excel(
+                    writer, sheet_name=self._safe_sn("Cosinor_Activity", used_names), index=False
+                )
+
+        if sleep_roi:
+            rows = []
+            for roi_id, roi_data in sorted(sleep_roi.items()):
+                best = roi_data.get("best_result", {})
+                if "error" in best:
+                    continue
+                rows.append({
+                    "ROI": roi_id,
+                    "Best Period (h)": roi_data.get("best_period", "N/A"),
+                    "Sleep Peak Time (h)": best.get("peak_time", "N/A"),
+                    "MESOR": best.get("mesor", "N/A"),
+                    "Amplitude": best.get("amplitude", "N/A"),
+                    "R-squared": best.get("r_squared", "N/A"),
+                    "P-value": best.get("p_value", "N/A"),
+                    "Significant": best.get("significant", False),
+                })
+            if rows:
+                pd.DataFrame(rows).to_excel(
+                    writer, sheet_name=self._safe_sn("Cosinor_Sleep", used_names), index=False
+                )
+
+    def _write_similarity_sheets_to_writer(self, writer, used_names: set):
+        """Write Similarity sheets into an open ExcelWriter."""
+        import pandas as pd
+        results = self.fisher_analysis_results
+        corr_matrix = results.get("correlation_matrix")
+        if corr_matrix is None:
+            return
+        import numpy as np
+        roi_ids = sorted(results.get("roi_ids", []))
+        df = pd.DataFrame(corr_matrix, index=[f"ROI_{r}" for r in roi_ids],
+                          columns=[f"ROI_{r}" for r in roi_ids])
+        df.to_excel(writer, sheet_name=self._safe_sn("Similarity_Matrix", used_names))
+
+        pairwise = results.get("pairwise_correlations", [])
+        if pairwise:
+            pd.DataFrame(pairwise).to_excel(
+                writer, sheet_name=self._safe_sn("Similarity_Pairwise", used_names), index=False
+            )
+
+    def _write_coherence_sheets_to_writer(self, writer, used_names: set):
+        """Write Coherence sheets into an open ExcelWriter."""
+        import pandas as pd
+        results = self.fisher_analysis_results
+        coh_matrix = results.get("coherence_matrix")
+        if coh_matrix is None:
+            return
+        roi_ids = sorted(results.get("roi_ids", []))
+        df = pd.DataFrame(coh_matrix, index=[f"ROI_{r}" for r in roi_ids],
+                          columns=[f"ROI_{r}" for r in roi_ids])
+        df.to_excel(writer, sheet_name=self._safe_sn("Coherence_Matrix", used_names))
+
+        pairwise = results.get("pairwise_coherence", [])
+        if pairwise:
+            pd.DataFrame(pairwise).to_excel(
+                writer, sheet_name=self._safe_sn("Coherence_Pairwise", used_names), index=False
+            )
+
+    def _write_phase_clustering_sheets_to_writer(self, writer, used_names: set):
+        """Write Phase Clustering sheets into an open ExcelWriter."""
+        import pandas as pd
+        import numpy as np
+        results = self.fisher_analysis_results
+        clusters = results.get("phase_clusters", {})
+        if not clusters and not results.get("roi_phases"):
+            return
+
+        if clusters:
+            rows = []
+            for cluster_name, roi_list in clusters.items():
+                label = cluster_name.replace("_", " ").title()
+                for roi in sorted(roi_list):
+                    rows.append({"ROI": roi, "Cluster": label, "Cluster Size": len(roi_list)})
+            pd.DataFrame(rows).to_excel(
+                writer, sheet_name=self._safe_sn("Phase_Clusters", used_names), index=False
+            )
+
+        roi_phases = results.get("roi_phases", {})
+        if roi_phases:
+            rows = []
+            for roi_id, info in sorted(roi_phases.items()):
+                rows.append({
+                    "ROI": roi_id,
+                    "Phase (rad)": info.get("phase_radians", 0),
+                    "Phase (deg)": np.degrees(info.get("phase_radians", 0)),
+                    "Phase (h)": info.get("phase_hours", 0),
+                    "Amplitude": info.get("amplitude", 0),
+                })
+            pd.DataFrame(rows).to_excel(
+                writer, sheet_name=self._safe_sn("Phase_Values", used_names), index=False
+            )
+
+
+    @staticmethod
+    def _safe_sn(name: str, used: set) -> str:
+        """Return a unique Excel sheet name (≤31 chars)."""
+        name = name[:31]
+        if name not in used:
+            used.add(name)
+            return name
+        i = 1
+        while True:
+            candidate = f"{name[:29]}_{i}"
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+            i += 1
+
+    def _export_fisher_method_results(self, base_path):
+        """Export Chi² Periodogram results to Excel."""
+        try:
             excel_path = f"{base_path}.xlsx"
             self._export_fisher_to_excel(excel_path)
             self._log_message(f"✓ Exported Fisher results to Excel: {excel_path}")
-        except ImportError:
-            self._log_message("⚠️ Excel export not available (pandas not installed)")
+        except Exception as e:
+            self._log_message(f"⚠️ Fisher Excel export error: {e}")
 
     def _export_fft_method_results(self, base_path):
-        """Export FFT Power Spectrum results to CSV and Excel."""
-        # Export to CSV (similar to Fisher)
-        csv_path = f"{base_path}.csv"
-        self._export_fft_to_csv(csv_path)
-        self._log_message(f"✓ Exported FFT results to CSV: {csv_path}")
-
-        # Export to Excel
+        """Export FFT Power Spectrum results to Excel."""
         try:
-            import pandas as pd
-
             excel_path = f"{base_path}.xlsx"
             self._export_fft_to_excel(excel_path)
             self._log_message(f"✓ Exported FFT results to Excel: {excel_path}")
-        except ImportError:
-            self._log_message("⚠️ Excel export not available (pandas not installed)")
+        except Exception as e:
+            self._log_message(f"⚠️ FFT Excel export error: {e}")
 
     def _export_cosinor_method_results(self, base_path):
-        """Export Cosinor Analysis results to CSV and Excel."""
-        csv_path = f"{base_path}.csv"
-        self._export_cosinor_to_csv(csv_path)
-        self._log_message(f"✓ Exported Cosinor results to CSV: {csv_path}")
-
+        """Export Cosinor Analysis results to Excel."""
         try:
-            import pandas as pd
-
             excel_path = f"{base_path}.xlsx"
             self._export_cosinor_to_excel(excel_path)
             self._log_message(f"✓ Exported Cosinor results to Excel: {excel_path}")
-        except ImportError:
-            self._log_message("⚠️ Excel export not available (pandas not installed)")
         except Exception as e:
-            self._log_message(f"⚠️ Cosinor export error: {e}")
+            self._log_message(f"⚠️ Cosinor Excel export error: {e}")
 
     def _export_cosinor_to_excel(self, file_path: str):
         """Export Cosinor analysis results to Excel format."""
@@ -3983,11 +4325,7 @@ class CircadianMixin:
             self._autofit_excel(writer)
 
     def _export_similarity_method_results(self, base_path):
-        """Export ROI Similarity results to CSV and Excel."""
-        csv_path = f"{base_path}.csv"
-        self._export_similarity_to_csv(csv_path)
-        self._log_message(f"✓ Exported Similarity results to CSV: {csv_path}")
-
+        """Export ROI Similarity results to Excel."""
         try:
             from ._circadian_similarity import export_similarity_to_excel
             import pandas as pd
@@ -4000,11 +4338,7 @@ class CircadianMixin:
             self._log_message(f"⚠️ Similarity Excel export error: {e}")
 
     def _export_coherence_method_results(self, base_path):
-        """Export Coherence Analysis results to CSV and Excel."""
-        csv_path = f"{base_path}.csv"
-        self._export_coherence_to_csv(csv_path)
-        self._log_message(f"✓ Exported Coherence results to CSV: {csv_path}")
-
+        """Export Coherence Analysis results to Excel."""
         try:
             from ._circadian_coherence import export_coherence_to_excel
             import pandas as pd
@@ -4017,13 +4351,8 @@ class CircadianMixin:
             self._log_message(f"⚠️ Coherence Excel export error: {e}")
 
     def _export_phase_clustering_method_results(self, base_path):
-        """Export Phase Clustering results to CSV and Excel."""
-        csv_path = f"{base_path}.csv"
-        self._export_phase_clustering_to_csv(csv_path)
-        self._log_message(f"✓ Exported Phase Clustering results to CSV: {csv_path}")
-
+        """Export Phase Clustering results to Excel."""
         try:
-            import pandas as pd
             excel_path = f"{base_path}.xlsx"
             self._export_phase_clustering_to_excel(excel_path)
             self._log_message(f"✓ Exported Phase Clustering results to Excel: {excel_path}")

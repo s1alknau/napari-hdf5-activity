@@ -422,7 +422,7 @@ def population_cosinor(
     # df1 = 2, df2 = 2(n − 1)
     n = len(valid_results)
     beta_cos_vals = np.array([r.get("beta_cos", r["amplitude"] * np.cos(-r["phase_angle_rad"])) for r in valid_results])
-    beta_sin_vals = np.array([r.get("beta_sin", -r["amplitude"] * np.sin(-r["phase_angle_rad"])) for r in valid_results])
+    beta_sin_vals = np.array([r.get("beta_sin", r["amplitude"] * np.sin(-r["phase_angle_rad"])) for r in valid_results])
 
     mean_bc = np.mean(beta_cos_vals)
     mean_bs = np.mean(beta_sin_vals)
