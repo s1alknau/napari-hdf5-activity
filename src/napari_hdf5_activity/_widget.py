@@ -5004,12 +5004,26 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         # Preprocessing params shared by all threshold methods
         jump_correction = self.enable_jump_correction.isChecked()
         aib = self.adaptive_illumination_baseline.isChecked()
+        led_data = None
+        if aib:
+            led_data = self._extract_led_data_from_hdf5()
+            if led_data is None:
+                self._log_message(
+                    "⚠️ Adaptive Illumination Baseline: checkbox is ON but no white LED "
+                    "channel found in file (need 'led_white_power_percent' or similar). "
+                    "Adaptive baseline will NOT be applied."
+                )
+            else:
+                self._log_message(
+                    f"✓ Adaptive Illumination Baseline: LED data extracted "
+                    f"({len(led_data.get('times', []))} time points)."
+                )
         params.update(
             {
                 "enable_jump_correction": jump_correction,
                 "frame_mean_data": self._extract_frame_mean_from_hdf5() if jump_correction else None,
                 "adaptive_illumination_baseline": aib,
-                "led_data": self._extract_led_data_from_hdf5() if aib else None,
+                "led_data": led_data,
             }
         )
 
@@ -6168,9 +6182,10 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 white_led = None
                 white_led_names = [
                     "led_white_power_percent",
-                    "white_led_power",
-                    "led_white_power",
                     "white_led_power_percent",
+                    "led_white_power",
+                    "white_led_power",
+                    "white_led",
                 ]
                 for name in white_led_names:
                     if name in ts_keys:
