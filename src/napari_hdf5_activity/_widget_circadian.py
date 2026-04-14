@@ -2906,6 +2906,12 @@ class CircadianMixin:
                             and self.population_peak_mode.currentText() == "Mean"
                         )
 
+                        # Period spread across ROIs
+                        sp = np.array(sig_periods, dtype=float) if sig_periods else np.array([])
+                        period_std   = float(np.std(sp, ddof=1)) if len(sp) > 1 else None
+                        period_min   = float(np.min(sp)) if len(sp) > 0 else None
+                        period_max   = float(np.max(sp)) if len(sp) > 0 else None
+
                         # Store population data so it can be saved as a standalone figure
                         self._pop_spectrum_data = {
                             "grid": grid,
@@ -2914,6 +2920,9 @@ class CircadianMixin:
                             "n": len(interp),
                             "sig_periods": sig_periods,
                             "use_mean_peak": use_mean_peak,
+                            "period_std": period_std,
+                            "period_min": period_min,
+                            "period_max": period_max,
                         }
 
                         self._draw_population_panel(
@@ -4873,7 +4882,36 @@ class CircadianMixin:
                             writer, sheet_name="Sleep_Phase_Summary", index=False
                         )
 
-            # Sheet 5: Parameters
+            # Sheet 5: Population Mean statistics
+            pop_data = getattr(self, "_pop_spectrum_data", None)
+            sig_periods_all = [
+                v.get("dominant_period")
+                for v in self.fisher_analysis_results.values()
+                if isinstance(v, dict) and v.get("is_significant")
+                and v.get("dominant_period") is not None
+            ]
+            if sig_periods_all:
+                import numpy as _np
+                sp = _np.array(sig_periods_all, dtype=float)
+                med_p  = float(_np.median(sp))
+                mean_p = float(_np.mean(sp))
+                std_p  = float(_np.std(sp, ddof=1)) if len(sp) > 1 else 0.0
+                min_p  = float(_np.min(sp))
+                max_p  = float(_np.max(sp))
+                pop_rows = [{"ROI": f"ROI_{roi_id}", "Dominant Period (h)": v.get("dominant_period")}
+                            for roi_id, v in sorted(
+                                {k: v for k, v in self.fisher_analysis_results.items() if isinstance(k, int)}.items())
+                            if v.get("is_significant") and v.get("dominant_period") is not None]
+                pop_rows.append({"ROI": "— Population —", "Dominant Period (h)": None})
+                pop_rows.append({"ROI": "Median (h)", "Dominant Period (h)": round(med_p, 2)})
+                pop_rows.append({"ROI": "Mean (h)", "Dominant Period (h)": round(mean_p, 2)})
+                pop_rows.append({"ROI": "Std (h)", "Dominant Period (h)": round(std_p, 2)})
+                pop_rows.append({"ROI": "Min (h)", "Dominant Period (h)": round(min_p, 2)})
+                pop_rows.append({"ROI": "Max (h)", "Dominant Period (h)": round(max_p, 2)})
+                pop_rows.append({"ROI": "Range (h)", "Dominant Period (h)": round(max_p - min_p, 2)})
+                pd.DataFrame(pop_rows).to_excel(writer, sheet_name="Population_Mean", index=False)
+
+            # Sheet 6: Parameters
             has_sleep = bool(sleep_results)
             params_df = pd.DataFrame(
                 {
@@ -5132,7 +5170,41 @@ class CircadianMixin:
                             writer, sheet_name="Sleep_Phase_Summary", index=False
                         )
 
-            # Sheet 4: Parameters
+            # Sheet 4: Population Mean statistics
+            sig_periods_chi2 = [
+                v.get("periodogram", {}).get("dominant_period")
+                for v in self.fisher_analysis_results.values()
+                if isinstance(v, dict)
+                and v.get("periodogram", {}).get("is_significant")
+                and v.get("periodogram", {}).get("dominant_period") is not None
+            ]
+            if sig_periods_chi2:
+                import numpy as _np
+                sp = _np.array(sig_periods_chi2, dtype=float)
+                med_p  = float(_np.median(sp))
+                mean_p = float(_np.mean(sp))
+                std_p  = float(_np.std(sp, ddof=1)) if len(sp) > 1 else 0.0
+                min_p  = float(_np.min(sp))
+                max_p  = float(_np.max(sp))
+                pop_rows = [
+                    {"ROI": f"ROI_{roi_id}",
+                     "Dominant Period (h)": v.get("periodogram", {}).get("dominant_period")}
+                    for roi_id, v in sorted(
+                        {k: v for k, v in self.fisher_analysis_results.items()
+                         if isinstance(k, int)}.items())
+                    if v.get("periodogram", {}).get("is_significant")
+                    and v.get("periodogram", {}).get("dominant_period") is not None
+                ]
+                pop_rows.append({"ROI": "— Population —", "Dominant Period (h)": None})
+                pop_rows.append({"ROI": "Median (h)",  "Dominant Period (h)": round(med_p, 2)})
+                pop_rows.append({"ROI": "Mean (h)",    "Dominant Period (h)": round(mean_p, 2)})
+                pop_rows.append({"ROI": "Std (h)",     "Dominant Period (h)": round(std_p, 2)})
+                pop_rows.append({"ROI": "Min (h)",     "Dominant Period (h)": round(min_p, 2)})
+                pop_rows.append({"ROI": "Max (h)",     "Dominant Period (h)": round(max_p, 2)})
+                pop_rows.append({"ROI": "Range (h)",   "Dominant Period (h)": round(max_p - min_p, 2)})
+                pd.DataFrame(pop_rows).to_excel(writer, sheet_name="Population_Mean", index=False)
+
+            # Sheet 5: Parameters
             has_sleep = bool(sleep_results)
             params_df = pd.DataFrame(
                 {
@@ -5674,8 +5746,16 @@ class CircadianMixin:
                                        linewidth=1.5, label=f"Median peak: {med_p:.1f}h")
                         if sig_periods:
                             n_sig = len(sig_periods)
+                            sp = np.array(sig_periods, dtype=float)
+                            std_p = float(np.std(sp, ddof=1)) if len(sp) > 1 else 0.0
+                            p_min_v = float(np.min(sp))
+                            p_max_v = float(np.max(sp))
+                            stats_lines = [f"Significant: {n_sig}/{len(all_p)}"]
+                            if len(sp) >= 2:
+                                stats_lines.append(f"Spread: ±{std_p:.1f}h (std)")
+                                stats_lines.append(f"Range: {p_min_v:.1f}–{p_max_v:.1f}h")
                             ax.text(0.97, 0.95,
-                                    f"Significant: {n_sig}/{len(all_p)}",
+                                    "\n".join(stats_lines),
                                     transform=ax.transAxes, fontsize=8,
                                     va="top", ha="right",
                                     bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
@@ -6162,12 +6242,15 @@ class CircadianMixin:
 
     def _draw_population_panel(self, ax, data: dict, n_rois_total: int):
         """Draw population mean spectrum into *ax* using pre-computed *data*."""
-        grid       = data["grid"]
-        mean_pw    = data["mean_pw"]
-        sem_pw     = data["sem_pw"]
-        n          = data["n"]
-        sig_periods  = data["sig_periods"]
+        grid          = data["grid"]
+        mean_pw       = data["mean_pw"]
+        sem_pw        = data["sem_pw"]
+        n             = data["n"]
+        sig_periods   = data["sig_periods"]
         use_mean_peak = data["use_mean_peak"]
+        period_std    = data.get("period_std")
+        period_min    = data.get("period_min")
+        period_max    = data.get("period_max")
 
         ax.plot(grid, mean_pw, color="black", linewidth=2,
                 label=f"Mean (n={n})")
@@ -6183,8 +6266,12 @@ class CircadianMixin:
             ax.axvline(med_p, color="red", linestyle="--", linewidth=1.5,
                        label=f"Median peak: {med_p:.1f}h")
         if sig_periods:
+            stats_lines = [f"Significant: {len(sig_periods)}/{n_rois_total}"]
+            if period_std is not None and len(sig_periods) >= 2:
+                stats_lines.append(f"Spread: ±{period_std:.1f}h (std)")
+                stats_lines.append(f"Range: {period_min:.1f}–{period_max:.1f}h")
             ax.text(0.97, 0.95,
-                    f"Significant: {len(sig_periods)}/{n_rois_total}",
+                    "\n".join(stats_lines),
                     transform=ax.transAxes, fontsize=8,
                     va="top", ha="right",
                     bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6))
