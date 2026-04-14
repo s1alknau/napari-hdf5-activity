@@ -3350,12 +3350,30 @@ class CircadianMixin:
                 sig_marker = " *" if pop_result.get("significant", False) else ""
                 n_sig = pop_result.get("n_significant", 0)
                 n_ind = pop_result.get("n_individuals", 0)
+
+                # Period spread across significant ROIs
+                sig_bp = [
+                    roi_data.get("best_period")
+                    for roi_data in {k: v for k, v in cosinor_results.get("roi_results", {}).items()
+                                     if isinstance(k, int)}.values()
+                    if roi_data.get("best_result", {}).get("significant")
+                    and roi_data.get("best_period") is not None
+                ]
+                period_spread_line = ""
+                if len(sig_bp) >= 2:
+                    _bp = np.array(sig_bp, dtype=float)
+                    period_spread_line = (
+                        f"\nPeriod spread: ±{np.std(_bp, ddof=1):.1f}h (std)"
+                        f"\nRange: {_bp.min():.1f}–{_bp.max():.1f}h"
+                    )
+
                 stats_text = (
                     f"MESOR: {pop_mesor:.3f}\n"
                     f"Amplitude: {pop_amplitude:.3f}\n"
                     f"Peak time: {pop_peak_time:.1f}h\n"
                     f"p: {_fmt_p(p_val)}{sig_marker}\n"
                     f"n={n_ind} ROIs  ({n_sig} significant)"
+                    f"{period_spread_line}"
                 )
                 ax_pop.text(
                     0.97, 0.05, stats_text, transform=ax_pop.transAxes,
@@ -4037,6 +4055,7 @@ class CircadianMixin:
     def _write_cosinor_sheets_to_writer(self, writer, used_names: set):
         """Write Cosinor sheets into an open ExcelWriter."""
         import pandas as pd
+        import numpy as _np
         results = self.fisher_analysis_results
         roi_results = {k: v for k, v in results.get("roi_results", {}).items() if isinstance(k, int)}
         sleep_results = results.get("sleep_phase_results", {})
@@ -4061,6 +4080,32 @@ class CircadianMixin:
             if rows:
                 pd.DataFrame(rows).to_excel(
                     writer, sheet_name=self._safe_sn("Cosinor_Activity", used_names), index=False
+                )
+
+            # Population period spread
+            sig_periods = [r["Best Period (h)"] for r in rows
+                           if r.get("Significant") and isinstance(r.get("Best Period (h)"), (int, float))]
+            if sig_periods:
+                sp = _np.array(sig_periods, dtype=float)
+                pop_r = results.get("population_result", {})
+                pop_rows = [{"Metric": "Median Period (h)", "Value": round(float(_np.median(sp)), 2)},
+                            {"Metric": "Mean Period (h)",   "Value": round(float(_np.mean(sp)), 2)},
+                            {"Metric": "Std Period (h)",    "Value": round(float(_np.std(sp, ddof=1)), 2) if len(sp) > 1 else 0},
+                            {"Metric": "Min Period (h)",    "Value": round(float(_np.min(sp)), 2)},
+                            {"Metric": "Max Period (h)",    "Value": round(float(_np.max(sp)), 2)},
+                            {"Metric": "Range (h)",         "Value": round(float(_np.max(sp) - _np.min(sp)), 2)}]
+                if "error" not in pop_r:
+                    pop_rows += [
+                        {"Metric": "Population Test Period (h)",   "Value": round(pop_r.get("period", 0), 2)},
+                        {"Metric": "Population MESOR",             "Value": round(pop_r.get("population_mesor", 0), 4)},
+                        {"Metric": "Population Amplitude",         "Value": round(pop_r.get("population_amplitude", 0), 4)},
+                        {"Metric": "Population Peak Time (h)",     "Value": round(pop_r.get("population_peak_time", 0), 2)},
+                        {"Metric": "F-statistic",                  "Value": pop_r.get("f_statistic")},
+                        {"Metric": "P-value",                      "Value": pop_r.get("p_value")},
+                        {"Metric": "Significant",                  "Value": pop_r.get("significant", False)},
+                    ]
+                pd.DataFrame(pop_rows).to_excel(
+                    writer, sheet_name=self._safe_sn("Cosinor_Population", used_names), index=False
                 )
 
         if sleep_roi:
@@ -4310,7 +4355,49 @@ class CircadianMixin:
                         writer, sheet_name="Activity_vs_Sleep", index=False
                     )
 
-            # Sheet 4: Parameters
+            # Sheet 4: Population_Mean — period spread across ROIs
+            import numpy as _np
+            sig_best_periods = [
+                roi_data.get("best_period")
+                for roi_data in {k: v for k, v in roi_results.items()
+                                 if isinstance(k, int)}.values()
+                if roi_data.get("best_result", {}).get("significant")
+                and roi_data.get("best_period") is not None
+            ]
+            pop_result = results.get("population_result", {})
+            if sig_best_periods:
+                sp = _np.array(sig_best_periods, dtype=float)
+                pop_rows = [
+                    {"Metric": f"ROI_{roi_id} Best Period (h)",
+                     "Activity": roi_data.get("best_period"),
+                     "R²": roi_data.get("best_result", {}).get("r_squared"),
+                     "Amplitude": roi_data.get("best_result", {}).get("amplitude"),
+                     "MESOR": roi_data.get("best_result", {}).get("mesor")}
+                    for roi_id, roi_data in sorted(
+                        {k: v for k, v in roi_results.items() if isinstance(k, int)}.items())
+                    if roi_data.get("best_result", {}).get("significant")
+                    and roi_data.get("best_period") is not None
+                ]
+                pop_rows.append({"Metric": "— Population —"})
+                pop_rows.append({"Metric": "Median Period (h)",   "Activity": round(float(_np.median(sp)), 2)})
+                pop_rows.append({"Metric": "Mean Period (h)",     "Activity": round(float(_np.mean(sp)), 2)})
+                pop_rows.append({"Metric": "Std Period (h)",      "Activity": round(float(_np.std(sp, ddof=1)), 2) if len(sp) > 1 else 0})
+                pop_rows.append({"Metric": "Min Period (h)",      "Activity": round(float(_np.min(sp)), 2)})
+                pop_rows.append({"Metric": "Max Period (h)",      "Activity": round(float(_np.max(sp)), 2)})
+                pop_rows.append({"Metric": "Range (h)",           "Activity": round(float(_np.max(sp) - _np.min(sp)), 2)})
+                if "error" not in pop_result:
+                    pop_rows.append({"Metric": "— Population Cosinor Fit —"})
+                    pop_rows.append({"Metric": "Test Period (h)",      "Activity": round(pop_result.get("period", 0), 2)})
+                    pop_rows.append({"Metric": "Population MESOR",     "Activity": round(pop_result.get("population_mesor", 0), 4)})
+                    pop_rows.append({"Metric": "Population Amplitude", "Activity": round(pop_result.get("population_amplitude", 0), 4)})
+                    pop_rows.append({"Metric": "Population Peak Time (h)", "Activity": round(pop_result.get("population_peak_time", 0), 2)})
+                    pop_rows.append({"Metric": "F-statistic",          "Activity": pop_result.get("f_statistic")})
+                    pop_rows.append({"Metric": "P-value",              "Activity": pop_result.get("p_value")})
+                    pop_rows.append({"Metric": "Significant",          "Activity": pop_result.get("significant", False)})
+                    pop_rows.append({"Metric": "N ROIs",               "Activity": pop_result.get("n_individuals")})
+                pd.DataFrame(pop_rows).to_excel(writer, sheet_name="Population_Mean", index=False)
+
+            # Sheet 5: Parameters
             params_df = pd.DataFrame(
                 {
                     "Parameter": [
