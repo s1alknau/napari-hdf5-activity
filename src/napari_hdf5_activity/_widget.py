@@ -6178,8 +6178,15 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
                 ts_keys = r.keys("timeseries")
 
-                # Try to find white LED data (various possible names)
+                # ── Step 1: Try to find white LED data ────────────────────────────
+                # New format (v2.1.0+): separate white_led_power / ir_led_power keys.
+                # Old format (pre-v2.1.0): single led_power key shared between both
+                # LEDs; led_type_str ("white"/"ir") or phase_str ("light"/"dark")
+                # indicates which LED was active per frame.
                 white_led = None
+                ir_led = None
+
+                # New-format: explicit white LED key
                 white_led_names = [
                     "led_white_power_percent",
                     "white_led_power_percent",
@@ -6193,6 +6200,32 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                         self._log_message(f"Found white LED data: {name}")
                         break
 
+                # Old-format: single led_power + type discriminator
+                if white_led is None and "led_power" in ts_keys:
+                    led_power = r.read_all("timeseries/led_power").astype(float)
+                    self._log_message("Found legacy led_power key — reconstructing white/IR from type discriminator")
+
+                    if "led_type_str" in ts_keys:
+                        # led_type_str values: "white" → light phase, "ir" → dark phase
+                        led_type_raw = r.read_all("timeseries/led_type_str")
+                        led_type_str = np.array([s.decode() if isinstance(s, bytes) else str(s) for s in led_type_raw])
+                        white_mask = led_type_str == "white"
+                        white_led = np.where(white_mask, led_power, 0.0)
+                        ir_led = np.where(~white_mask, led_power, 0.0)
+                        self._log_message("Reconstructed white/IR LED from led_type_str")
+                    elif "phase_str" in ts_keys:
+                        # phase_str values: "light" → white LED on, "dark"/"continuous" → IR only
+                        phase_raw = r.read_all("timeseries/phase_str")
+                        phase_str = np.array([s.decode() if isinstance(s, bytes) else str(s) for s in phase_raw])
+                        light_mask = phase_str == "light"
+                        white_led = np.where(light_mask, led_power, 0.0)
+                        ir_led = np.where(~light_mask, led_power, 0.0)
+                        self._log_message("Reconstructed white/IR LED from phase_str")
+                    else:
+                        # No type info — treat led_power as white LED (best guess)
+                        white_led = led_power
+                        self._log_message("No LED type discriminator found — treating led_power as white LED")
+
                 # Special case: "led_power_percent" without specific white/IR separation
                 if white_led is None and "led_power_percent" in ts_keys:
                     self._log_message(
@@ -6203,30 +6236,41 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     )
                     return None
 
-                # Try to find IR LED data (various possible names)
-                ir_led = None
-                ir_led_names = [
-                    "led_ir_power_percent",
-                    "ir_led_power",
-                    "led_ir_power",
-                    "ir_led_power_percent",
-                ]
-                for name in ir_led_names:
-                    if name in ts_keys:
-                        ir_led = r.read_all(f"timeseries/{name}").astype(float)
-                        self._log_message(f"Found IR LED data: {name}")
-                        break
+                # Phase-string fallback: no LED power data at all, but phase_str exists
+                if white_led is None and "phase_str" in ts_keys:
+                    phase_raw = r.read_all("timeseries/phase_str")
+                    phase_str = np.array([s.decode() if isinstance(s, bytes) else str(s) for s in phase_raw])
+                    # Binary 1/0 is sufficient for extract_illumination_periods (checks > 0)
+                    white_led = (phase_str == "light").astype(float)
+                    self._log_message("No LED power data — using phase_str to derive light/dark phases")
 
                 if white_led is None:
                     self._log_message("No white LED data found in timeseries")
                     return None
 
-                # Get timestamps — check multiple possible names (HDF5 and Zarr variants)
+                # ── Step 2: IR LED (new format, if not already set above) ─────────
+                if ir_led is None:
+                    ir_led_names = [
+                        "led_ir_power_percent",
+                        "ir_led_power",
+                        "led_ir_power",
+                        "ir_led_power_percent",
+                    ]
+                    for name in ir_led_names:
+                        if name in ts_keys:
+                            ir_led = r.read_all(f"timeseries/{name}").astype(float)
+                            self._log_message(f"Found IR LED data: {name}")
+                            break
+
+                # ── Step 3: Timestamps ────────────────────────────────────────────
+                # Old format writes both absolute `timestamps` and `recording_elapsed_sec`.
+                # New format writes only `recording_elapsed_sec` (and optionally
+                # `capture_timestamps` in COMPREHENSIVE mode).
                 frame_interval = self.frame_interval.value()
-                if "capture_timestamps" in ts_keys:
-                    times = r.read_all("timeseries/capture_timestamps").astype(float)
-                elif "recording_elapsed_sec" in ts_keys:
+                if "recording_elapsed_sec" in ts_keys:
                     times = r.read_all("timeseries/recording_elapsed_sec").astype(float)
+                elif "capture_timestamps" in ts_keys:
+                    times = r.read_all("timeseries/capture_timestamps").astype(float)
                 elif "timestamps" in ts_keys:
                     ts_raw = r.read_all("timeseries/timestamps").astype(float)
                     times = ts_raw - ts_raw[0] if len(ts_raw) > 0 else ts_raw
