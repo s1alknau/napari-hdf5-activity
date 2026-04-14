@@ -15,6 +15,7 @@ import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer, Qt, QSettings
+from qtpy.QtGui import QColor, QBrush
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -118,6 +119,49 @@ class TelemetryMixin:
         "Recording": ["phase", "cycle", "transition", "frame_index"],
     }
 
+
+    # Recording format detection
+    # New format (v2.1.0+): separate white_led_power / ir_led_power keys
+    # Legacy format (pre-v2.1.0): single led_power + led_type_str / phase_str discriminator
+    _NEW_FORMAT_MARKER = "white_led_power"
+    _LEGACY_FORMAT_MARKER = "led_power"
+
+    @staticmethod
+    def _detect_recording_schema(ts_keys):
+        """Return (label, color_hex, tooltip) describing the recording schema version.
+
+        New format   → green  (separate per-LED channels)
+        Legacy format→ orange (single led_power + type discriminator)
+        Unknown      → grey
+        """
+        ts_set = set(ts_keys)
+        if "white_led_power" in ts_set or "ir_led_power" in ts_set:
+            return (
+                "Current (v2.1.0+)",
+                "#2e7d32",   # dark green
+                "Separate white_led_power and ir_led_power channels. "
+                "All plugin features fully supported.",
+            )
+        elif "led_power" in ts_set:
+            discriminator = ""
+            if "led_type_str" in ts_set:
+                discriminator = " — LED type from led_type_str"
+            elif "phase_str" in ts_set:
+                discriminator = " — LED type inferred from phase_str"
+            return (
+                f"Legacy (pre-v2.1.0){discriminator}",
+                "#e65100",   # deep orange
+                "Single led_power key shared between IR and white LED. "
+                "White/IR split is reconstructed from led_type_str or phase_str. "
+                "Adaptive baseline and light/dark overlay are still available.",
+            )
+        else:
+            return (
+                "Unknown — no LED power data",
+                "#757575",   # grey
+                "No LED power timeseries found. "
+                "Light/Dark overlay and adaptive baseline will not be available.",
+            )
 
     # --- paste methods here ---
 
@@ -290,6 +334,14 @@ class TelemetryMixin:
 
                     if "timeseries" in root_keys:
                         ts_keys = reader.keys("timeseries")
+
+                        # Recording schema version remark
+                        schema_label, schema_color, schema_tip = self._detect_recording_schema(ts_keys)
+                        schema_item = QTreeWidgetItem(file_item, ["Recording Schema", schema_label])
+                        schema_item.setForeground(1, QBrush(QColor(schema_color)))
+                        schema_item.setToolTip(1, schema_tip)
+                        schema_item.setToolTip(0, schema_tip)
+
                         ts_tree_item = QTreeWidgetItem(self.telemetry_tree, [
                             "Timeseries", f"({len(ts_keys)} datasets)"
                         ])
@@ -365,6 +417,15 @@ class TelemetryMixin:
 
                     if "timeseries" in f:
                         ts_group = f["timeseries"]
+                        ts_keys_h5 = list(ts_group.keys())
+
+                        # Recording schema version remark
+                        schema_label, schema_color, schema_tip = self._detect_recording_schema(ts_keys_h5)
+                        schema_item = QTreeWidgetItem(file_item, ["Recording Schema", schema_label])
+                        schema_item.setForeground(1, QBrush(QColor(schema_color)))
+                        schema_item.setToolTip(1, schema_tip)
+                        schema_item.setToolTip(0, schema_tip)
+
                         ts_tree_item = QTreeWidgetItem(self.telemetry_tree, [
                             "Timeseries", f"({len(ts_group)} datasets)"
                         ])
@@ -474,6 +535,10 @@ class TelemetryMixin:
             cat = self._get_category_for_dataset(ds_name)
             categorized.setdefault(cat, []).append(ds_name)
 
+        # Determine if this is a legacy file (for annotation in the list)
+        ts_set = set(self.telemetry_timeseries.keys())
+        is_legacy = "led_power" in ts_set and "white_led_power" not in ts_set
+
         # Add items in category order
         cat_order = list(self.TELEMETRY_CATEGORIES.keys()) + ["Other"]
         for cat_name in cat_order:
@@ -482,8 +547,20 @@ class TelemetryMixin:
             for ds_name in categorized[cat_name]:
                 unit = self.TIMESERIES_UNITS.get(ds_name, "")
                 unit_str = f" [{unit}]" if unit else ""
-                item = QListWidgetItem(f"[{cat_name}]  {ds_name}{unit_str}")
+
+                # Mark legacy LED key so users know it's reconstructed
+                legacy_note = ""
+                if is_legacy and ds_name == "led_power":
+                    legacy_note = "  ⚠ legacy"
+
+                item = QListWidgetItem(f"[{cat_name}]  {ds_name}{unit_str}{legacy_note}")
                 item.setData(Qt.UserRole, ds_name)  # store raw name for lookup
+                if legacy_note:
+                    item.setForeground(QBrush(QColor("#e65100")))  # orange for legacy
+                    item.setToolTip(
+                        "Legacy key: single led_power shared by IR and white LED.\n"
+                        "The plugin reconstructs white/IR split from led_type_str or phase_str."
+                    )
                 item.setSelected(True)
                 self.telemetry_list.addItem(item)
 
