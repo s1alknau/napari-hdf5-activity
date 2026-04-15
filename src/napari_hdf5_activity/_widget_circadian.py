@@ -5428,67 +5428,6 @@ class CircadianMixin:
 
             self._autofit_excel(writer)
 
-    def _export_phase_clustering_to_excel(self, file_path: str, phase_results: Dict):
-        """Export Phase Clustering results to Excel format."""
-        import pandas as pd
-
-        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-            # Sheet 1: Phase Clusters
-            clusters = phase_results.get("clusters", {})
-            cluster_data = []
-
-            for cluster_name, cluster_info in clusters.items():
-                roi_list = cluster_info.get("rois", [])
-                for roi in roi_list:
-                    cluster_data.append(
-                        {
-                            "Cluster": cluster_name,
-                            "ROI": roi,
-                            "Cluster_Size": len(roi_list),
-                        }
-                    )
-
-            cluster_df = pd.DataFrame(cluster_data)
-            cluster_df = cluster_df.sort_values(["Cluster", "ROI"])
-            cluster_df.to_excel(writer, sheet_name="Phase_Clusters", index=False)
-
-            # Sheet 2: Individual ROI Phases
-            roi_phases = phase_results.get("roi_phases", {})
-            phase_data = []
-
-            for roi_id, phase_info in sorted(roi_phases.items()):
-                phase_data.append(
-                    {
-                        "ROI": roi_id,
-                        "Peak_Time_Hours": phase_info.get("peak_time_hours", 0),
-                        "Phase_Radians": phase_info.get("phase_radians", 0),
-                        "Amplitude": phase_info.get("amplitude", 0),
-                        "Mean_Activity": phase_info.get("mean_activity", 0),
-                    }
-                )
-
-            phase_df = pd.DataFrame(phase_data)
-            phase_df.to_excel(writer, sheet_name="ROI_Phases", index=False)
-
-            # Sheet 3: Parameters
-            params_df = pd.DataFrame(
-                {
-                    "Parameter": [
-                        "Dominant Period",
-                        "Total ROIs",
-                        "Number of Clusters",
-                    ],
-                    "Value": [
-                        f"{phase_results.get('dominant_period_hours', 0):.1f} hours",
-                        str(phase_results.get("n_rois", 0)),
-                        str(len(clusters)),
-                    ],
-                }
-            )
-            params_df.to_excel(writer, sheet_name="Parameters", index=False)
-
-            self._autofit_excel(writer)
-
     def _create_fisher_plot(self, fisher_results: Dict[int, Dict]):
         """Create and display periodogram plot for Fisher analysis results."""
         try:
