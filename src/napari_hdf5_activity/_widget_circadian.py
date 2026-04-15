@@ -3971,6 +3971,7 @@ class CircadianMixin:
             final_wb.remove(final_wb.active)  # remove default empty sheet
             used_sheet_names = set()
 
+            from copy import copy as _copy
             for tmp_path, prefix, label in temp_files:
                 try:
                     src_wb = openpyxl.load_workbook(tmp_path)
@@ -3981,9 +3982,18 @@ class CircadianMixin:
                         dst_ws = final_wb.create_sheet(title=new_name)
                         for row in src_ws.iter_rows():
                             for cell in row:
-                                dst_ws[cell.coordinate].value = cell.value
+                                dst_cell = dst_ws[cell.coordinate]
+                                dst_cell.value = cell.value
+                                # Copy style properties by value — copying _style directly
+                                # carries raw index numbers that are invalid in a different
+                                # workbook's style table (causes IndexError on save).
                                 if cell.has_style:
-                                    dst_ws[cell.coordinate]._style = cell._style
+                                    dst_cell.font = _copy(cell.font)
+                                    dst_cell.fill = _copy(cell.fill)
+                                    dst_cell.border = _copy(cell.border)
+                                    dst_cell.alignment = _copy(cell.alignment)
+                                    dst_cell.number_format = cell.number_format
+                                    dst_cell.protection = _copy(cell.protection)
                         # Copy column widths
                         for col_letter, cd in src_ws.column_dimensions.items():
                             dst_ws.column_dimensions[col_letter].width = cd.width
