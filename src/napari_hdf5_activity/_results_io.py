@@ -391,6 +391,16 @@ def save_comprehensive_results(
                         "method_name"
                     ]
 
+                # Save full results as JSON blob for lossless round-trip
+                if "full_results_json" in extended_results:
+                    json_bytes = np.frombuffer(
+                        extended_results["full_results_json"].encode("utf-8"),
+                        dtype=np.uint8,
+                    )
+                    extended_group.create_dataset(
+                        "full_results_json", data=json_bytes, compression="gzip"
+                    )
+
             # ================================================================
             # 3. ANALYSIS PARAMETERS
             # ================================================================
@@ -805,6 +815,40 @@ def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
                         phase_data[roi_id] = dict(roi_group.attrs)
 
                     results["extended_analysis"]["phase"] = phase_data
+
+                # Load method index/name from group attributes
+                results["extended_analysis"]["method_index"] = int(
+                    extended_group.attrs.get("method_index", 0)
+                )
+                results["extended_analysis"]["method_name"] = str(
+                    extended_group.attrs.get("method_name", "Unknown")
+                )
+
+                # Load full results JSON blob (lossless round-trip, new saves only)
+                if "full_results_json" in extended_group:
+                    try:
+                        import json as _json
+
+                        json_bytes = extended_group["full_results_json"][:]
+                        json_str = bytes(json_bytes.tolist()).decode("utf-8")
+                        raw = _json.loads(json_str)
+
+                        # JSON converts integer dict keys to strings — restore them
+                        def _restore_int_keys(obj):
+                            if not isinstance(obj, dict):
+                                return obj
+                            out = {}
+                            for k, v in obj.items():
+                                try:
+                                    k = int(k)
+                                except (ValueError, TypeError):
+                                    pass
+                                out[k] = _restore_int_keys(v)
+                            return out
+
+                        results["extended_analysis"]["results"] = _restore_int_keys(raw)
+                    except Exception as _e:
+                        print(f"Could not load full_results_json: {_e}")
 
             # ================================================================
             # 3. LOAD ANALYSIS PARAMETERS

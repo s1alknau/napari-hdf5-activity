@@ -645,10 +645,10 @@ class CircadianMixin:
             if "extended_analysis" in loaded_data and loaded_data["extended_analysis"]:
                 extended = loaded_data["extended_analysis"]
 
-                # Restore fisher analysis results
-                if "results" in extended:
+                # Restore fisher analysis results (full JSON blob, new saves)
+                if "results" in extended and extended["results"]:
                     self.fisher_analysis_results = extended["results"]
-                    self._log_message("  ✓ Loaded extended analysis results")
+                    self._log_message("  ✓ Loaded extended analysis results (full)")
 
                 # Restore method selection
                 if "method_index" in extended:
@@ -659,6 +659,15 @@ class CircadianMixin:
                     self._log_message(
                         f"  ✓ Restored analysis method: {extended.get('method_name', 'Unknown')}"
                     )
+
+                    # Register in _all_method_results so Export All works
+                    if hasattr(self, "fisher_analysis_results") and self.fisher_analysis_results:
+                        if not hasattr(self, "_all_method_results"):
+                            self._all_method_results = {}
+                        self._all_method_results[method_idx] = self.fisher_analysis_results
+                        self._log_message(
+                            f"  ✓ Registered method {method_idx} in Export All cache"
+                        )
 
                     # Re-create plot for extended analysis
                     if hasattr(self, "fisher_analysis_results"):
@@ -939,6 +948,29 @@ class CircadianMixin:
                     "method_index": method_index,
                     "method_name": method_name,
                 }
+
+                # Also save the full fisher_analysis_results as a JSON blob so that
+                # on reload the export functions get the complete data structure.
+                try:
+                    import json as _json
+                    import numpy as _np
+
+                    def _json_safe(obj):
+                        if isinstance(obj, _np.integer):
+                            return int(obj)
+                        if isinstance(obj, _np.floating):
+                            return float(obj)
+                        if isinstance(obj, _np.bool_):
+                            return bool(obj)
+                        if isinstance(obj, _np.ndarray):
+                            return obj.tolist()
+                        return str(obj)
+
+                    extended_results["full_results_json"] = _json.dumps(
+                        self.fisher_analysis_results, default=_json_safe
+                    )
+                except Exception:
+                    pass  # best-effort; old partial save still written below
 
                 # Map method index to expected key names
                 results_data = self.fisher_analysis_results
