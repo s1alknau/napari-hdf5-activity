@@ -2476,7 +2476,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self,
             "Select File(s)",
             "",
-            "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*)",
+            "Video Files (*.h5 *.hdf5 *.avi *.mp4);;HDF5 Files (*.h5 *.hdf5);;Video Files (*.avi *.mp4);;All Files (*)",
         )
         if not file_paths:
             return
@@ -2485,13 +2485,13 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         if len(file_paths) == 1:
             file_path = file_paths[0]
 
-            # Check if single AVI file - load as single video (not batch)
-            if file_path.lower().endswith(".avi"):
+            # Check if single video file - load as single video (not batch)
+            if file_path.lower().endswith((".avi", ".mp4")):
                 self._load_single_avi(file_path)
                 return
         else:
-            # Multiple files - check if they are AVIs for batch processing
-            if all(f.lower().endswith(".avi") for f in file_paths):
+            # Multiple files - check if they are videos for batch processing
+            if all(f.lower().endswith((".avi", ".mp4")) for f in file_paths):
                 self._load_avi_batch(file_paths)
                 return
             else:
@@ -2846,7 +2846,22 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             # Mark batch as loaded so downstream code picks the right source
             self.avi_batch_loaded = True
 
-            # Update end time for analysis
+            # Estimate total duration by scanning all video files (reads only
+            # fps + frame_count via cv2 properties — no frame decoding, very fast).
+            try:
+                estimated_total_seconds = 0.0
+                for vp in file_paths:
+                    with AVIVideoReader(vp) as _r:
+                        estimated_total_seconds += _r.duration
+                batch_metadata["total_duration"] = estimated_total_seconds
+                layer.metadata["total_duration"] = estimated_total_seconds
+                self._log_message(
+                    f"Estimated total duration: {estimated_total_seconds / 60:.1f} min"
+                )
+            except Exception as _e:
+                self._log_message(f"Duration estimation failed: {_e}")
+
+            # Update end time / baseline spinbox now that we have the duration
             self.update_end_time()
 
         except ImportError:
@@ -2899,7 +2914,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             h5_files = [
                 f for f in os.listdir(directory) if f.lower().endswith((".h5", ".hdf5"))
             ]
-            avi_files = [f for f in os.listdir(directory) if f.lower().endswith(".avi")]
+            avi_files = [f for f in os.listdir(directory) if f.lower().endswith((".avi", ".mp4"))]
 
             total_files = len(h5_files) + len(avi_files)
 
@@ -3095,8 +3110,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     else:
                         self._log_message("No layers found")
                         return
-                elif self.file_path.lower().endswith(".avi"):
-                    # Single AVI file
+                elif self.file_path.lower().endswith((".avi", ".mp4")):
+                    # Single video file
                     from ._avi_reader import AVIVideoReader
 
                     with AVIVideoReader(self.file_path) as reader:
@@ -3212,7 +3227,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             first_frame = None
 
             # Check if current file is HDF5/Zarr or AVI to decide source
-            is_avi = current_file.lower().endswith(".avi")
+            is_avi = current_file.lower().endswith((".avi", ".mp4"))
             is_file_based = not is_avi and not (
                 hasattr(self, "avi_batch_loaded") and self.avi_batch_loaded
             )
@@ -4626,7 +4641,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self,
             "Select Calibration File",
             "",
-            "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*.*)",
+            "Video Files (*.h5 *.hdf5 *.avi *.mp4);;HDF5 Files (*.h5 *.hdf5);;Video Files (*.avi *.mp4);;All Files (*.*)",
         )
         if file_path:
             self.calibration_file_path.setText(os.path.basename(file_path))
@@ -6167,7 +6182,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 return None
 
             # Check if this is an AVI file
-            if self.file_path.lower().endswith(".avi"):
+            if self.file_path.lower().endswith((".avi", ".mp4")):
                 return self._extract_led_data_from_avi()
 
             # HDF5 or Zarr file processing via format-agnostic reader
@@ -6310,7 +6325,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         try:
             if not hasattr(self, "file_path") or not self.file_path:
                 return None
-            if self.file_path.lower().endswith(".avi"):
+            if self.file_path.lower().endswith((".avi", ".mp4")):
                 return None
 
             with open_file_reader(self.file_path) as r:
@@ -6538,10 +6553,10 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             return
 
         # Skip structure check for AVI files
-        if self.file_path.lower().endswith(".avi") or (
+        if self.file_path.lower().endswith((".avi", ".mp4")) or (
             hasattr(self, "avi_batch_paths") and self.avi_batch_paths
         ):
-            self._log_message("AVI file(s) loaded - skipping HDF5 structure check")
+            self._log_message("Video file(s) loaded - skipping HDF5 structure check")
             return
 
         import h5py
@@ -6770,7 +6785,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self,
                 "Select Calibration File",
                 "",
-                "Video Files (*.h5 *.hdf5 *.avi);;HDF5 Files (*.h5 *.hdf5);;AVI Files (*.avi);;All Files (*.*)",
+                "Video Files (*.h5 *.hdf5 *.avi *.mp4);;HDF5 Files (*.h5 *.hdf5);;Video Files (*.avi *.mp4);;All Files (*.*)",
             )
 
             self._log_message(f"File dialog returned: '{file_path}'")

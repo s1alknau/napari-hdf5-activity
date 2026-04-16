@@ -259,7 +259,50 @@ def detect_hdf5_structure_type(file_path: str) -> str:
 
 #     return metadata
 def extract_hdf5_metadata_timeseries(file_path: str) -> Dict[str, Any]:
-    """Extract time-series data with automatic legacy enhancement."""
+    """Extract time-series data with automatic legacy enhancement.
+
+    Supports both HDF5 files and Zarr stores via the IO abstraction layer.
+    """
+    # --- Zarr path: use format-agnostic reader ---
+    try:
+        from ._io_abstraction import detect_format, open_file_reader
+        _fmt = detect_format(file_path)
+    except Exception:
+        _fmt = "hdf5"
+
+    if _fmt == "zarr":
+        metadata: Dict[str, Any] = {
+            "file_path": file_path,
+            "file_format": "zarr",
+            "timeseries_data": {},
+            "extraction_info": {},
+        }
+        try:
+            with open_file_reader(file_path) as r:
+                timeseries_metadata: Dict[str, Any] = {}
+                root_keys = r.keys("/")
+
+                if "timeseries" in root_keys:
+                    ts_keys = r.keys("timeseries")
+                    for key in ts_keys:
+                        try:
+                            data = r.read_all(f"timeseries/{key}")
+                            if data is not None and data.size > 0:
+                                timeseries_metadata[key] = data.tolist()
+                        except Exception as e:
+                            metadata["extraction_info"][f"zarr_ts_error_{key}"] = str(e)
+
+                metadata["timeseries_data"] = timeseries_metadata
+                metadata["timeseries_summary"] = {
+                    "total_parameters": len(timeseries_metadata),
+                    "parameters": list(timeseries_metadata.keys()),
+                }
+                metadata["modern_file"] = True
+        except Exception as e:
+            metadata["extraction_info"]["zarr_read_error"] = str(e)
+        return metadata
+
+    # --- HDF5 path: original implementation ---
     metadata = extract_hdf5_metadata(file_path)
 
     if not os.path.exists(file_path):

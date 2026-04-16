@@ -1324,6 +1324,21 @@ class ExportMixin:
             self._log_message("Save failed: No HDF5 file loaded")
             return
 
+        # AVI/MP4 sources have no telemetry metadata — redirect to analysis-only save.
+        # HDF5 and Zarr both have telemetry and are handled below.
+        _fp_lower = self.file_path.lower()
+        is_video_source = (
+            _fp_lower.endswith((".avi", ".mp4"))
+            or (hasattr(self, "avi_batch_paths") and self.avi_batch_paths)
+        )
+        if is_video_source:
+            self._log_message(
+                "Video source detected — no telemetry metadata available. "
+                "Saving analysis results only."
+            )
+            self.save_results_consolidated_complete()
+            return
+
         # Analysis results are optional for metadata extraction
         has_analysis_results = hasattr(self, "merged_results") and self.merged_results
 
@@ -1349,9 +1364,12 @@ class ExportMixin:
                 self._log_message("Checking for Nematostella timeseries data...")
 
                 # Quick check if this is a Nematostella experiment
-                with h5py.File(self.file_path, "r") as h5_file:
-                    if "timeseries" in h5_file:
-                        ts_group = h5_file["timeseries"]
+                # Use format-agnostic reader so Zarr stores work too
+                from ._io_abstraction import open_file_reader
+                with open_file_reader(self.file_path) as _r:
+                    root_keys = _r.keys("/")
+                    if "timeseries" in root_keys:
+                        ts_keys = _r.keys("timeseries")
                         # Check for typical Nematostella parameters
                         nematostella_indicators = [
                             "actual_intervals",
@@ -1363,8 +1381,7 @@ class ExportMixin:
                         ]
 
                         found_indicators = [
-                            key
-                            for key in ts_group.keys()
+                            key for key in ts_keys
                             if key in nematostella_indicators
                         ]
 

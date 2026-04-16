@@ -438,7 +438,7 @@ class FrameViewerMixin:
             self.file_path = selected_path
 
             path_lower = selected_path.lower()
-            is_avi = path_lower.endswith(".avi")
+            is_avi = path_lower.endswith((".avi", ".mp4"))
             # Any directory is treated as a Zarr store (HDF5/AVI are never directories)
             is_directory = os.path.isdir(selected_path)
             is_zarr = path_lower.endswith(".zarr") or is_directory
