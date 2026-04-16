@@ -960,8 +960,13 @@ class FrameViewerMixin:
 
             traceback.print_exc()
 
+    # Maximum dimension (width or height) for display. Larger frames are
+    # downsampled proportionally before uploading to the GPU as a texture.
+    # Prevents GL_OUT_OF_MEMORY on high-resolution cameras (HIK 4K+).
+    VIEWER_MAX_DISPLAY_DIM = 1920
+
     def _prepare_frame_for_display(self, frame_data):
-        """Pre-process a frame to display format (BGR uint8)."""
+        """Pre-process a frame to display format (BGR uint8, max 1920px)."""
         import numpy as np
         import cv2
 
@@ -987,6 +992,16 @@ class FrameViewerMixin:
         # Convert to 3-channel BGR for colored text overlay
         if len(frame.shape) == 2:
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+        # Downsample if too large for GPU texture (prevents GL_OUT_OF_MEMORY).
+        # Only affects display — analysis uses the full-resolution data.
+        h, w = frame.shape[:2]
+        max_dim = self.VIEWER_MAX_DISPLAY_DIM
+        if h > max_dim or w > max_dim:
+            scale = max_dim / max(h, w)
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         return frame
 
