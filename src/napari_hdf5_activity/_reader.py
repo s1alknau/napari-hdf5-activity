@@ -1876,21 +1876,39 @@ def convert_to_grayscale(image: np.ndarray) -> np.ndarray:
 
 def convert_to_rgb_for_display(image: np.ndarray) -> np.ndarray:
     """
-    Convert grayscale image to RGB for napari display.
+    Convert grayscale image to uint8 RGB.
+
+    Used only for annotated visualisation frames (e.g. circle-detection
+    overlay) that need colour drawing (cv2.circle with colour tuples).
+    General napari display uses preprocess_image_for_processing which returns
+    a uint8 2D grayscale array instead, reducing VRAM to 1/6th of uint16 RGB.
+
+    Always outputs uint8 regardless of input dtype (uint8 or uint16).
+    Non-uint8 inputs are range-normalised to 0-255 before stacking.
 
     Args:
-        image: Input image array (grayscale)
+        image: Input image array (grayscale, any dtype)
 
     Returns:
-        RGB image array for display
+        uint8 RGB (H×W×3) image array
     """
+    # Normalise to uint8 first so napari uploads an 8-bit texture (not 16-bit)
+    if image.dtype != np.uint8:
+        img_min = image.min()
+        img_max = image.max()
+        if img_max > img_min:
+            image = ((image.astype(np.float32) - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+        else:
+            image = np.zeros_like(image, dtype=np.uint8)
+
     if len(image.shape) == 2:
         # Grayscale to RGB - stack 3 times
         return np.stack([image, image, image], axis=-1)
     elif len(image.shape) == 3:
         if image.shape[-1] == 1:
             # Single channel to RGB
-            return np.concatenate([image, image, image], axis=-1)
+            ch = image[:, :, 0]
+            return np.stack([ch, ch, ch], axis=-1)
         elif image.shape[-1] == 3:
             # Already RGB
             return image.copy()
@@ -1899,41 +1917,58 @@ def convert_to_rgb_for_display(image: np.ndarray) -> np.ndarray:
             return image[:, :, :3].copy()
         else:
             logger.warning(f"Unexpected number of channels: {image.shape[-1]}")
-            return np.stack([image[:, :, 0], image[:, :, 0], image[:, :, 0]], axis=-1)
+            ch = image[:, :, 0]
+            return np.stack([ch, ch, ch], axis=-1)
     else:
         logger.error(f"Unexpected image shape: {image.shape}")
-        # Fallback - create a basic RGB image
         if image.size > 0:
             flat_image = image.flatten()[: image.shape[0] * image.shape[1]].reshape(
                 image.shape[:2]
             )
             return np.stack([flat_image, flat_image, flat_image], axis=-1)
         else:
-            return np.zeros((100, 100, 3), dtype=image.dtype)
+            return np.zeros((100, 100, 3), dtype=np.uint8)
 
 
 def preprocess_image_for_processing(image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     Preprocess image for both display and processing.
 
+    Returns a uint8 grayscale (2D) display frame and an original-dtype grayscale
+    processing frame.  Using monochrome uint8 for display reduces GPU VRAM to
+    1/6th of uint16 RGB, preventing GL_OUT_OF_MEMORY with multiple napari layers.
+    Handles both uint8 and uint16 input.
+
     Args:
-        image: Raw image from HDF5 file
+        image: Raw image from HDF5 file (any dtype, any channel count)
 
     Returns:
-        Tuple of (display_image_rgb, processing_image_grayscale)
+        Tuple of (display_image_uint8_gray, processing_image_grayscale)
     """
-    # Always convert to grayscale for processing
+    # Convert to grayscale for processing (preserves original dtype)
     grayscale_image = convert_to_grayscale(image)
 
-    # Always convert to RGB for display
-    rgb_image = convert_to_rgb_for_display(grayscale_image)
+    # Normalise to uint8 for display — works for both uint8 and uint16 input
+    if grayscale_image.dtype == np.uint8:
+        display_image = grayscale_image.copy()
+    else:
+        img_min = grayscale_image.min()
+        img_max = grayscale_image.max()
+        if img_max > img_min:
+            display_image = (
+                (grayscale_image.astype(np.float32) - img_min)
+                / (img_max - img_min)
+                * 255
+            ).astype(np.uint8)
+        else:
+            display_image = np.zeros_like(grayscale_image, dtype=np.uint8)
 
     logger.debug(
-        f"Image preprocessing: input shape {image.shape} -> "
-        f"display RGB {rgb_image.shape}, processing grayscale {grayscale_image.shape}"
+        f"Image preprocessing: input shape {image.shape} dtype={image.dtype} -> "
+        f"display gray {display_image.shape} uint8, processing grayscale {grayscale_image.shape} {grayscale_image.dtype}"
     )
 
-    return rgb_image, grayscale_image
+    return display_image, grayscale_image
 
 
 def preprocess_image_stack_for_processing(image_stack: np.ndarray) -> np.ndarray:
@@ -2831,7 +2866,7 @@ def reader_function_dual_structure(
 
     layers: List[Tuple] = []
 
-    # Add the display frame (RGB) for visualization
+    # Add the display frame (uint8 grayscale) for visualization
     layers.append(
         (
             display_frame,
@@ -2851,7 +2886,7 @@ def reader_function_dual_structure(
                         structure_info["frame_shape"], structure_info["dtype_size"]
                     ),
                     "processing_style": "python_native",
-                    "display_format": "rgb",
+                    "display_format": "grayscale",
                     "processing_format": "grayscale",
                 },
             },
@@ -2970,7 +3005,7 @@ def reader_directory_function(
                         frame_shape, dtype_size
                     ),
                     "processing_style": "python_native",
-                    "display_format": "rgb",
+                    "display_format": "grayscale",
                     "processing_format": "grayscale",
                 },
             },
