@@ -69,7 +69,7 @@ class FrameViewerMixin:
             QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QSlider, QPushButton,
             QSpinBox, QComboBox, QSizePolicy, QCheckBox, QTextEdit,
         )
-        from qtpy.QtCore import Qt
+        from qtpy.QtCore import Qt, QTimer
 
         layout = QVBoxLayout()
         self.tab_viewer.setLayout(layout)
@@ -106,6 +106,17 @@ class FrameViewerMixin:
         self.viewer_frame_slider.setMaximum(0)
         self.viewer_frame_slider.setValue(0)
         self.viewer_frame_slider.setEnabled(False)
+
+        # Debounce timer: load frame 60 ms after the last keyboard/programmatic change.
+        # During mouse drag the timer is suppressed — the frame loads on sliderReleased.
+        self._viewer_slider_debounce = QTimer()
+        self._viewer_slider_debounce.setSingleShot(True)
+        self._viewer_slider_debounce.setInterval(60)
+        self._viewer_slider_debounce.timeout.connect(self._on_viewer_frame_debounced)
+        self._viewer_slider_dragging = False
+
+        self.viewer_frame_slider.sliderPressed.connect(self._on_viewer_slider_pressed)
+        self.viewer_frame_slider.sliderReleased.connect(self._on_viewer_slider_released)
         self.viewer_frame_slider.valueChanged.connect(self._on_viewer_frame_changed)
 
         self.viewer_frame_label = QLabel("Frame: 0 / 0")
@@ -834,6 +845,29 @@ class FrameViewerMixin:
         # Display first frame
         self._viewer_show_frame(0)
 
+    def _viewer_read_raw_frame(self, frame_idx: int) -> "np.ndarray":
+        """Read one raw frame from whatever source is currently active.
+
+        Handles all four combinations of (HDF5 / Zarr) × (stacked / individual).
+        ZarrFileReader has no __getitem__, so it must go through read_frame /
+        read_all instead of the h5py-style dict access.
+        """
+        if hasattr(self, "viewer_frame_names"):
+            # Individual-frame layout: each frame is its own dataset
+            frame_name = self.viewer_frame_names[frame_idx]
+            path = f"{self.viewer_dataset_name}/{frame_name}"
+            if getattr(self, "_viewer_handle_is_h5py", True):
+                return self.viewer_file_handle[path][()]
+            else:
+                # ZarrFileReader: read_all returns the full 2-D array
+                return self.viewer_file_handle.read_all(path)
+        else:
+            # Stacked dataset: shape = (N, H, W[, C])
+            if getattr(self, "_viewer_handle_is_h5py", True):
+                return np.array(self.viewer_file_handle[self.viewer_dataset_name][frame_idx])
+            else:
+                return self.viewer_file_handle.read_frame(self.viewer_dataset_name, frame_idx)
+
     def _viewer_preload_frames(self):
         """Pre-load all frames into memory cache for smooth playback."""
         from qtpy.QtWidgets import QProgressDialog
@@ -843,21 +877,9 @@ class FrameViewerMixin:
         # Get available system memory
         available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
 
-        # Estimate memory usage
-        # Get first frame to check size
+        # Estimate memory usage from the first frame
         if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-            if hasattr(self, "viewer_frame_names"):
-                frame_name = self.viewer_frame_names[0]
-                sample_frame = self.viewer_file_handle[
-                    f"{self.viewer_dataset_name}/{frame_name}"
-                ][()]
-            else:
-                if getattr(self, "_viewer_handle_is_h5py", True):
-                    sample_frame = self.viewer_file_handle[self.viewer_dataset_name][0]
-                else:
-                    sample_frame = self.viewer_file_handle.read_frame(
-                        self.viewer_dataset_name, 0
-                    )
+            sample_frame = self._viewer_read_raw_frame(0)
         else:
             sample_frame = self.viewer_frames[0]
 
@@ -926,20 +948,9 @@ class FrameViewerMixin:
                         self.viewer_frame_cache = None
                         return
 
-                # Load frame
+                # Load frame via unified helper (handles HDF5 / Zarr / stacked / individual)
                 if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                    if hasattr(self, "viewer_frame_names"):
-                        frame_name = self.viewer_frame_names[i]
-                        frame_data = self.viewer_file_handle[
-                            f"{self.viewer_dataset_name}/{frame_name}"
-                        ][()]
-                    else:
-                        if getattr(self, "_viewer_handle_is_h5py", True):
-                            frame_data = self.viewer_file_handle[self.viewer_dataset_name][i]
-                        else:
-                            frame_data = self.viewer_file_handle.read_frame(
-                                self.viewer_dataset_name, i
-                            )
+                    frame_data = self._viewer_read_raw_frame(i)
                 else:
                     frame_data = self.viewer_frames[i]
 
@@ -1010,9 +1021,15 @@ class FrameViewerMixin:
 
         Uses the stored circle positions from ROI detection. Falls back to
         computing circle approximations from masks if circles aren't available.
+
+        Circle coordinates are in the detection frame's coordinate space
+        (_original_frame_shape).  The display frame may have been downsampled
+        by _prepare_frame_for_display, so we scale all coordinates to match.
         """
         import cv2
         import numpy as np
+
+        disp_h, disp_w = frame.shape[:2]
 
         # Get ROI exclusion info
         excluded = set()
@@ -1023,28 +1040,35 @@ class FrameViewerMixin:
 
         # Try to use stored circle positions (most accurate)
         circles = getattr(self, "_original_circles", None)
-        scale = getattr(self, "roi_scale", None)
-        scale_val = scale.value() if scale is not None else 1.0
+        radius_scale = getattr(self, "roi_scale", None)
+        radius_scale_val = radius_scale.value() if radius_scale is not None else 1.0
 
         if circles is not None:
+            # Scale from detection-frame space to display-frame space
+            orig_shape = getattr(self, "_original_frame_shape", None)
+            if orig_shape is not None and (orig_shape[0] != disp_h or orig_shape[1] != disp_w):
+                sx = disp_w / orig_shape[1]
+                sy = disp_h / orig_shape[0]
+            else:
+                sx = sy = 1.0
+
             for idx, circle in enumerate(circles):
-                cx, cy, r = int(circle[0]), int(circle[1]), int(circle[2] * scale_val)
+                cx = int(circle[0] * sx)
+                cy = int(circle[1] * sy)
+                r  = max(1, int(circle[2] * ((sx + sy) / 2) * radius_scale_val))
                 is_excluded = idx in excluded
 
-                # Green for active, red for excluded
                 color = (0, 0, 255) if is_excluded else (0, 255, 0)
                 cv2.circle(frame, (cx, cy), r, color, 2)
 
-                # ROI number label — placed outside the circle (top-right edge)
                 label = f"{idx + 1}"
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 1.8
                 thickness = 3
                 (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-                offset = int(r / 1.414) + 4  # diagonal offset to circle edge
-                text_x = cx + offset
-                text_y = cy - offset
-                # Dark background for readability
+                offset = int(r / 1.414) + 4
+                text_x = min(cx + offset, disp_w - tw - 8)
+                text_y = max(cy - offset, th + 8)
                 cv2.rectangle(
                     frame,
                     (text_x - 4, text_y - th - 4),
@@ -1059,10 +1083,17 @@ class FrameViewerMixin:
                 )
             return
 
-        # Fallback: derive circles from masks
+        # Fallback: derive circles from masks (masks are in detection space too)
         masks = getattr(self, "masks", [])
         if not masks:
             return
+
+        orig_shape = getattr(self, "_original_frame_shape", None)
+        if orig_shape is not None and (orig_shape[0] != disp_h or orig_shape[1] != disp_w):
+            sx = disp_w / orig_shape[1]
+            sy = disp_h / orig_shape[0]
+        else:
+            sx = sy = 1.0
 
         for idx, mask in enumerate(masks):
             if mask is None or mask.size == 0:
@@ -1071,9 +1102,9 @@ class FrameViewerMixin:
             ys, xs = np.where(mask > 0)
             if len(xs) == 0:
                 continue
-            cx = int(np.mean(xs))
-            cy = int(np.mean(ys))
-            r = int(np.sqrt(len(xs) / np.pi))
+            cx = int(np.mean(xs) * sx)
+            cy = int(np.mean(ys) * sy)
+            r  = max(1, int(np.sqrt(len(xs) / np.pi) * ((sx + sy) / 2)))
 
             color = (0, 0, 255) if is_excluded else (0, 255, 0)
             cv2.circle(frame, (cx, cy), r, color, 2)
@@ -1083,9 +1114,9 @@ class FrameViewerMixin:
             font_scale = 1.8
             thickness = 3
             (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            offset = int(r / 1.414) + 4  # diagonal offset to circle edge
-            text_x = cx + offset
-            text_y = cy - offset
+            offset = int(r / 1.414) + 4
+            text_x = min(cx + offset, disp_w - tw - 8)
+            text_y = max(cy - offset, th + 8)
             cv2.rectangle(
                 frame,
                 (text_x - 4, text_y - th - 4),
@@ -1124,31 +1155,12 @@ class FrameViewerMixin:
                 frame_with_text = self.viewer_frame_cache[frame_idx].copy()
                 frame_data = frame_with_text  # For info display
             else:
-                # Fallback: Load and process frame on-the-fly (SLOWER)
-                # Get frame data
+                # Fallback: load and process on-the-fly (no cache or cache miss)
                 if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                    # HDF5 file
-                    if hasattr(self, "viewer_frame_names"):
-                        # Individual frame datasets
-                        frame_name = self.viewer_frame_names[frame_idx]
-                        frame_data = self.viewer_file_handle[
-                            f"{self.viewer_dataset_name}/{frame_name}"
-                        ][()]
-                    else:
-                        # Single dataset
-                        if getattr(self, "_viewer_handle_is_h5py", True):
-                            frame_data = self.viewer_file_handle[self.viewer_dataset_name][
-                                frame_idx
-                            ]
-                        else:
-                            frame_data = self.viewer_file_handle.read_frame(
-                                self.viewer_dataset_name, frame_idx
-                            )
+                    frame_data = self._viewer_read_raw_frame(frame_idx)
                 else:
-                    # From napari layer (AVI or pre-loaded)
                     frame_data = self.viewer_frames[frame_idx]
 
-                # Process frame
                 frame_with_text = self._prepare_frame_for_display(frame_data)
 
             # Prepare time text
@@ -1219,10 +1231,40 @@ class FrameViewerMixin:
         except Exception as e:
             self._log_message(f"❌ Error showing frame {frame_idx}: {e}")
 
-    def _on_viewer_frame_changed(self, value):
-        """Handle slider value change."""
+    def _on_viewer_slider_pressed(self):
+        """Mouse button down on slider — suppress frame loads until release."""
+        self._viewer_slider_dragging = True
+        self._viewer_slider_debounce.stop()
+
+    def _on_viewer_slider_released(self):
+        """Mouse button released — load the frame at the final drag position."""
+        self._viewer_slider_dragging = False
+        value = self.viewer_frame_slider.value()
+        self._viewer_debounced_frame_idx = value
         self._viewer_show_frame(value)
-        # Update synchronized plot time marker
+        if hasattr(self, "sync_plots_enabled") and self.sync_plots_enabled.isChecked():
+            self._update_sync_time_marker(value)
+
+    def _on_viewer_frame_changed(self, value):
+        """Handle slider value change — update label instantly.
+
+        While dragging: only the label is refreshed (no frame load, no debounce).
+        For keyboard / programmatic changes: start the debounce timer.
+        """
+        self._viewer_debounced_frame_idx = value
+        n = getattr(self, "viewer_n_frames", 1)
+        interval = getattr(self, "viewer_frame_interval", 5.0)
+        t_sec = value * interval
+        self.viewer_frame_label.setText(
+            f"Frame: {value + 1} / {n} | Time: {t_sec:.1f}s ({t_sec/60:.2f}min)"
+        )
+        if not self._viewer_slider_dragging:
+            self._viewer_slider_debounce.start()
+
+    def _on_viewer_frame_debounced(self):
+        """Load the frame after keyboard/programmatic slider idle for 60 ms."""
+        value = getattr(self, "_viewer_debounced_frame_idx", 0)
+        self._viewer_show_frame(value)
         if hasattr(self, "sync_plots_enabled") and self.sync_plots_enabled.isChecked():
             self._update_sync_time_marker(value)
 
@@ -1691,9 +1733,15 @@ class FrameViewerMixin:
         if self.viewer_is_playing:
             next_idx = self.viewer_current_frame + 1
             if next_idx >= self.viewer_n_frames:
-                # Loop back to start
                 next_idx = 0
-            self._viewer_goto_frame(next_idx)
+            # Show frame directly — do NOT go through slider → debounce chain.
+            # At ≥17 FPS the 60ms debounce timer would never expire and rendering
+            # would stall completely.
+            self._viewer_show_frame(next_idx)
+            # Keep slider in sync visually without re-triggering signals
+            self.viewer_frame_slider.blockSignals(True)
+            self.viewer_frame_slider.setValue(next_idx)
+            self.viewer_frame_slider.blockSignals(False)
 
     def _viewer_update_timer_interval(self):
         """Update playback timer interval when FPS changes."""

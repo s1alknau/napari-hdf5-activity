@@ -543,6 +543,18 @@ class CircadianMixin:
         try:
             self._log_message(f"Loading comprehensive results from: {file_path}")
 
+            # Warn if raw recording is not loaded yet — masks will be set correctly
+            # only when results are loaded AFTER the raw file (loading raw file clears masks).
+            if not getattr(self, "file_path", None):
+                self._log_message(
+                    "⚠️  No raw recording loaded yet.\n"
+                    "    Recommended order for full reproduction:\n"
+                    "      1. Load the raw recording in the Input tab\n"
+                    "      2. Then load these results (ROI masks and parameters will be applied)\n"
+                    "      3. Click 'Start Analysis' to reproduce with identical ROIs and settings\n"
+                    "    Continuing load — plots and exports will still work without the raw file."
+                )
+
             # Load all results using comprehensive load function
             loaded_data = load_comprehensive_results(file_path)
 
@@ -641,6 +653,86 @@ class CircadianMixin:
                         f"  ✓ Loaded LED data ({len(self.led_data.get('times', []))} points)"
                     )
 
+                # Restore ROI masks and circle parameters
+                if "masks" in core and core["masks"]:
+                    self.masks = core["masks"]
+                    self.main_masks = self.masks.copy()
+                    self._log_message(f"  ✓ Loaded {len(self.masks)} ROI masks")
+
+                if "original_circles" in core and core["original_circles"] is not None:
+                    self._original_circles = core["original_circles"]
+                    self._log_message(
+                        f"  ✓ Loaded {len(self._original_circles)} circle definitions"
+                    )
+
+                # Redraw ROI overlay in napari using restored circles
+                if getattr(self, "masks", []) and getattr(self, "_original_circles", None) is not None:
+                    try:
+                        import numpy as _np
+                        import cv2 as _cv2
+
+                        # ── 1. Try the already-loaded labeled frame (ROI detection was run) ──
+                        base_frame = getattr(self, "labeled_frame", None)
+
+                        # ── 2. Try to read frame 0 from the raw input file ──────────────────
+                        if base_frame is None and getattr(self, "file_path", None):
+                            try:
+                                from ._reader import preprocess_image_for_processing
+                                from ._io_abstraction import open_file_reader
+                                fp = self.file_path
+                                if fp.lower().endswith((".avi", ".mp4")):
+                                    import cv2 as _cv2b
+                                    cap = _cv2b.VideoCapture(fp)
+                                    ok, raw = cap.read()
+                                    cap.release()
+                                    if ok:
+                                        disp, _ = preprocess_image_for_processing(raw)
+                                        base_frame = _cv2.cvtColor(disp, _cv2.COLOR_GRAY2RGB)
+                                else:
+                                    with open_file_reader(fp) as _r:
+                                        rk = _r.keys("/")
+                                        # find first frame dataset
+                                        for _grp in ("frames", "data", "images"):
+                                            if _grp in rk:
+                                                raw = _r.read_frame(_grp, 0)
+                                                disp, _ = preprocess_image_for_processing(raw)
+                                                base_frame = _cv2.cvtColor(disp, _cv2.COLOR_GRAY2RGB)
+                                                break
+                            except Exception as _fe:
+                                self._log_message(f"  ⚠️ Could not read frame 0: {_fe}")
+
+                        # ── 3. Fall back to black canvas at mask resolution ───────────────────
+                        if base_frame is None:
+                            h, w = self.masks[0].shape[:2]
+                            base_frame = _np.zeros((h, w, 3), dtype=_np.uint8)
+
+                        labeled = base_frame.copy()
+                        if labeled.ndim == 2:
+                            labeled = _cv2.cvtColor(labeled, _cv2.COLOR_GRAY2RGB)
+
+                        # Draw circles on the background frame
+                        for idx, circle in enumerate(self._original_circles):
+                            cx, cy = int(circle[0]), int(circle[1])
+                            radius = int(circle[2])
+                            color_key = idx + 1
+                            roi_color = self.roi_colors.get(color_key, "#00ff00")
+                            if isinstance(roi_color, str):
+                                hex_c = roi_color.lstrip("#")
+                                r_c, g_c, b_c = (int(hex_c[i:i+2], 16) for i in (0, 2, 4))
+                                bgr = (b_c, g_c, r_c)
+                            else:
+                                bgr = (int(roi_color[2]*255), int(roi_color[1]*255), int(roi_color[0]*255))
+                            _cv2.circle(labeled, (cx, cy), radius, bgr, 2)
+                            _cv2.putText(labeled, str(color_key), (cx - 10, cy),
+                                        _cv2.FONT_HERSHEY_SIMPLEX, 0.6, bgr, 1)
+
+                        self.labeled_frame = labeled
+                        self.main_labeled_frame = labeled.copy()
+                        self._add_roi_layers_to_viewer(labeled, self.masks)
+                        self._log_message("  ✓ ROI circles redrawn in napari viewer")
+                    except Exception as _e:
+                        self._log_message(f"  ⚠️ Could not redraw ROI overlay: {_e}")
+
             # Restore extended analysis results
             if "extended_analysis" in loaded_data and loaded_data["extended_analysis"]:
                 extended = loaded_data["extended_analysis"]
@@ -714,20 +806,40 @@ class CircadianMixin:
                 # Restore core parameters
                 if "core" in params:
                     core_params = params["core"]
-                    if (
-                        "frame_interval" in core_params
-                        and core_params["frame_interval"] is not None
-                    ):
-                        if hasattr(self, "frame_interval"):
-                            self.frame_interval.setValue(core_params["frame_interval"])
-                    if (
-                        "bin_size_seconds" in core_params
-                        and core_params["bin_size_seconds"] is not None
-                    ):
-                        if hasattr(self, "bin_size_seconds"):
-                            self.bin_size_seconds.setValue(
-                                core_params["bin_size_seconds"]
-                            )
+
+                    def _sv(attr, key, is_check=False):
+                        val = core_params.get(key)
+                        if val is None:
+                            return
+                        obj = getattr(self, attr, None)
+                        if obj is None:
+                            return
+                        if is_check:
+                            obj.setChecked(bool(val))
+                        else:
+                            try:
+                                obj.setValue(val)
+                            except Exception:
+                                pass
+
+                    _sv("frame_interval", "frame_interval")
+                    _sv("end_time", "end_time_seconds")
+                    _sv("chunk_size", "chunk_size")
+                    _sv("threshold_multiplier", "threshold_multiplier")
+                    _sv("baseline_duration", "baseline_duration_minutes")
+                    _sv("adaptive_illumination_baseline", "adaptive_illumination_baseline", is_check=True)
+                    _sv("enable_detrending", "enable_detrending", is_check=True)
+                    _sv("jump_correction", "jump_correction", is_check=True)
+                    _sv("bin_size_seconds", "bin_size_seconds")
+                    _sv("quiescence_threshold", "quiescence_threshold")
+                    _sv("sleep_threshold_minutes", "sleep_threshold_minutes")
+                    # ROI circle detection
+                    _sv("min_radius", "roi_min_radius")
+                    _sv("max_radius", "roi_max_radius")
+                    _sv("min_dist", "roi_min_dist")
+                    _sv("param1", "roi_param1_edge")
+                    _sv("param2", "roi_param2_center")
+                    _sv("dp_param", "roi_dp")
 
                 # Restore extended parameters
                 if "extended" in params:
@@ -763,6 +875,20 @@ class CircadianMixin:
                         if hasattr(self, "target_period"):
                             self.target_period.setValue(
                                 ext_params["target_period_hours"]
+                            )
+
+                    if (
+                        "cosinor_fixed_period_hours" in ext_params
+                        and ext_params["cosinor_fixed_period_hours"] is not None
+                    ):
+                        if hasattr(self, "cosinor_fixed_period"):
+                            self.cosinor_fixed_period.setValue(
+                                ext_params["cosinor_fixed_period_hours"]
+                            )
+                    if "cosinor_fixed_period_active" in ext_params:
+                        if hasattr(self, "chk_cosinor_fixed_period"):
+                            self.chk_cosinor_fixed_period.setChecked(
+                                bool(ext_params["cosinor_fixed_period_active"])
                             )
 
                 self._log_message("  ✓ Restored analysis parameters")
@@ -805,13 +931,51 @@ class CircadianMixin:
                 )
                 summary_lines.append(f"  • Extended analysis: {method_name}")
 
-            summary_lines.extend(
-                [
-                    "",
-                    "All analysis results have been restored.",
-                    "You can now perform post-hoc cycle/period analysis or export results.",
-                ]
-            )
+            # Show restored parameters for reviewer verification
+            meta = loaded_data.get("metadata", {})
+            params_restored = loaded_data.get("analysis_parameters", {}).get("core", {})
+            summary_lines.append("")
+            summary_lines.append("Restored Parameters (for reproduction):")
+            if meta.get("plugin_version"):
+                summary_lines.append(f"  Plugin version : {meta['plugin_version']}  (git: {meta.get('git_commit','?')})")
+            if meta.get("source_file"):
+                summary_lines.append(f"  Source file    : {meta['source_file']}")
+            if meta.get("save_timestamp"):
+                summary_lines.append(f"  Saved at       : {meta['save_timestamp']}")
+            for key, label in [
+                ("frame_interval",           "Frame interval (s)   "),
+                ("end_time_seconds",         "End time (s)         "),
+                ("chunk_size",               "Chunk size           "),
+                ("threshold_multiplier",     "Threshold multiplier "),
+                ("baseline_duration_minutes","Baseline duration (min)"),
+                ("adaptive_illumination_baseline", "Adaptive baseline"),
+                ("bin_size_seconds",         "Bin size (s)         "),
+                ("quiescence_threshold",     "Quiescence threshold "),
+                ("sleep_threshold_minutes",  "Sleep threshold (min)"),
+                ("roi_min_radius",           "ROI min radius (px)  "),
+                ("roi_max_radius",           "ROI max radius (px)  "),
+                ("roi_min_dist",             "ROI min dist (px)    "),
+                ("roi_param1_edge",          "ROI param1 (edge)    "),
+                ("roi_param2_center",        "ROI param2 (center)  "),
+            ]:
+                val = params_restored.get(key)
+                if val is not None:
+                    summary_lines.append(f"  {label}: {val}")
+            raw_loaded = bool(getattr(self, "file_path", None))
+            masks_ready = bool(getattr(self, "masks", []))
+            summary_lines.extend([
+                "",
+                "─── Reproduction workflow ───────────────────────────",
+                "To get IDENTICAL results on the same dataset:",
+                "  1. Load the raw recording in the Input tab"
+                    + (" ✓ already loaded" if raw_loaded else " ← do this first"),
+                "  2. Load this results file (done ✓)"
+                    + (" — ROI masks restored" if masks_ready else " — no masks in file"),
+                "  3. Click 'Start Analysis' → identical results guaranteed",
+                "─────────────────────────────────────────────────────",
+                "",
+                "For plots/exports without re-running: use the Results tab directly.",
+            ])
 
             self._log_message("✓ Successfully loaded comprehensive results")
 
@@ -910,6 +1074,8 @@ class CircadianMixin:
                 "roi_summary": {},
                 "thresholds": {},
                 "led_data": getattr(self, "led_data", None) or {},
+                "masks": getattr(self, "masks", []) or [],
+                "original_circles": getattr(self, "_original_circles", None),
             }
 
             # Add threshold information (core values + extra stats from roi_statistics)
@@ -1064,40 +1230,52 @@ class CircadianMixin:
                             }
                     extended_results["phase"] = phase_data
 
-            # Collect analysis parameters
+            # Collect analysis parameters — ALL parameters needed for exact reproduction
+            def _gv(attr, default=None):
+                """Get widget value; return default if attribute missing."""
+                obj = getattr(self, attr, None)
+                if obj is None:
+                    return default
+                return obj.value() if hasattr(obj, "value") else (
+                    obj.isChecked() if hasattr(obj, "isChecked") else default
+                )
+
             analysis_params = {
                 "core": {
-                    "frame_interval": (
-                        self.frame_interval.value()
-                        if hasattr(self, "frame_interval")
-                        else None
-                    ),
-                    "bin_size_seconds": (
-                        self.bin_size_seconds.value()
-                        if hasattr(self, "bin_size_seconds")
-                        else None
-                    ),
+                    # Timing
+                    "frame_interval": _gv("frame_interval"),
+                    "end_time_seconds": _gv("end_time"),
+                    "chunk_size": _gv("chunk_size"),
+                    # Threshold / detection
+                    "threshold_multiplier": _gv("threshold_multiplier"),
+                    "baseline_duration_minutes": _gv("baseline_duration"),
+                    "adaptive_illumination_baseline": _gv("adaptive_illumination_baseline"),
+                    "enable_detrending": _gv("enable_detrending"),
+                    "jump_correction": _gv("jump_correction"),
+                    # Behavior
+                    "bin_size_seconds": _gv("bin_size_seconds"),
+                    "quiescence_threshold": _gv("quiescence_threshold"),
+                    "sleep_threshold_minutes": _gv("sleep_threshold_minutes"),
+                    # ROI circle detection
+                    "roi_min_radius": _gv("min_radius"),
+                    "roi_max_radius": _gv("max_radius"),
+                    "roi_min_dist": _gv("min_dist"),
+                    "roi_param1_edge": _gv("param1"),
+                    "roi_param2_center": _gv("param2"),
+                    "roi_dp": _gv("dp_param"),
                 },
                 "extended": {
-                    "min_period_hours": (
-                        self.fisher_min_period.value()
-                        if hasattr(self, "fisher_min_period")
-                        else None
+                    "min_period_hours": _gv("fisher_min_period"),
+                    "max_period_hours": _gv("fisher_max_period"),
+                    "significance_level": _gv("fisher_significance"),
+                    "target_period_hours": _gv("target_period"),
+                    "cosinor_fixed_period_active": (
+                        self.chk_cosinor_fixed_period.isChecked()
+                        if hasattr(self, "chk_cosinor_fixed_period") else False
                     ),
-                    "max_period_hours": (
-                        self.fisher_max_period.value()
-                        if hasattr(self, "fisher_max_period")
-                        else None
-                    ),
-                    "significance_level": (
-                        self.fisher_significance.value()
-                        if hasattr(self, "fisher_significance")
-                        else None
-                    ),
-                    "target_period_hours": (
-                        self.target_period.value()
-                        if hasattr(self, "target_period")
-                        else None
+                    "cosinor_fixed_period_hours": (
+                        self.cosinor_fixed_period.value()
+                        if hasattr(self, "cosinor_fixed_period") else 24.0
                     ),
                     "analysis_method": (
                         self.fisher_method_combo.currentText()
@@ -1107,13 +1285,34 @@ class CircadianMixin:
                 },
             }
 
-            # Collect metadata
+            # Collect metadata including plugin version and git hash for traceability
+            try:
+                from napari_hdf5_activity import __version__ as _plugin_version
+            except Exception:
+                _plugin_version = "unknown"
+            try:
+                import subprocess as _sp
+                _git_hash = _sp.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=os.path.dirname(__file__),
+                    stderr=_sp.DEVNULL,
+                ).decode().strip()
+            except Exception:
+                _git_hash = "unknown"
+
             metadata = {
                 "saved_from": "napari-hdf5-activity comprehensive analysis",
+                "plugin_version": _plugin_version,
+                "git_commit": _git_hash,
                 "save_timestamp": datetime.now().isoformat(),
                 "n_rois": len(self.merged_results),
                 "source_file": (
                     os.path.basename(self.file_path)
+                    if hasattr(self, "file_path") and self.file_path
+                    else None
+                ),
+                "source_file_full_path": (
+                    self.file_path
                     if hasattr(self, "file_path") and self.file_path
                     else None
                 ),
@@ -1168,17 +1367,11 @@ class CircadianMixin:
                     f"✓ Successfully saved comprehensive results for {len(self.merged_results)} ROIs"
                 )
                 self.fisher_results_text.setPlainText("\n".join(summary_lines))
-            else:
-                raise Exception("Save operation returned failure status")
-
         except Exception as e:
             self.fisher_results_text.setPlainText(
                 f"ERROR saving results to HDF5:\n\n{str(e)}"
             )
             self._log_message(f"ERROR saving results: {e}")
-            import traceback
-
-            traceback.print_exc()
 
     def run_fisher_analysis(self):
         """Run rhythmic pattern analysis on movement data using selected method."""
@@ -2182,25 +2375,35 @@ class CircadianMixin:
             population_cosinor,
         )
 
-        # Generate a fine-grained grid of test periods so no real rhythm is missed.
-        # Use up to ~20 evenly-spaced steps across the range, minimum 1h resolution.
-        range_h = max_period - min_period
-        step = max(1.0, round(range_h / 20, 1))
-        test_periods_set = set()
+        # Fixed-period mode: fit only at the user-specified period
+        fixed_period_active = (
+            hasattr(self, "chk_cosinor_fixed_period")
+            and self.chk_cosinor_fixed_period.isChecked()
+        )
+        if fixed_period_active:
+            fixed_p = self.cosinor_fixed_period.value()
+            test_periods = [round(fixed_p, 1)]
+            self._log_message(f"  Cosinor: fixed period mode — fitting only at {fixed_p:.1f} h")
+        else:
+            # Generate a fine-grained grid of test periods so no real rhythm is missed.
+            # Use up to ~20 evenly-spaced steps across the range, minimum 1h resolution.
+            range_h = max_period - min_period
+            step = max(1.0, round(range_h / 20, 1))
+            test_periods_set = set()
 
-        # Biological anchor points within range
-        for p in [12.0, 24.0, 30.0]:
-            if min_period <= p <= max_period:
-                test_periods_set.add(p)
+            # Biological anchor points within range
+            for p in [12.0, 24.0, 30.0]:
+                if min_period <= p <= max_period:
+                    test_periods_set.add(p)
 
-        # Regular grid — catches periods like 20h, 21h, 27h etc.
-        p = min_period
-        while p <= max_period + 1e-6:
-            test_periods_set.add(round(p, 1))
-            p += step
-        test_periods_set.add(round(max_period, 1))  # ensure boundary included
+            # Regular grid — catches periods like 20h, 21h, 27h etc.
+            p = min_period
+            while p <= max_period + 1e-6:
+                test_periods_set.add(round(p, 1))
+                p += step
+            test_periods_set.add(round(max_period, 1))  # ensure boundary included
 
-        test_periods = sorted(test_periods_set)
+            test_periods = sorted(test_periods_set)
 
         # Use provided data or fall back to fraction_data
         data_to_analyze = (
@@ -3864,27 +4067,90 @@ class CircadianMixin:
 
             traceback.print_exc()
 
-    def export_all_circadian_results(self):
-        """Export all available circadian analysis results into one Excel file.
+    def _get_analysis_source_data(self):
+        """Return (source_data, bin_size, data_type_name) using current widget settings."""
+        original_bin = self.bin_size_seconds.value()
+        analysis_bin = self.analysis_bin_size.value() if hasattr(self, "analysis_bin_size") else original_bin
+        data_source_index = self.data_source_combo.currentIndex() if hasattr(self, "data_source_combo") else 0
 
-        Each method is exported via its full export function into a temp file.
-        All sheets are then merged into the final workbook with a method prefix,
-        so every sheet from every individual export is preserved.
+        if data_source_index == 1:
+            source_data = getattr(self, "merged_results", {})
+            data_type_name = "Raw Intensity (continuous)"
+        elif data_source_index == 2:
+            raw = getattr(self, "merged_results_raw", None) or getattr(self, "merged_results", {})
+            from ._calc import bin_and_normalize_movement
+            norm_bin = analysis_bin
+            source_data = bin_and_normalize_movement(raw, norm_bin)
+            data_type_name = "Normalized Movement (0-1)"
+        else:
+            source_data = getattr(self, "fraction_data", {})
+            data_type_name = "Fraction Movement (0-1)"
+
+        bin_size = analysis_bin if analysis_bin > original_bin else original_bin
+
+        if analysis_bin > original_bin and data_source_index != 2:
+            source_data = self._rebin_timeseries_data(source_data, analysis_bin, original_bin)
+            bin_size = analysis_bin
+
+        # Time-range filter
+        if hasattr(self, "enable_cycle_selection") and self.enable_cycle_selection.isChecked():
+            start_t = self.cycle_start_time.value() * 3600.0
+            end_t   = self.cycle_end_time.value()   * 3600.0
+            source_data = {
+                roi: [(t, v) for t, v in data if start_t <= t <= end_t]
+                for roi, data in source_data.items()
+            }
+            source_data = {roi: d for roi, d in source_data.items() if d}
+
+        return source_data, bin_size, data_type_name
+
+    def _compute_method(self, method_idx: int):
+        """Run a single analysis method and return (results, plot_figure)."""
+        min_p   = self.fisher_min_period.value()
+        max_p   = self.fisher_max_period.value()
+        sig     = self.fisher_significance.value()
+        fi      = self.frame_interval.value()
+        data, bin_size, _ = self._get_analysis_source_data()
+
+        run_map = {
+            0: lambda: self._run_fisher_method(min_p, max_p, sig, fi, bin_size, data),
+            1: lambda: self._run_fft_method(min_p, max_p, sig, fi, bin_size, data),
+            2: lambda: self._run_cosinor_method(min_p, max_p, sig, fi, bin_size, data),
+            3: lambda: self._run_similarity_method(fi, bin_size, data),
+            4: lambda: self._run_coherence_method(fi, bin_size, data),
+            5: lambda: self._run_phase_clustering_method(fi, bin_size, data),
+        }
+        if method_idx not in run_map:
+            raise ValueError(f"Unknown method index {method_idx}")
+
+        results, _ = run_map[method_idx]()
+
+        # Create the plot silently (updates self.fisher_plot_figure)
+        prev = self.fisher_analysis_results
+        self.fisher_analysis_results = results
+        try:
+            self._create_circadian_plot(results, method_idx)
+            fig = getattr(self, "fisher_plot_figure", None)
+        finally:
+            self.fisher_analysis_results = prev
+
+        return results, fig
+
+    def export_all_circadian_results(self):
+        """Export all circadian analysis methods: auto-run missing ones, save data
+        to a merged Excel file and plots as PNG files in a subfolder.
         """
-        import os
-        import tempfile
-        import shutil
+        import os, tempfile
         from qtpy.QtWidgets import QFileDialog
 
-        if not hasattr(self, "_all_method_results") or not self._all_method_results:
-            self._log_message("⚠️ No circadian analysis results available. Run an analysis first.")
+        if not (hasattr(self, "fraction_data") and self.fraction_data) and \
+           not (hasattr(self, "merged_results") and self.merged_results):
+            self._log_message("⚠️ No analysis data available. Run the main analysis first.")
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export All Circadian Results",
-            "all_circadian_results.xlsx",
-            "Excel Files (*.xlsx)",
+            self, "Export All Circadian Results",
+            "all_circadian_results.xlsx", "Excel Files (*.xlsx)",
         )
         if not file_path:
             return
@@ -3897,104 +4163,136 @@ class CircadianMixin:
             self._log_message("❌ openpyxl not installed. Run: pip install openpyxl")
             return
 
-        # Method metadata: index → (label, prefix, export_fn)
+        # Plots subfolder next to Excel file
+        plots_dir = os.path.splitext(file_path)[0] + "_plots"
+        os.makedirs(plots_dir, exist_ok=True)
+
+        # (label, excel_sheet_prefix, plot_filename_stem, export_fn)
         method_info = {
-            0: ("Chi² Periodogram", "Chi2",     self._export_fisher_to_excel),
-            1: ("FFT Spectrum",     "FFT",      self._export_fft_to_excel),
-            2: ("Cosinor",          "Cosinor",  self._export_cosinor_to_excel),
-            4: ("Coherence",        "Coh",      None),   # external module
-            5: ("Phase Clustering", "Phase",    self._export_phase_clustering_to_excel),
+            0: ("Chi² Periodogram",  "Chi2",    "01_Chi2_Periodogram",       self._export_fisher_to_excel),
+            1: ("FFT Spectrum",       "FFT",     "02_FFT_Power_Spectrum",      self._export_fft_to_excel),
+            2: ("Cosinor",            "Cosinor", "03_Cosinor_Analysis",        self._export_cosinor_to_excel),
+            3: ("ROI Similarity",     "Sim",     "04_ROI_Similarity_Matrix",   None),
+            4: ("Coherence",          "Coh",     "05_Coherence_Analysis",      None),
+            5: ("Phase Clustering",   "Phase",   "06_Phase_Clustering",        self._export_phase_clustering_to_excel),
         }
 
-        results_backup = self.fisher_analysis_results
-        exported = []
-        errors = []
-        temp_files = []
+        if not hasattr(self, "_all_method_results"):
+            self._all_method_results = {}
+
+        results_backup = getattr(self, "fisher_analysis_results", None)
+        exported, errors, temp_files = [], [], []
 
         try:
-            # Export each method to a temp file using its full export function
-            for method_idx, (label, prefix, export_fn) in method_info.items():
-                method_res = self._all_method_results.get(method_idx)
-                if method_res is None:
-                    continue
+            for method_idx, (label, prefix, plot_stem, export_fn) in method_info.items():
+
+                # ── 1. Compute results if not already cached ─────────────────
+                if method_idx not in self._all_method_results:
+                    self._log_message(f"  Running {label}…")
+                    try:
+                        results, fig = self._compute_method(method_idx)
+                        self._all_method_results[method_idx] = results
+                    except Exception as e:
+                        errors.append(f"{label} (compute): {e}")
+                        self._log_message(f"  ⚠️ {label} compute failed: {e}")
+                        continue
+                else:
+                    results = self._all_method_results[method_idx]
+                    # Regenerate plot for already-cached result
+                    prev = self.fisher_analysis_results
+                    self.fisher_analysis_results = results
+                    try:
+                        self._create_circadian_plot(results, method_idx)
+                        fig = getattr(self, "fisher_plot_figure", None)
+                    except Exception:
+                        fig = None
+                    finally:
+                        self.fisher_analysis_results = prev
+
+                # ── 2. Save plot as PNG ──────────────────────────────────────
+                if fig is not None:
+                    try:
+                        png_path = os.path.join(plots_dir, f"{plot_stem}.png")
+                        fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
+                        self._log_message(f"  ✓ {label} plot → {os.path.basename(png_path)}")
+                    except Exception as e:
+                        self._log_message(f"  ⚠️ {label} plot save failed: {e}")
+
+                # ── 3. Export Excel data to temp file ────────────────────────
                 try:
                     tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
                     tmp.close()
                     temp_files.append((tmp.name, prefix, label))
 
-                    self.fisher_analysis_results = method_res
+                    self.fisher_analysis_results = results
                     if export_fn is not None:
                         export_fn(tmp.name)
+                    elif method_idx == 3:
+                        from ._circadian_similarity import export_similarity_to_excel
+                        export_similarity_to_excel(tmp.name, results)
                     elif method_idx == 4:
                         from ._circadian_coherence import export_coherence_to_excel
-                        import pandas as pd
-                        export_coherence_to_excel(tmp.name, method_res)
-                        with pd.ExcelWriter(tmp.name, engine="openpyxl", mode="a",
-                                            if_sheet_exists="overlay") as w:
-                            self._autofit_excel(w)
+                        export_coherence_to_excel(tmp.name, results)
+
                     exported.append(label)
-                    self._log_message(f"  ✓ {label} exported")
+                    self._log_message(f"  ✓ {label} data exported")
                 except Exception as e:
-                    errors.append(f"{label}: {e}")
-                    self._log_message(f"  ⚠️ {label} failed: {e}")
+                    errors.append(f"{label} (excel): {e}")
+                    self._log_message(f"  ⚠️ {label} Excel failed: {e}")
                 finally:
                     self.fisher_analysis_results = results_backup
 
-            # Similarity (method 3) — separate handling
-            sim_res = self._all_method_results.get(3)
-            if sim_res is not None:
-                try:
-                    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
-                    tmp.close()
-                    temp_files.append((tmp.name, "Sim", "ROI Similarity"))
-                    self.fisher_analysis_results = sim_res
-                    from ._circadian_similarity import export_similarity_to_excel
-                    import pandas as pd
-                    export_similarity_to_excel(tmp.name, sim_res)
-                    with pd.ExcelWriter(tmp.name, engine="openpyxl", mode="a",
-                                        if_sheet_exists="overlay") as w:
-                        self._autofit_excel(w)
-                    exported.append("ROI Similarity")
-                    self._log_message("  ✓ ROI Similarity exported")
-                except Exception as e:
-                    errors.append(f"ROI Similarity: {e}")
-                    self._log_message(f"  ⚠️ ROI Similarity failed: {e}")
-                finally:
-                    self.fisher_analysis_results = results_backup
+            # ── 4. Results tab behavioral data ──────────────────────────────
+            self._log_message("  Exporting Results tab (behavioral data)…")
+            try:
+                tmp_results = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+                tmp_results.close()
+                self._save_results_excel_to_path(tmp_results.name)
+                temp_files.append((tmp_results.name, "Results", "Results Tab"))
+                exported.append("Results Tab")
+                self._log_message("  ✓ Results tab behavioral data exported")
+            except Exception as e:
+                errors.append(f"Results Tab (excel): {e}")
+                self._log_message(f"  ⚠️ Results tab Excel failed: {e}")
+
+            # ── 5. Save main results plot as PNG ─────────────────────────────
+            try:
+                fig_main = getattr(self, "figure", None)
+                if fig_main is not None and fig_main.get_axes():
+                    png_path = os.path.join(plots_dir, "00_Results_Behavioral_Timeseries.png")
+                    fig_main.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
+                    self._log_message(f"  ✓ Results plot → {os.path.basename(png_path)}")
+            except Exception as e:
+                self._log_message(f"  ⚠️ Results plot save failed: {e}")
 
             if not temp_files:
                 self._log_message("❌ No results to export.")
                 return
 
-            # Merge all temp workbooks into the final file
-            final_wb = openpyxl.Workbook()
-            final_wb.remove(final_wb.active)  # remove default empty sheet
-            used_sheet_names = set()
-
+            # ── 6. Merge all temp workbooks into final Excel ─────────────────
             from copy import copy as _copy
+            final_wb = openpyxl.Workbook()
+            final_wb.remove(final_wb.active)
+            used_sheet_names: set = set()
+
             for tmp_path, prefix, label in temp_files:
                 try:
                     src_wb = openpyxl.load_workbook(tmp_path)
-                    for src_sheet_name in src_wb.sheetnames:
-                        # Prefix each sheet name with the method abbreviation
-                        new_name = self._safe_sn(f"{prefix}_{src_sheet_name}", used_sheet_names)
-                        src_ws = src_wb[src_sheet_name]
+                    for src_name in src_wb.sheetnames:
+                        new_name = self._safe_sn(f"{prefix}_{src_name}", used_sheet_names)
+                        src_ws = src_wb[src_name]
                         dst_ws = final_wb.create_sheet(title=new_name)
                         for row in src_ws.iter_rows():
                             for cell in row:
                                 dst_cell = dst_ws[cell.coordinate]
                                 dst_cell.value = cell.value
-                                # Copy style properties by value — copying _style directly
-                                # carries raw index numbers that are invalid in a different
-                                # workbook's style table (causes IndexError on save).
                                 if cell.has_style:
-                                    dst_cell.font = _copy(cell.font)
-                                    dst_cell.fill = _copy(cell.fill)
-                                    dst_cell.border = _copy(cell.border)
-                                    dst_cell.alignment = _copy(cell.alignment)
+                                    dst_cell.font       = _copy(cell.font)
+                                    dst_cell.fill       = _copy(cell.fill)
+                                    dst_cell.border     = _copy(cell.border)
+                                    dst_cell.alignment  = _copy(cell.alignment)
                                     dst_cell.number_format = cell.number_format
                                     dst_cell.protection = _copy(cell.protection)
-                        # Copy column widths
                         for col_letter, cd in src_ws.column_dimensions.items():
                             dst_ws.column_dimensions[col_letter].width = cd.width
                     src_wb.close()
@@ -4002,20 +4300,23 @@ class CircadianMixin:
                     self._log_message(f"  ⚠️ Could not merge {label}: {e}")
 
             final_wb.save(file_path)
-            self._log_message(f"✓ Export All complete: {len(exported)} methods, "
-                              f"{len(final_wb.sheetnames)} sheets → {os.path.basename(file_path)}")
+            n_plots = len(os.listdir(plots_dir))
+            self._log_message(
+                f"✓ Export All complete: {len(exported)} methods, "
+                f"{len(final_wb.sheetnames)} Excel sheets, {n_plots} plots\n"
+                f"  Excel : {os.path.basename(file_path)}\n"
+                f"  Plots : {os.path.basename(plots_dir)}/"
+            )
 
         finally:
-            # Clean up temp files
             for tmp_path, _, _ in temp_files:
                 try:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
 
-        if errors:
-            for err in errors:
-                self._log_message(f"⚠️ Skipped: {err}")
+        for err in errors:
+            self._log_message(f"⚠️ Skipped: {err}")
 
     # ------------------------------------------------------------------
     # Shared writer helpers used by export_all_circadian_results

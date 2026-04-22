@@ -192,6 +192,36 @@ def save_comprehensive_results(
                     if key in led and led[key] is not None:
                         led_group.create_dataset(key, data=np.array(led[key], dtype="f8"))
 
+            # Save ROI masks — binary arrays (uint8, one per ROI)
+            try:
+                if "masks" in core_results and core_results["masks"]:
+                    masks_group = core_group.create_group("roi_masks")
+                    saved = 0
+                    for i, mask in enumerate(core_results["masks"]):
+                        arr = np.asarray(mask, dtype=np.uint8)
+                        if arr.ndim == 2 and arr.size > 0:
+                            masks_group.create_dataset(
+                                f"mask_{i}", data=arr,
+                                compression="gzip", compression_opts=4,
+                            )
+                            saved += 1
+                    masks_group.attrs["n_masks"] = saved
+            except Exception as _me:
+                print(f"Warning: could not save ROI masks: {_me}")
+
+            # Save detected circle parameters [x, y, radius] (uint16, shape N×3)
+            try:
+                circles = core_results.get("original_circles")
+                if circles is not None:
+                    arr = np.asarray(circles)
+                    if arr.ndim == 2 and arr.shape[1] == 3 and arr.size > 0:
+                        core_group.create_dataset(
+                            "roi_circles",
+                            data=arr.astype(np.uint16),
+                        )
+            except Exception as _ce:
+                print(f"Warning: could not save ROI circles: {_ce}")
+
             # ================================================================
             # 2. EXTENDED ANALYSIS RESULTS
             # ================================================================
@@ -439,11 +469,10 @@ def save_comprehensive_results(
         return True
 
     except Exception as e:
-        print(f"Error saving comprehensive results: {e}")
         import traceback
-
-        traceback.print_exc()
-        return False
+        tb = traceback.format_exc()
+        print(f"Error saving comprehensive results: {e}\n{tb}")
+        raise RuntimeError(f"{e}\n\nFull traceback:\n{tb}") from e
 
 
 def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
@@ -677,6 +706,17 @@ def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
                         if key in led_group:
                             led_data[key] = led_group[key][:].tolist()
                     results["core_analysis"]["led_data"] = led_data
+
+                # Load ROI masks
+                if "roi_masks" in core_group:
+                    masks_group = core_group["roi_masks"]
+                    n = int(masks_group.attrs.get("n_masks", 0))
+                    masks = [masks_group[f"mask_{i}"][:].astype(bool) for i in range(n)]
+                    results["core_analysis"]["masks"] = masks
+
+                # Load detected circle parameters
+                if "roi_circles" in core_group:
+                    results["core_analysis"]["original_circles"] = core_group["roi_circles"][:].copy()
 
             # ================================================================
             # 2. LOAD EXTENDED ANALYSIS RESULTS

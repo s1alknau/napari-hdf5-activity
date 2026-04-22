@@ -1904,6 +1904,35 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         pop_row.addStretch()
         layout.addLayout(pop_row)
 
+        # Cosinor fixed-period option
+        cosinor_fixed_group = QGroupBox("Cosinor: Fixed Period")
+        cosinor_fixed_layout = QHBoxLayout()
+        cosinor_fixed_group.setLayout(cosinor_fixed_layout)
+
+        self.chk_cosinor_fixed_period = QCheckBox("Fix period at:")
+        self.chk_cosinor_fixed_period.setToolTip(
+            "When checked, Cosinor fits ONLY at this single period instead of\n"
+            "searching the full Min–Max range.\n\n"
+            "Use this when you know the expected period (e.g. 24 h for LD-entrained\n"
+            "animals) and want a forced fit with exact amplitude and acrophase."
+        )
+
+        self.cosinor_fixed_period = QDoubleSpinBox()
+        self.cosinor_fixed_period.setRange(0.5, 200.0)
+        self.cosinor_fixed_period.setValue(24.0)
+        self.cosinor_fixed_period.setSingleStep(1.0)
+        self.cosinor_fixed_period.setDecimals(1)
+        self.cosinor_fixed_period.setSuffix(" h")
+        self.cosinor_fixed_period.setToolTip("Period to fix for Cosinor (hours)")
+        self.cosinor_fixed_period.setEnabled(False)
+
+        self.chk_cosinor_fixed_period.toggled.connect(self.cosinor_fixed_period.setEnabled)
+
+        cosinor_fixed_layout.addWidget(self.chk_cosinor_fixed_period)
+        cosinor_fixed_layout.addWidget(self.cosinor_fixed_period)
+        cosinor_fixed_layout.addStretch()
+        layout.addWidget(cosinor_fixed_group)
+
         # Analysis method selection
         method_group = QGroupBox("Analysis Method")
         method_layout = QFormLayout()
@@ -6291,6 +6320,34 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                     times = ts_raw - ts_raw[0] if len(ts_raw) > 0 else ts_raw
                 else:
                     times = np.arange(len(white_led)) * frame_interval
+
+                # Align lengths: times and white_led must have the same shape
+                n_times = len(times)
+                n_led = len(white_led)
+                if n_times != n_led:
+                    self._log_message(
+                        f"⚠️ LED data length mismatch: times={n_times}, white_powers={n_led} — truncating to shorter"
+                    )
+                    n = min(n_times, n_led)
+                    times = times[:n]
+                    white_led = white_led[:n]
+                    if ir_led is not None:
+                        ir_led = ir_led[:min(len(ir_led), n)]
+
+                # Diagnostic: log range of times and white LED values
+                if len(times) > 0:
+                    self._log_message(
+                        f"LED diagnostic — times: {times[0]:.1f}–{times[-1]:.1f} s "
+                        f"({times[-1]/3600:.1f} h), "
+                        f"white_power: min={float(white_led.min()):.2f} max={float(white_led.max()):.2f}, "
+                        f"n_samples={len(times)}"
+                    )
+                    n_light = int((white_led > 0.5).sum())
+                    n_dark = len(white_led) - n_light
+                    self._log_message(
+                        f"LED diagnostic — light samples (>0.5%): {n_light} "
+                        f"({100*n_light/len(white_led):.1f}%), dark: {n_dark}"
+                    )
 
                 result = {"times": times.tolist(), "white_powers": white_led.tolist()}
                 if ir_led is not None:
