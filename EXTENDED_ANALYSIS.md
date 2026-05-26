@@ -51,13 +51,13 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 **Group A (Rhythmic):**
 - Strong 24h circadian rhythm (Fisher: p < 0.0001)
 - All animals synchronized (Similarity: r > 0.9)
-- Robust circadian clock (Phase Clustering: high amplitude)
+- Robust circadian clock (Phase Clustering: high R_roi)
 - **Interpretation**: Healthy, entrained animals with intact circadian systems
 
 **Group B (Arrhythmic):**
 - No significant rhythms (Fisher: p > 0.5)
 - No synchronization (Similarity: r < 0.3)
-- Weak/absent circadian clock (Phase Clustering: low amplitude)
+- Weak/absent circadian clock (Phase Clustering: low R_roi)
 - **Interpretation**: Disrupted circadian system (disease model, SCN lesion, or environmental stress)
 
 **Standard movement analysis cannot distinguish these groups** - both show 30% activity. Extended Analysis reveals the critical difference: temporal organization.
@@ -82,13 +82,13 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 | Cosinor Analysis | Rhythm quantification | Measuring amplitude, phase, MESOR | Fitted curves, confidence intervals, Nelson F-test for population |
 | ROI Similarity | Cross-correlation analysis | Finding synchronized ROIs | Correlation matrix, clusters (Bonferroni-corrected) |
 | Coherence Analysis | Frequency-specific synchronization | Identifying shared rhythms | Coherence heatmap (Bonferroni-corrected) |
-| Phase Clustering | Timing relationships | Detecting activity phases | Phase plot, timing offsets (descriptive only) |
+| Phase Clustering | Per-ROI peak-activity time + population synchrony | Detecting activity phases and group coherence | Polar plot with per-ROI mean phase, R_roi ∈ [0,1] and population R_pop |
 
 ### Method Comparison: Strengths and Limitations
 
 | Feature | Chi² Periodogram | FFT | Cosinor | ROI Similarity | Coherence | Phase Clustering |
 |---------|-----------------|-----|---------|----------------|-----------|------------------|
-| **Primary Output** | Z(T) statistic; Bonferroni-corrected | Power spectrum (|FFT|², a.u.) | MESOR, Amplitude, Acrophase | Correlation matrix | Coherence values | Phase & amplitude |
+| **Primary Output** | Z(T) statistic; Bonferroni-corrected | Power spectrum (|FFT|², a.u.) | MESOR, Amplitude, Acrophase | Correlation matrix | Coherence values | Per-ROI phase + R_roi, population R_pop |
 | **Statistical Testing** | ✅ Yes (p-values) | ✅ Yes (permutation, 1000 shuffles) | ✅ Yes (p-values, CIs) | ✅ Yes (t-test + Bonferroni) | ✅ Yes (per-pair Bonferroni) | ❌ No (descriptive only) |
 | **Exploratory Analysis** | ⚠️ Limited | ✅ Excellent | ❌ Poor | ✅ Good | ⚠️ Moderate | ❌ Poor |
 | **Computational Speed** | ⚠️ Slow | ✅ Very fast | ✅ Fast | ⚠️ Moderate | ⚠️ Slow | ✅ Fast |
@@ -937,10 +937,10 @@ x̃(t) = (x(t) - x̄) / σₓ,    ỹ(t) = (y(t) - ȳ) / σᵧ
 
 **Cross-Correlation Function**
 
-The normalized cross-correlation at lag τ is:
+The normalized cross-correlation at lag τ is computed with **unbiased** normalisation — each lag is divided by the number of overlapping samples (n − |τ|), not by the full n, so the result is always a valid Pearson-r equivalent in [−1, 1]:
 
 ```
-r_xy(τ) = (1/n) × Σₜ x̃(t) × ỹ(t+τ)
+r_xy(τ) = (1/(n − |τ|)) × Σₜ x̃(t) × ỹ(t+τ)
 ```
 
 This yields values in [-1, 1]:
@@ -1004,7 +1004,7 @@ d_ij = 1 - r_ij
 
 Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
 
-**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The default clustering threshold corresponds to r = 0.5 (adjustable via the GUI slider).
+**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The clustering threshold is controlled by the GUI slider (`Similarity threshold (r)`); the code fallback when no slider is set is r = 0.5 (so the dendrogram is cut at distance d = 1 − r = 0.5).
 
 **Important:** Hierarchical clustering is **exploratory and descriptive only**. Cluster assignments are not statistically tested and should not be used as primary statistical evidence. Use the Bonferroni-corrected pairwise correlations for significance claims.
 
@@ -1028,10 +1028,10 @@ Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
 | < 0.3 | any | Independent/unrelated |
 
 #### Dendrogram (Hierarchical Clustering)
-- **Height**: Dissimilarity (1 - correlation)
+- **Height**: Dissimilarity d = 1 − r
 - **Branches**: ROIs that cluster together
-- **Colors**: Different clusters (automatically detected)
-- **Red dashed line**: Cluster threshold (30% of max distance)
+- **Colors**: Different clusters (automatically split at the threshold)
+- **Red dashed line**: Cluster threshold from the GUI slider (default r = 0.5 → d = 0.5)
 
 #### Similarity Table
 For each ROI pair:
@@ -1359,8 +1359,8 @@ The matrix uses a **viridis** colormap: 0 = dark purple (no coherence), 1 = yell
 1. **Segment Length**:
    - Longer segments → better frequency resolution, fewer segments
    - Shorter segments → more statistical averaging, poorer resolution
-   - Default (256 samples) balances both
-   - For circadian analysis with 5-min sampling: 256 samples = ~21 hours
+   - Default is *adaptive*: `nperseg = samples_per_period = int(target_period_hours · 3600 / sampling_interval)` (≥ 16, clamped to ≤ len/2), so each segment covers exactly one full target cycle
+   - Example (24 h target, 60 s sampling): nperseg = 1440 samples per segment
 
 2. **Interpretation**:
    - Focus on coherence at biologically relevant frequencies
@@ -1386,30 +1386,62 @@ The matrix uses a **viridis** colormap: 0 = dark purple (no coherence), 1 = yell
 
 ### What It Does
 
-Uses Hilbert transform to extract instantaneous phase and amplitude of activity rhythms. Clusters ROIs by their activity timing (phase) to identify synchronized groups. Measures phase synchronization between pairs using the Phase Locking Value (PLV).
+Computes each ROI's mean activity phase as the **activity-weighted circular mean of time-of-day**, clusters ROIs into four chronotype quadrants, and visualises them on a polar plot with light/dark sector shading. A separate pairwise Phase Locking Value (PLV), based on Hilbert-transform phase differences, quantifies how consistently any two ROIs maintain a fixed phase offset.
 
 ### How It Works
 
-1. **Mean subtraction**: Signal is mean-subtracted before applying the Hilbert transform
-2. **Hilbert Transform**: Constructs analytic signal to extract instantaneous phase
-3. **Phase Extraction**: Computes instantaneous phase at each time point via circular mean
-4. **Phase Locking Value (PLV)**: Quantifies consistency of phase relationships using heuristic thresholds (PLV > 0.8 = strong, > 0.5 = moderate, > 0.3 = weak) — no statistical significance test
-5. **Phase Clustering**: Groups ROIs by mean phase into 4 chronotype quadrants (period/4 each)
-6. **Visualization**: Polar plot showing phase and amplitude
+**Per-ROI mean phase (activity-weighted circular mean of time-of-day):**
 
-**Note:** Phase clustering is **purely descriptive**. There is no statistical significance test for cluster assignments or PLV values. Use Fisher/Chi² or Cosinor for statistically validated rhythm detection.
+1. **Time-of-day folding**: Each timepoint t is mapped into one period via θ(t) = 2π · (t mod T) / T, where T is the dominant period (default 24 h).
+2. **Activity weighting**: Each timepoint contributes a unit vector at angle θ(t), weighted by the activity value at that timepoint after subtracting the recording minimum.
+3. **Resultant vector**: All weighted unit vectors are summed into a complex resultant V. The argument of V is the per-ROI mean phase; |V| / Σ weights is the per-ROI resultant length R ∈ [0, 1].
+4. **Quadrant clustering**: Each ROI is assigned to one of four equal chronotype quadrants (each spanning T/4).
+5. **Population synchrony**: A second circular mean across the per-ROI phase vectors gives the population mean phase and a population resultant length R that measures inter-ROI synchronization.
+
+**Pairwise PLV (Hilbert-based phase difference):**
+
+1. **Mean subtraction**: Each signal is mean-subtracted before applying the Hilbert transform.
+2. **Hilbert transform**: Constructs the analytic signal to extract instantaneous phase φ(t).
+3. **Phase difference**: Δφ(t) = φ₂(t) − φ₁(t).
+4. **PLV**: PLV = |⟨e^(iΔφ(t))⟩|, the consistency of the phase difference over time (0 = no coupling, 1 = perfectly locked). Heuristic thresholds (PLV > 0.8 = strong, > 0.5 = moderate, > 0.3 = weak) — no formal significance test.
+
+**Note:** The per-ROI mean phase is a quantitative *peak-activity time* with a per-ROI rhythm-concentration index (R_roi ∈ [0, 1]). The pairwise PLV is descriptive (no formal significance test). For statistical confirmation of rhythmicity, use Chi² periodogram or Cosinor.
 
 ### Mathematical Foundation
 
-**Hilbert Transform and Analytic Signal**
+**Activity-weighted resultant vector (per-ROI phase)**
+
+Let x(tᵢ) be the activity at timepoint tᵢ. Let T be the dominant period and ω = 2π/T. Define:
+
+```
+wᵢ = x(tᵢ) − min(x)
+θᵢ = ω · (tᵢ mod T)
+V  = Σᵢ wᵢ · e^(iθᵢ)
+```
+
+Then:
+
+```
+phase_radians = arg(V)
+phase_hours   = (phase_radians / 2π) · T   (mod T)
+R_roi         = |V| / Σᵢ wᵢ                (rhythm concentration ∈ [0, 1])
+```
+
+Quiescent timepoints (wᵢ ≈ 0) contribute nothing, so the resultant vector points to *when* the animal is actually active. The method makes no waveform assumption (sinusoidal or otherwise) and is independent of the cosinor fit, which makes it a genuine cross-validation of the cosinor acrophase rather than a circular restatement.
+
+**Why not the Hilbert circular mean of instantaneous phase?**
+
+For a single oscillating signal, the circular mean of arg(hilbert(x − x̄)) is biased toward the *trough* of the signal because activity data dwell near their minimum (long quiescence + brief bouts of movement). The estimator therefore returns ~12 h regardless of true peak timing for a 24-h rhythm, producing a spurious ~12 h offset against the cosinor acrophase and an artefactually inflated population resultant length (~0.98). The activity-weighted method above avoids this bias by construction. The Hilbert circular mean is still used correctly for pairwise *phase differences* (PLV, below) because the difference is stable even when each individual phase sweeps uniformly.
+
+**Hilbert Transform and Analytic Signal (used by PLV only)**
 
 For a real-valued signal x(t), the analytic signal is:
 
 ```
-z(t) = x(t) + i×H{x(t)}
+z(t) = x(t) + i × H{x(t)}
 ```
 
-where H{x(t)} is the Hilbert transform—a 90° phase shift of all frequency components:
+where H{x(t)} is the Hilbert transform — a 90° phase shift of all frequency components:
 
 ```
 H{x(t)} = (1/π) × P.V. ∫ x(τ)/(t-τ) dτ
@@ -1455,54 +1487,48 @@ Convert to hours: Δt = (Δφ̄/2π) × T gives the average time by which signal
 
 ### Phase Clustering for Chronotype Identification
 
-Each ROI's mean circadian phase (acrophase) is computed as the circular mean of instantaneous phase:
+Each ROI's per-ROI mean phase (in clock hours, mod T) is assigned to one of four equal chronotype quadrants of width T/4 (for T = 24 h, each quadrant spans 6 h):
 
-```
-φ̄ = arg(Σₜ e^(iφ(t)))
-```
+- **Early-active** (0–T/4): ZT 0–6 h
+- **Mid-active** (T/4–T/2): ZT 6–12 h
+- **Late-active** (T/2–3T/4): ZT 12–18 h
+- **Night-active** (3T/4–T): ZT 18–24 h
 
-Convert to clock time (hours from recording start, modulo period T). ROIs are binned into four chronotype clusters:
-
-- **Early-active** (0-6h): Peak activity in first quarter
-- **Mid-active** (6-12h): Peak activity in second quarter
-- **Late-active** (12-18h): Peak activity in third quarter
-- **Night-active** (18-24h): Peak activity in fourth quarter
+The polar plot additionally shades a **Light sector** (yellow) and **Dark sector** (gray) derived from the recording's LED telemetry: the light fraction is computed as the proportion of telemetry samples with `white_power > 0.5`, times T. If no LED data is available the plot falls back to a 12 h light / 12 h dark default.
 
 ### Parameters
 
-- **Dominant Period**: Period for filtering (from Chi² periodogram or FFT analysis)
-- **Bandwidth**: Filter bandwidth (default: ±10% of dominant period)
-- **Phase Threshold**: Clustering threshold (default: 45°)
+- **Dominant period** (hours): the period used to fold time-of-day (taken from a dedicated UI field; typically 24 h, independent of the Chi² periodogram range)
+- **Bin size** (seconds): optional re-binning before phase extraction (default: 60 s when called from the GUI; `None` skips re-binning)
 
 ### Output Interpretation
 
 #### Polar Plot
 
-**Radial Axis (Distance from Center)**:
-- Represents **rhythmic amplitude** (strength of oscillation)
-- NOT total activity level
-- Measures how well activity follows a clean periodic pattern
+**Angular position** = peak-activity time on a T-hour clock. With `set_theta_zero_location("N")` and clockwise direction: ZT 0 at top, ZT T/4 at right, ZT T/2 at bottom, ZT 3T/4 at left. For T = 24 h: 0 h top, 6 h right, 12 h bottom, 18 h left.
 
-**Angular Position (Angle)**:
-- Represents **phase** (timing of peak activity)
-- 0° (North) = reference phase
-- Angles increase clockwise
+**Radial length** = per-ROI resultant length R_roi ∈ [0, 1] (rhythm concentration).
 
-**Color**:
-- Each ROI has a consistent color matching other plots
+**Background shading**: yellow Light sector (ZT 0 to light-end), gray Dark sector (light-end to T), derived from LED telemetry or a 12:12 default.
 
-#### Amplitude Values
+**Color**: each ROI keeps a consistent colour across all analysis plots.
 
-| Amplitude | Interpretation |
-|-----------|----------------|
-| > 80 | Very strong, regular rhythm |
-| 50-80 | Strong rhythm |
-| 20-50 | Moderate rhythm |
-| < 20 | Weak or irregular rhythm |
+#### Per-ROI Resultant Length R_roi
 
-**Important**: High amplitude ≠ high activity!
-- High activity + irregular → moderate amplitude
-- Low activity + regular → can have high amplitude
+R_roi measures how concentrated each ROI's activity is at one time-of-day:
+
+| R_roi | Interpretation |
+|-------|----------------|
+| > 0.7 | Activity strongly concentrated at one time of day (sharp peak) |
+| 0.4 – 0.7 | Activity moderately concentrated |
+| 0.2 – 0.4 | Weakly concentrated, fairly spread across the day |
+| < 0.2 | Activity essentially uniform across the day (arrhythmic) |
+
+The black **population-mean vector** is drawn at angle = circular mean of the per-ROI phases, with length = mean(R_roi) × R_pop, where R_pop is the resultant length across the per-ROI phase vectors (also ∈ [0, 1]). R_pop is the honest synchronisation metric across ROIs — it is shown in the legend (`Population mean (R=X.XX)`) and as the bold text label next to the black vector together with the population-mean hour.
+
+**Important**: R_roi measures rhythm *concentration*, not activity *level*.
+- High activity + irregular timing → moderate R_roi
+- Low activity + tightly clustered to one time of day → can have high R_roi
 
 #### Phase Relationships
 
@@ -1516,51 +1542,50 @@ Convert to clock time (hours from recording start, modulo period T). ROIs are bi
 #### Example Results
 
 ```
-ROI Phase Clusters:
+ROI Phase Clusters (dominant period T = 24 h):
 
-  Early Active: 3 ROIs (synchronized)
-    ROI 1: Peak at 1.5h (amplitude: 25.94)
-    ROI 2: Peak at 1.6h (amplitude: 102.72)
-    ROI 3: Peak at 1.6h (amplitude: 61.97)
+  Early Active (ZT 0–6 h): 3 ROIs
+    ROI 1: Peak at ZT 2.1 h  (R_roi = 0.41)
+    ROI 2: Peak at ZT 3.5 h  (R_roi = 0.62)
+    ROI 3: Peak at ZT 4.2 h  (R_roi = 0.48)
 
-  Late Active: 3 ROIs (synchronized, anti-phase to early)
-    ROI 4: Peak at 3.1h (amplitude: 16.17)
-    ROI 5: Peak at 3.2h (amplitude: 86.77)
-    ROI 6: Peak at 3.3h (amplitude: 11.54)
+  Late Active (ZT 12–18 h): 3 ROIs (anti-phase to early)
+    ROI 4: Peak at ZT 14.0 h (R_roi = 0.27)
+    ROI 5: Peak at ZT 14.8 h (R_roi = 0.55)
+    ROI 6: Peak at ZT 15.6 h (R_roi = 0.19)
+
+Population R_pop = 0.84 (across the 6 per-ROI phase vectors)
 ```
 
 **Interpretation**:
-- ROI 2: Highest amplitude (102.72) → most regular 3.2h rhythm
-- ROI 6: Lowest amplitude (11.54) → weakest/most irregular rhythm
-- Two groups are ~1.6h apart in 3.2h cycle → anti-phase relationship
+- ROI 2: Highest R_roi (0.62) → activity tightly concentrated around its 3.5 h peak
+- ROI 6: Lowest R_roi (0.19) → activity spread across the day, weak rhythm despite a nominal Late-active assignment
+- Two groups are ~12 h apart in a 24 h cycle → anti-phase relationship
+- Population R_pop = 0.84 → individuals are reasonably synchronised within each group, but the two groups pull the resultant down from 1.0
 
 ### Activity vs Rhythmicity
 
-This is a critical distinction:
+R_roi separates *when* activity happens from *how much* activity there is:
 
-**High Activity, High Rhythmicity (e.g., ROI 2)**:
-- Frequent movement
-- Very regular timing
-- High amplitude in phase plot
-- **Example**: Animal that moves consistently every 3.2 hours
+**High Activity, High Rhythmicity**:
+- Frequent movement, always around the same time of day
+- High R_roi (> 0.6)
+- *Example*: animal with strong, consistent dusk-active behaviour
 
-**High Activity, Low Rhythmicity (e.g., ROI 3)**:
-- Very frequent movement
-- Irregular timing
-- Moderate amplitude
-- **Example**: Hyperactive animal with no clear rhythm
+**High Activity, Low Rhythmicity**:
+- Very frequent movement, but scattered across the day
+- Low R_roi (< 0.3)
+- *Example*: hyperactive animal with no clear circadian gating
 
-**Low Activity, High Rhythmicity (e.g., ROI 5)**:
-- Infrequent movement
-- Very regular timing
-- High amplitude
-- **Example**: Calm animal with strong circadian clock
+**Low Activity, High Rhythmicity**:
+- Infrequent movement, but tightly clustered to one short window
+- High R_roi (> 0.6)
+- *Example*: calm animal with a brief, well-timed activity burst
 
-**Low Activity, Low Rhythmicity (e.g., ROI 6)**:
-- Infrequent movement
-- Irregular timing
-- Low amplitude
-- **Example**: Sick, stressed, or arrhythmic animal
+**Low Activity, Low Rhythmicity**:
+- Infrequent movement, irregular timing
+- Low R_roi (< 0.2)
+- *Example*: sick, stressed, or arrhythmic animal
 
 ### Advantages
 
@@ -1591,40 +1616,30 @@ This is a critical distinction:
 
 ### Limitations
 
-⚠️ **Requires Known Period**
-- Must use predetermined dominant period from Chi²/FFT
-- Cannot detect periods; only analyzes timing at known period
-- Not suitable for exploratory period finding
+⚠️ **Requires a Specified Period**
+- The time-of-day folding requires a dominant period T (set in the GUI; typically 24 h)
+- Phase clustering does not *detect* periods — confirm T with Chi² periodogram or FFT first
+- Wrong T → folded angle is wrong → phase and clusters are meaningless
 
 ⚠️ **Single-Period Assumption**
-- Assumes all ROIs oscillate at same period
-- Mixed periods (e.g., 20h and 24h) produce meaningless clusters
-- Phase is undefined for arrhythmic or multi-period signals
+- Assumes all ROIs oscillate at the same period
+- Mixed-period datasets (e.g. 20 h and 24 h together) produce meaningless quadrants
+- Phase is poorly defined for arrhythmic or multi-period signals (R_roi will be low — use that as a flag)
 
-⚠️ **Hilbert Transform Sensitivity**
-- Requires bandpass filtering around target frequency
-- Sensitive to filter bandwidth selection
-- Can introduce artifacts for non-sinusoidal waveforms
-
-⚠️ **Amplitude Interpretation**
-- Amplitude is abstract (not in physical units)
-- Relative values matter, absolute values are arbitrary
-- Cannot compare amplitudes across different datasets/experiments
-
-⚠️ **Phase Wrapping**
-- Phase is circular (0° = 360°)
-- Statistical analysis of phase requires circular statistics
-- Mean phase can be misleading with wide distributions
+⚠️ **No Formal Significance Test for R**
+- R_roi and R_pop are descriptive concentration metrics, not p-values
+- Low R may reflect arrhythmicity *or* a non-sinusoidal but otherwise rhythmic profile
+- Use Chi² periodogram or Cosinor for formal rhythmicity tests; use Phase Clustering for timing
 
 ⚠️ **Snapshot Limitation**
-- Provides single average phase over entire recording
-- Cannot detect changes in phase relationships over time
-- Transient synchronization is averaged out
+- Returns a single mean phase per ROI over the whole recording
+- Transient synchronisation (only synchronised for part of the recording) is averaged in
+- For time-resolved phase, run the analysis on sliding windows separately
 
-⚠️ **Clustering Threshold**
-- Phase threshold (e.g., 45°) is somewhat arbitrary
-- Different thresholds produce different cluster assignments
-- May over- or under-split natural behavioral groups
+⚠️ **Fixed Quadrant Boundaries**
+- Quadrant assignments use hard cutoffs at T/4, T/2, 3T/4
+- Two ROIs with very similar phases (e.g. ZT 11.9 h and ZT 12.1 h) land in different quadrants
+- Treat quadrant labels as coarse summaries; use the raw phase value for fine comparisons
 
 ### When to Use
 
@@ -1645,30 +1660,29 @@ This is a critical distinction:
 ### Best Practices
 
 1. **Period Selection**:
-   - **Always** use dominant period from Chi² periodogram or FFT analysis first
-   - Verify all ROIs share similar period before phase clustering
-   - Don't use phase clustering for exploratory period detection
-   - Consider separate analyses if ROIs have different periods
+   - **Always** verify the dominant period with Chi² periodogram or FFT before phase clustering
+   - Verify all ROIs share similar period; if not, analyse subgroups separately
+   - Phase clustering does not detect periods — use it for *timing*, not *detection*
 
 2. **Interpretation**:
-   - **Critical**: Amplitude measures rhythm strength, NOT activity level
-   - High activity + irregular = moderate amplitude
-   - Low activity + regular = can have high amplitude
-   - Phase clustering is most reliable when all ROIs share same period
-   - Mixed periods can produce misleading clusters
+   - **Critical**: R_roi measures rhythm *concentration*, NOT activity *level*
+   - High activity + irregular timing → low R_roi
+   - Low activity + tightly timed bursts → can have high R_roi
+   - Phase_hours is the activity-weighted centroid in time-of-day, comparable to (but not identical to) the cosinor peak time
+   - Cross-validate: phase_hours should land near the cosinor acrophase; large disagreements flag non-sinusoidal profiles or weak rhythms
 
 3. **Biological Meaning**:
-   - Synchronized phases (Δφ < 45°) → Social coordination, shared zeitgeber
-   - Anti-phase (Δφ ≈ 180°) → Competition, resource partitioning, territoriality
-   - Wide phase distribution → Individual differences, weak coupling, multiple zeitgebers
-   - High amplitude → Strong circadian clock, robust rhythm
-   - Low amplitude → Weak clock, sick/stressed, arrhythmic
+   - Synchronised phases (Δφ small) → social coordination, shared zeitgeber
+   - Anti-phase (Δφ ≈ 180°) → competition, resource partitioning, territoriality
+   - Wide phase distribution → individual differences, weak coupling, multiple zeitgebers
+   - High R_pop → coherent population rhythm
+   - Low R_pop → desynchronised population (even if individual R_roi are high)
 
 4. **Validation**:
-   - Cross-check clusters with similarity matrix
+   - Compare per-ROI phase_hours against the cosinor acrophase (independent estimator)
    - Verify period consistency with Chi²/FFT
-   - Consider biological context (social species, group housing)
-   - Use circular statistics for phase averaging and variance
+   - Use the similarity matrix and coherence to confirm pairwise synchronisation
+   - Consider biological context (social species, group housing, zeitgeber strength)
 
 ---
 
@@ -2136,8 +2150,12 @@ Fourier Transform (FFT) power spectrum analysis with Hann windowing.
 
 Synchronization between animals was assessed using cross-correlation
 analysis (maximum lag: 12 hours) and coherence analysis (Welch's
-method, 256-sample segments, 50% overlap). Phase relationships were
-quantified using Hilbert transform-based phase clustering.
+method, Hann window, segment length set to one full target period,
+50% overlap, Bonferroni-corrected significance threshold). Per-ROI
+peak-activity timing was quantified by the activity-weighted circular
+mean of time-of-day, with population synchrony reported as the resultant
+length R_pop across the individual phase vectors. Pairwise phase
+locking values (PLV) were derived from Hilbert phase differences.
 
 Data were binned to 60-second intervals prior to analysis. Only ROIs
 showing significant circadian rhythms (Chi² periodogram, Sokolove &
@@ -2188,11 +2206,15 @@ indicate dominant periods. All ROIs showed significant circadian rhythms
 **Phase Clustering**:
 ```
 Figure 3. Phase relationships of circadian activity.
-Polar plot showing instantaneous phase and amplitude for each ROI
-(n = 6 animals). Radial distance represents rhythmic amplitude
-(strength of oscillation), angular position represents phase
-(timing of peak activity within 24h cycle). Colors correspond to
-individual ROIs. Two distinct clusters are evident: early active
+Polar plot showing per-ROI mean activity phase (angular position;
+clockwise from ZT 0 at top) and resultant length R_roi ∈ [0, 1]
+(radial distance, rhythm concentration) for each animal (n = 6).
+Per-ROI phase is the activity-weighted circular mean of time-of-day
+within one 24 h cycle. Background sectors mark light (yellow) and
+dark (gray) phases. The black population-mean vector has length
+mean(R_roi) × R_pop and is labelled with R_pop and mean phase in
+hours. Colors correspond to individual ROIs. Two distinct clusters
+are evident: early active
 (0°, ROIs 1-3) and late active (180°, ROIs 4-6).
 ```
 
@@ -2368,6 +2390,13 @@ Please include:
 ---
 
 ## Changelog
+
+### Version 1.3 (2026 — Phase Clustering correctness fix)
+- **Phase Clustering (per-ROI)**: replaced the Hilbert circular-mean phase estimator with an activity-weighted circular mean of time-of-day. The previous method dwelt on the trough of the activity signal (because activity data spend most of their time near the minimum), forcing all ROIs to ~12 h regardless of true peak timing and inflating the population resultant length to an artefactual ~0.98. The new method points to when the animal is actually active, makes no waveform assumption, and yields per-ROI resultant lengths R_roi ∈ [0, 1] reflecting real rhythm concentration.
+- **Polar plot**: removed compensating "+ π" shift (no longer needed once the phase is correct); fixed population-mean hour label which had been reading the period from the chi² spinboxes instead of the phase-clustering target period; added light/dark sector shading (yellow / gray) using LED telemetry when available.
+- **PLV (pairwise)**: unchanged — Hilbert phase differences are not affected by the trough bias.
+- **Similarity**: cross-correlation formula corrected to show unbiased normalisation (n − |τ| denominator, matching the code); cluster threshold description now consistently states the GUI-slider value (default r = 0.5).
+- **Coherence**: corrected "default 256 samples" claim — `nperseg` is adaptive, equal to one full target period in samples.
 
 ### Version 1.2 (2025 — refactor/widget-split-zarr-support)
 - Population cosinor: replaced Rayleigh test with Nelson et al. (1979) F-test: F(dfn=2, dfd=2(n−1))

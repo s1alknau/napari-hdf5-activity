@@ -90,7 +90,7 @@ Detailed documentation for advanced features and workflows:
   - Cosinor Analysis (Nelson F-test for population)
   - ROI Similarity Matrix (Bonferroni-corrected pairwise t-test)
   - Coherence Analysis (Welch, Bonferroni-corrected)
-  - Phase Clustering (descriptive, PLV heuristics)
+  - Phase Clustering (activity-weighted circular mean of time-of-day; pairwise PLV)
   - Scientific rationale and best practices
 
 ### File Format Support
@@ -137,7 +137,7 @@ Detailed documentation for advanced features and workflows:
   - **Cosinor Analysis**: amplitude, MESOR, and acrophase with Nelson et al. (1979) population F-test
   - **ROI Similarity Matrix**: pairwise cross-correlation with Bonferroni-corrected t-test and hierarchical clustering
   - **Coherence Analysis**: Welch magnitude-squared coherence with Bonferroni correction
-  - **Phase Clustering**: Hilbert-transform phase extraction with PLV (descriptive)
+  - **Phase Clustering**: activity-weighted circular mean of time-of-day per ROI with population resultant length R; pairwise PLV via Hilbert phase differences; polar plot with light/dark sector shading
   - Configurable period range (0-100 hours)
   - Visual plots for all ROIs
 - **Frame Viewer**: Interactive dataset playback with export capabilities
@@ -167,6 +167,7 @@ Detailed documentation for advanced features and workflows:
 - **Recording duration fix**: Bin size is added to the duration estimate so that 72-hour recordings are recognized correctly rather than appearing as 71.x hours
 - **Cycle-count warnings**: Warnings about too few cycles for analysis are logged only — they no longer appear as overlaid text on plots
 - **Population cosinor**: Rayleigh test replaced by the Nelson et al. (1979) F-test: F(dfn=2, dfd=2(n−1))
+- **Phase clustering**: per-ROI mean phase replaced by an activity-weighted circular mean of time-of-day. The previous Hilbert circular-mean estimator was biased toward the activity trough (signals dwell near their minimum), forcing all ROIs to ~12 h regardless of true peak timing and giving an artefactual population R ≈ 0.98. The new method points to when the animal is actually active, makes no waveform assumption, and yields per-ROI resultant lengths R ∈ [0, 1] that reflect real rhythm concentration. The compensating "+ π" shift in the polar plot has been removed; the polar plot now also shades light/dark sectors (from LED telemetry if available, else 12:12 default), and the population-mean hour label uses the same period the phases were computed with (not the chi² periodogram range). Pairwise PLV is unchanged
 
 ### Major Features Added
 - **Jump Correction for Time-Series Preprocessing**: Automatically detect and correct sudden signal jumps caused by equipment vibrations or external disturbances
