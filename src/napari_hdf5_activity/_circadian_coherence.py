@@ -35,8 +35,9 @@ Recommended settings:
 ─────────────────────────────────────────────────────
 Phase Clustering  (detect_phase_clusters)
 ─────────────────────────────────────────────────────
-Estimates each ROI's mean activity phase via the Hilbert transform and groups
-ROIs into four temporal clusters relative to recording start (ZT 0 = start):
+Estimates each ROI's mean activity phase as the activity-weighted circular
+mean of time-of-day, then groups ROIs into four temporal clusters relative
+to recording start (ZT 0 = start):
 
   early_active : ZT  0– 6 h
   mid_active   : ZT  6–12 h
@@ -47,14 +48,17 @@ dominant_period_hours = (min_period + max_period) / 2 (from GUI).
 
 Algorithm:
   1. Re-bin signal to bin_size_seconds.
-  2. Subtract mean, apply Hilbert transform.
-  3. Compute circular mean of instantaneous phase → mean_phase (radians).
-  4. Convert to hours: phase_h = (mean_phase / 2π) × dominant_period mod period.
-  5. Assign to one of the four quadrant clusters.
+  2. Weight each timepoint by its activity (value above the recording min).
+  3. Sum activity-weighted unit vectors at each timepoint's time-of-day
+     angle → resultant vector V.
+  4. phase = arg(V); phase_h = (phase / 2π) × dominant_period mod period.
+  5. Per-ROI resultant length R = |V| / Σ weights (rhythm concentration).
+  6. Assign to one of the four quadrant clusters.
 
-⚠ Hilbert transform captures ALL frequencies (no bandpass filter). Phase
-  estimates are reliable only when the target rhythm is strong and dominant.
-  Use Chi² or FFT first to confirm that a clear rhythm exists.
+The activity weighting makes the phase point to when the animal is actually
+active, with no waveform assumption. A plain Hilbert circular-mean phase is
+biased toward the trough — activity signals dwell near their minimum — so it
+is not used here. Use Chi² or FFT first to confirm a clear rhythm exists.
 
 ⚠ Period range midpoint must equal the target period (same as Coherence).
 
@@ -410,16 +414,26 @@ def detect_phase_clusters(
         if bin_size_seconds:
             values, _ = _bin_data(times, values, bin_size_seconds)
 
-        # Calculate phase using Hilbert transform
-        analytic_signal = signal.hilbert(values - np.mean(values))
-        instantaneous_phase = np.angle(analytic_signal)
-
-        # Mean phase (circular mean)
-        mean_phase = np.arctan2(
-            np.mean(np.sin(instantaneous_phase)), np.mean(np.cos(instantaneous_phase))
+        # Time-of-day angle (hours from recording start, folded to one period)
+        if bin_size_seconds:
+            t_rel = (np.arange(len(values)) + 0.5) * bin_size_seconds
+        else:
+            t_rel = times - times[0]
+        theta = (
+            2 * np.pi * ((t_rel / 3600.0) % dominant_period_hours)
+            / dominant_period_hours
         )
 
-        # Convert to hours (peak activity time)
+        # Activity-weighted circular mean: quiescent periods carry no weight,
+        # so the resultant points to when the animal is actually active.
+        weights = values - np.min(values)
+        weight_sum = np.sum(weights)
+        if weight_sum <= 0:
+            continue
+        vx = np.sum(weights * np.cos(theta))
+        vy = np.sum(weights * np.sin(theta))
+        mean_phase = np.arctan2(vy, vx)
+
         phase_hours = (
             (mean_phase / (2 * np.pi)) * dominant_period_hours
         ) % dominant_period_hours
@@ -427,7 +441,7 @@ def detect_phase_clusters(
         roi_phases[roi_id] = {
             "phase_radians": mean_phase,
             "phase_hours": phase_hours,
-            "amplitude": np.mean(np.abs(analytic_signal)),
+            "amplitude": float(np.hypot(vx, vy) / weight_sum),
         }
 
     # Cluster ROIs by phase (simple binning into 4 quadrants)

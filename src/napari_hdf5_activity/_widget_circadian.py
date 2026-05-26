@@ -3887,9 +3887,7 @@ class CircadianMixin:
                     else f"C{idx}"
                 )
 
-                theta = (phase_info["phase_radians"] + np.pi) % (
-                    2 * np.pi
-                )  # Adjust for polar plot
+                theta = phase_info["phase_radians"] % (2 * np.pi)
                 r = phase_info["amplitude"]
                 ax.plot(
                     [theta, theta],
@@ -3918,7 +3916,7 @@ class CircadianMixin:
             )
             if has_population and len(roi_phases_filtered) >= 2:
                 thetas = np.array([
-                    (v["phase_radians"] + np.pi) % (2 * np.pi)
+                    v["phase_radians"] % (2 * np.pi)
                     for v in roi_phases_filtered.values()
                 ])
                 amplitudes = np.array([v["amplitude"] for v in roi_phases_filtered.values()])
@@ -3934,13 +3932,32 @@ class CircadianMixin:
                 ax.scatter([mean_theta], [mean_amp], color="black", s=70,
                            edgecolor="white", linewidth=1.2, zorder=11)
 
-                # Convert mean phase back to hours
-                target_period = (self.fisher_min_period.value() + self.fisher_max_period.value()) / 2.0
+                # Convert mean phase back to hours, using the same period the
+                # phases were computed with (not the chi² periodogram range).
+                target_period = phase_results.get("dominant_period_hours", 24.0)
                 mean_phase_h = (mean_theta / (2 * np.pi)) * target_period
                 ax.text(mean_theta, mean_amp * 1.12,
                         f"R={R:.2f}\n{mean_phase_h:.1f}h",
                         ha="center", va="bottom", fontsize=9, fontweight="bold",
                         color="black")
+
+            # --- Light/dark phase background sectors ---
+            period_h = phase_results.get("dominant_period_hours", 24.0)
+            led = getattr(self, "led_data", None)
+            light_h = period_h / 2.0
+            if isinstance(led, dict) and led.get("white_powers"):
+                wp = np.asarray(led["white_powers"], dtype=float)
+                if wp.size:
+                    light_h = float(np.mean(wp > 0.5)) * period_h
+            r_outer = ax.get_ylim()[1]
+            split = 2 * np.pi * light_h / period_h
+            ax.fill_between(np.linspace(0, split, 64), 0, r_outer,
+                            color="yellow", alpha=0.20, zorder=0,
+                            label=f"Light (ZT 0–{light_h:.0f} h)")
+            ax.fill_between(np.linspace(split, 2 * np.pi, 64), 0, r_outer,
+                            color="gray", alpha=0.18, zorder=0,
+                            label=f"Dark (ZT {light_h:.0f}–{period_h:.0f} h)")
+            ax.set_ylim(0, r_outer)
 
             # Get data source for plot title
             data_source_index = self.data_source_combo.currentIndex()
