@@ -16,6 +16,20 @@ from typing import Dict, Any, Optional
 import json
 
 
+def _hdf5_safe(value):
+    """Convert a value to something h5py can store as an attribute.
+    None → empty string; lists/tuples → numpy array; everything else unchanged.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        arr = np.array(value)
+        if arr.dtype.kind == "O":
+            return json.dumps(value)
+        return arr
+    return value
+
+
 def save_comprehensive_results(
     file_path: str,
     core_results: Dict[str, Any],
@@ -441,13 +455,13 @@ def save_comprehensive_results(
                 if "core" in analysis_params:
                     core_params = params_group.create_group("core")
                     for key, value in analysis_params["core"].items():
-                        core_params.attrs[key] = value
+                        core_params.attrs[key] = _hdf5_safe(value)
 
                 # Extended analysis parameters
                 if "extended" in analysis_params:
                     extended_params = params_group.create_group("extended")
                     for key, value in analysis_params["extended"].items():
-                        extended_params.attrs[key] = value
+                        extended_params.attrs[key] = _hdf5_safe(value)
 
             # ================================================================
             # 4. METADATA
