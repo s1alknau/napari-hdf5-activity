@@ -1685,7 +1685,10 @@ import logging
 try:
     import cupy as cp
     _CUPY_AVAILABLE = True
-except ImportError:
+except Exception:
+    # Catches ImportError when CuPy is not installed, plus RuntimeError /
+    # OSError when CuPy is installed but its CUDA DLLs fail to load
+    # (e.g. cublasLt mismatch, missing driver in a multiprocessing worker).
     cp = None
     _CUPY_AVAILABLE = False
 
