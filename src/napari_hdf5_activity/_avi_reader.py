@@ -421,7 +421,7 @@ def _process_single_video_streaming(
     gpu_masks = prepare_masks_for_gpu(masks)
 
     video_name = Path(video_path).name
-    print(f"  → [{video_idx + 1}] Starting {video_name}...", flush=True)
+    print(f"  -> [{video_idx + 1}] Starting {video_name}...", flush=True)
 
     try:
         with AVIVideoReader(video_path) as reader:
@@ -439,7 +439,7 @@ def _process_single_video_streaming(
             # H.264 random seeks are expensive (keyframe decode per seek); reading
             # sequentially with grab() skips non-target frames at near-zero cost.
             # Peak per worker: total_sampled × H × W × 1 byte (uint8).
-            print(f"  → [{video_idx + 1}] {video_name}: loading {total_sampled} frames...", flush=True)
+            print(f"  -> [{video_idx + 1}] {video_name}: loading {total_sampled} frames...", flush=True)
             all_frames = reader.get_frames_sequential(frame_indices)
 
             first_frame_gray: Optional[np.ndarray] = None
@@ -457,7 +457,7 @@ def _process_single_video_streaming(
             for chunk_idx in range(num_chunks):
                 if chunk_idx > 0 and chunk_idx % report_every == 0:
                     pct = int(100 * chunk_idx / num_chunks)
-                    print(f"  → [{video_idx + 1}] {video_name}: {pct}% ({chunk_idx}/{num_chunks} chunks)", flush=True)
+                    print(f"  -> [{video_idx + 1}] {video_name}: {pct}% ({chunk_idx}/{num_chunks} chunks)", flush=True)
                 chunk_start = chunk_idx * chunk_size
                 chunk_end = min(chunk_start + chunk_size, total_sampled)
                 chunk_frame_indices = frame_indices[chunk_start:chunk_end]
@@ -616,7 +616,7 @@ def process_avi_batch_streaming(
     if not valid_video_indices:
         raise ValueError("No valid videos found during metadata scan")
 
-    print(f"  → {len(valid_video_indices)} valid videos, total duration {current_offset:.1f}s")
+    print(f"  -> {len(valid_video_indices)} valid videos, total duration {current_offset:.1f}s")
 
     # Worker count for Phase 2 is I/O-bound, not CPU-bound.
     # H.264/MP4 seeking requires decoding from the nearest keyframe — concurrent
@@ -672,10 +672,10 @@ def process_avi_batch_streaming(
 
             video_name = Path(video_paths[video_idx]).name
             if error_msg:
-                print(f"  ✗ [{video_idx + 1}] {video_name}: {error_msg}", flush=True)
+                print(f"  [FAIL] [{video_idx + 1}] {video_name}: {error_msg}", flush=True)
             else:
                 frames = v_metadata["sampled_frames"] if v_metadata else 0
-                print(f"  ✓ [{video_idx + 1}] {video_name}: {frames} frames", flush=True)
+                print(f"  [ok] [{video_idx + 1}] {video_name}: {frames} frames", flush=True)
 
     # ------------------------------------------------------------------
     # Phase 3: Merge results in temporal order + cross-video boundary diffs
@@ -737,7 +737,7 @@ def process_avi_batch_streaming(
     if progress_callback:
         progress_callback(100, "Analysis complete")
 
-    print("\n✓ Streaming analysis complete:")
+    print("\n[ok] Streaming analysis complete:")
     print(f"  Videos processed: {len(combined_metadata['videos'])}")
     print(f"  Frames analyzed: {total_frames_processed}")
     print(f"  Total duration: {current_offset:.1f}s ({current_offset / 60:.1f} min)")
@@ -818,7 +818,7 @@ def load_avi_batch_timeseries(
             scan_results[idx_result] = (metadata, error_msg)
 
             if error_msg:
-                print(f"  ✗ Video {idx_result + 1}: {error_msg}")
+                print(f"  [FAIL] Video {idx_result + 1}: {error_msg}")
             else:
                 print(
                     f"  ✓ Video {idx_result + 1}: {metadata['name']} ({metadata['sampled_frames']} frames)"
@@ -853,7 +853,7 @@ def load_avi_batch_timeseries(
     print("\nScan complete:")
     print(f"  Videos to process: {len(all_video_metadata)}")
     print(f"  Total frames: {total_frame_count}")
-    print(f"  Frame size: {frame_height} × {frame_width}")
+    print(f"  Frame size: {frame_height} x {frame_width}")
     print(
         f"  Memory required: ~{(total_frame_count * frame_height * frame_width) / (1024**3):.1f} GB"
     )
@@ -912,9 +912,9 @@ def load_avi_batch_timeseries(
                 chunk_results[idx_result] = (metadata, frames_with_idx, error_msg)
 
                 if error_msg:
-                    print(f"  ✗ Video {idx_result + 1}: {error_msg}")
+                    print(f"  [FAIL] Video {idx_result + 1}: {error_msg}")
                 else:
-                    print(f"  ✓ Video {idx_result + 1}: {metadata['name']}")
+                    print(f"  [ok] Video {idx_result + 1}: {metadata['name']}")
 
         # Write frames to memory-mapped array in order
         for video_idx in sorted(chunk_results.keys()):

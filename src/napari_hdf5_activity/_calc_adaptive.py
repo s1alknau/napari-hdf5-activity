@@ -204,7 +204,7 @@ def compute_threshold_adaptive_hysteresis(
     print(f"    Baseline: {baseline_mean:.1f}")
     print(f"    Upper: {upper_threshold:.1f}")
     print(f"    Lower: {lower_threshold:.1f}")
-    print(f"    Band width: ±{threshold_band:.1f}")
+    print(f"    Band width: +/-{threshold_band:.1f}")
 
     # Compile statistics with information about dataset usage
     statistics = {
@@ -279,7 +279,7 @@ def run_adaptive_analysis(
     Returns:
         Complete analysis results dictionary
     """
-    print("🚀 RUNNING ADAPTIVE ANALYSIS (REUSING BASELINE PIPELINE)")
+    print(">>> RUNNING ADAPTIVE ANALYSIS (REUSING BASELINE PIPELINE)")
     print("=" * 60)
 
     # Import all the common functions from _calc.py
@@ -309,7 +309,7 @@ def run_adaptive_analysis(
     }
 
     # Step 1: Apply IDENTICAL preprocessing as baseline method
-    print("📊 Step 1: Applying preprocessing (same as baseline)...")
+    print("[*] Step 1: Applying preprocessing (same as baseline)...")
 
     if enable_matlab_norm:
         normalized_data = apply_matlab_normalization_to_merged_results(merged_results)
@@ -343,13 +343,13 @@ def run_adaptive_analysis(
     roi_active = check_roi_activity(normalized_data)
     inactive_count = sum(1 for active in roi_active.values() if not active)
     if inactive_count > 0:
-        print(f"  ⚠️ {inactive_count} inactive ROI(s) detected (low amplitude)")
+        print(f"  ! {inactive_count} inactive ROI(s) detected (low amplitude)")
 
     analysis_results["processed_data"] = processed_data
     analysis_results["roi_active"] = roi_active
 
     # Step 2: ONLY DIFFERENT PART - Adaptive threshold calculation
-    print("📊 Step 2: Computing ADAPTIVE thresholds...")
+    print("[*] Step 2: Computing ADAPTIVE thresholds...")
 
     # Convert duration to frames
     analysis_duration_frames = int((adaptive_duration_minutes * 60) / frame_interval)
@@ -412,7 +412,7 @@ def run_adaptive_analysis(
     )
 
     # Step 3-6: IDENTICAL to baseline method - reuse all functions
-    print("📊 Step 3: Movement detection (same hysteresis as baseline)...")
+    print("[*] Step 3: Movement detection (same hysteresis as baseline)...")
     movement_data = define_movement_with_hysteresis(
         processed_data, baseline_means, upper_thresholds, lower_thresholds
     )
@@ -431,7 +431,7 @@ def run_adaptive_analysis(
     analysis_results["lower_thresholds_raw"] = lower_thresholds
 
     # Apply MinMax normalization for display (post-movement-detection)
-    print("📊 Applying MinMax normalization for display...")
+    print("[*] Applying MinMax normalization for display...")
     norm_processed, norm_baselines, norm_upper, norm_lower = (
         apply_minmax_normalization(
             processed_data, baseline_means, upper_thresholds, lower_thresholds, roi_active
@@ -442,7 +442,7 @@ def run_adaptive_analysis(
     analysis_results["upper_thresholds"] = norm_upper
     analysis_results["lower_thresholds"] = norm_lower
 
-    print("📊 Step 4: Behavioral analysis (same as baseline)...")
+    print("[*] Step 4: Behavioral analysis (same as baseline)...")
     bin_size_seconds = kwargs.get("bin_size_seconds", 60)
     fraction_data = bin_fraction_movement(
         movement_data, bin_size_seconds, frame_interval
@@ -472,11 +472,11 @@ def run_adaptive_analysis(
     analysis_results["roi_colors"] = roi_colors
 
     # Generate adaptive summary
-    print("📊 Step 5: Generating adaptive analysis summary...")
+    print("[*] Step 5: Generating adaptive analysis summary...")
     summary_stats = _generate_adaptive_summary(roi_statistics)
     analysis_results["summary_stats"] = summary_stats
 
-    print("✅ ADAPTIVE ANALYSIS COMPLETE (consistent with baseline)")
+    print("[OK] ADAPTIVE ANALYSIS COMPLETE (consistent with baseline)")
     print("=" * 60)
 
     return analysis_results

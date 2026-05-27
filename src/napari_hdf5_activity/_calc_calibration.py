@@ -99,7 +99,7 @@ def run_calibration_analysis_with_precomputed_baseline(
     roi_active = check_roi_activity(normalized_data)
     inactive_count = sum(1 for active in roi_active.values() if not active)
     if inactive_count > 0:
-        print(f"  ⚠️ {inactive_count} inactive ROI(s) detected (low amplitude)")
+        print(f"  ! {inactive_count} inactive ROI(s) detected (low amplitude)")
 
     analysis_results["processed_data"] = processed_data
     analysis_results["roi_active"] = roi_active
