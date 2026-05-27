@@ -1682,6 +1682,13 @@ import numpy as np
 
 import logging
 
+try:
+    import cupy as cp
+    _CUPY_AVAILABLE = True
+except ImportError:
+    cp = None
+    _CUPY_AVAILABLE = False
+
 # Enhanced import handling with fallbacks
 try:
     import cv2
@@ -3342,14 +3349,25 @@ def detect_circles_and_create_masks(
 # =============================================================================
 
 
+def prepare_masks_for_gpu(masks: List[np.ndarray]) -> List:
+    """Transfer boolean masks to GPU once before processing multiple chunks.
+    Returns CuPy arrays when CuPy is available, numpy arrays otherwise.
+    Call this once per video, then pass the result to every process_chunk call.
+    """
+    if not _CUPY_AVAILABLE:
+        return masks
+    return [cp.asarray(m) for m in masks]
+
+
 def process_chunk(
     chunk_data: np.ndarray,
-    masks: List[np.ndarray],
+    masks: List,
     start_time: float,
     frame_interval: float = 5,
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Enhanced chunk processing - now expects grayscale input data.
+    Uses CuPy (GPU) automatically when available and masks are pre-transferred.
     """
     roi_changes = {roi_idx + 1: [] for roi_idx in range(len(masks))}
 
@@ -3361,29 +3379,20 @@ def process_chunk(
             f"Processing chunk shape: {chunk_data.shape}, dtype: {chunk_data.dtype}"
         )
 
-        # Normalize entire stack to float32 in one vectorized operation.
-        # chunk_data is already grayscale from read_chunk_data_dual_structure;
-        # no copy needed — normalize_image_to_float32 always creates a new array.
-        try:
-            normalized_frames = normalize_image_to_float32(
-                chunk_data, target_range=(0.0, 1.0)
-            )
-            del chunk_data  # free raw input now that float32 is ready
-        except MemoryError:
-            # Not enough contiguous RAM for full float32 stack — split into two halves
-            n = len(chunk_data)
-            half = n // 2
-            if half < 2:
-                raise
-            logger.warning(
-                f"MemoryError normalizing chunk (shape {chunk_data.shape}) "
-                f"— splitting into two halves and merging"
-            )
-            r1 = process_chunk(chunk_data[:half], masks, start_time, frame_interval)
-            r2 = process_chunk(chunk_data[half:], masks, start_time + half * frame_interval, frame_interval)
-            for roi_id in r1:
-                r1[roi_id].extend(r2.get(roi_id, []))
-            return r1
+        # Use CuPy (GPU) if masks were pre-transferred via prepare_masks_for_gpu(),
+        # otherwise fall back to NumPy. GPU path avoids per-ROI round-trips by
+        # keeping the frame buffer on the GPU for all ROIs in this chunk.
+        use_gpu = _CUPY_AVAILABLE and len(masks) > 0 and isinstance(masks[0], cp.ndarray)
+        xp = cp if use_gpu else np
+
+        # Convert to int16 to compute frame diffs without uint8 wrap-around.
+        # int16 costs 2 bytes/pixel vs float32's 4 — peak memory is halved.
+        # Division by 255 is deferred to the final scalar divide so the output
+        # values remain identical to the previous float32 normalization path.
+        frames_xp = xp.asarray(chunk_data, dtype=xp.int16)
+        del chunk_data
+
+        frame_shape = frames_xp.shape[1:]
 
         # === ROI Processing — fully vectorized, no Python loops over frames ===
         for roi_idx, mask in enumerate(masks, start=1):
@@ -3394,23 +3403,26 @@ def process_chunk(
 
                 mask_bool = mask > 0
 
-                if mask_bool.shape != normalized_frames.shape[1:]:
+                if mask_bool.shape != frame_shape:
                     logger.error(
-                        f"Mask shape {mask_bool.shape} != frame shape {normalized_frames.shape[1:]}"
+                        f"Mask shape {mask_bool.shape} != frame shape {frame_shape}"
                     )
                     continue
 
-                n_pixels = int(np.sum(mask_bool))
+                n_pixels = int(xp.sum(mask_bool))
                 if n_pixels == 0:
                     logger.warning(f"ROI {roi_idx} has 0 pixels in mask")
                     continue
 
-                # VECTORIZED: extract only the masked pixels for all frames at once.
-                # roi_frames shape: (N, n_pixels) — only ~5% of frame data for a well.
-                # This is far more memory-efficient than computing a full H×W diff first.
-                roi_frames = normalized_frames[:, mask_bool]          # (N, n_pixels)
-                diffs      = np.abs(np.diff(roi_frames, axis=0))      # (N-1, n_pixels)
-                roi_intensities = diffs.sum(axis=1) / n_pixels        # (N-1,)
+                # Extract masked pixels, diff, sum — all in int16/float32.
+                # Stored value is the per-pixel mean in [0,1]: sum / (n_pixels * 255).
+                # The GUI "÷ ROI pixel count" checkbox shows this as-is (per-pixel mode)
+                # or multiplies by n_pixels * 255 for MATLAB-equivalent pixel sum.
+                roi_pixels = frames_xp[:, mask_bool]                                          # (N, n_pixels) int16
+                diffs      = xp.abs(xp.diff(roi_pixels, axis=0))                              # (N-1, n_pixels) int16
+                roi_intensities_xp = diffs.sum(axis=1, dtype=xp.float32) / (n_pixels * 255.0) # (N-1,) in [0,1]
+
+                roi_intensities = roi_intensities_xp.get() if use_gpu else roi_intensities_xp
 
                 time_array = start_time + frame_interval * np.arange(len(roi_intensities))
                 roi_changes[roi_idx] = list(zip(time_array, roi_intensities.tolist()))
