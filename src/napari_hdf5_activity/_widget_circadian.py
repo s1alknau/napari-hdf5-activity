@@ -768,7 +768,10 @@ class CircadianMixin:
                         )
 
                     # Generate and display summary
-                    if method_idx == 0:  # Chi² Periodogram
+                    summary = ""
+                    if not hasattr(self, "fisher_analysis_results"):
+                        pass  # No extended results in this file — skip summary
+                    elif method_idx == 0:  # Chi² Periodogram
                         from ._fisher_analysis import generate_circadian_summary
 
                         summary = generate_circadian_summary(
