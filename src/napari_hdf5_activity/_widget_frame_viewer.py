@@ -387,21 +387,19 @@ class FrameViewerMixin:
 
         files_added = set()
 
-        # Add current HDF5 file
+        # Add current HDF5/Zarr file
         if hasattr(self, "file_path") and self.file_path and self.file_path not in files_added:
             self.viewer_file_combo.addItem(
                 os.path.basename(self.file_path), self.file_path
             )
             files_added.add(self.file_path)
 
-        # Add all AVI batch files
+        # Add AVI batch as ONE entry (not individual files)
         if hasattr(self, "avi_batch_paths") and self.avi_batch_paths:
-            for avi_path in self.avi_batch_paths:
-                if avi_path not in files_added:
-                    self.viewer_file_combo.addItem(
-                        os.path.basename(avi_path), avi_path
-                    )
-                    files_added.add(avi_path)
+            n = len(self.avi_batch_paths)
+            interval = getattr(self, "avi_batch_interval", 5.0)
+            label = f"AVI Batch ({n} videos, interval={interval:.0f}s)"
+            self.viewer_file_combo.addItem(label, "__avi_batch__")
 
         # Add HDF5 and Zarr files from directory
         if hasattr(self, "directory") and self.directory:
@@ -419,7 +417,7 @@ class FrameViewerMixin:
 
         if self.viewer_file_combo.count() > 0:
             self._log_message(
-                f"Frame Viewer: {self.viewer_file_combo.count()} file(s) available"
+                f"Frame Viewer: {self.viewer_file_combo.count()} source(s) available"
             )
 
     def _viewer_load_data(self):
@@ -428,6 +426,17 @@ class FrameViewerMixin:
         selected_path = None
         if hasattr(self, "viewer_file_combo") and self.viewer_file_combo.count() > 0:
             selected_path = self.viewer_file_combo.currentData()
+
+        # AVI batch sentinel — load all batch videos as one concatenated stream
+        if selected_path == "__avi_batch__":
+            try:
+                self._viewer_load_avi_batch()
+            except Exception as e:
+                self.viewer_status_label.setText(f"❌ Error loading AVI batch: {e}")
+                self._log_message(f"❌ Frame viewer AVI batch error: {e}")
+                import traceback
+                traceback.print_exc()
+            return
 
         # Fallback to self.file_path
         if not selected_path:
@@ -496,6 +505,10 @@ class FrameViewerMixin:
         accessed during playback without re-opening the file.
         """
         import json
+
+        # Leaving AVI batch mode
+        self._viewer_release_avi_cap()
+        self._viewer_is_avi_batch = False
 
         self._log_message(f"Loading file into frame viewer: {self.file_path}")
 
@@ -670,130 +683,100 @@ class FrameViewerMixin:
         self._viewer_show_frame(0)
 
     def _viewer_load_avi_batch(self):
-        """Load AVI batch as one continuous video (same sampling as analysis)."""
-        import numpy as np
+        """Set up AVI batch for streaming display — no frames loaded into RAM.
+
+        Scans metadata from each video (fast, no frame reading), then stores
+        a lookup table so any global frame index can be resolved to (video,
+        local_frame) on demand.  Frames are fetched one at a time when the
+        slider moves, keeping memory usage at ≈ one frame.
+        """
         import cv2
-        from qtpy.QtWidgets import QProgressDialog
-        from qtpy.QtCore import Qt
 
         avi_paths = getattr(self, "avi_batch_paths", [])
         if not avi_paths:
-            raise ValueError("No AVI batch paths available.")
+            # Single-file AVI selected directly — treat as a batch of one
+            fp = getattr(self, "file_path", None)
+            if fp and fp.lower().endswith((".avi", ".mp4")):
+                avi_paths = [fp]
+            else:
+                raise ValueError("No AVI batch paths available.")
 
         target_interval = getattr(self, "avi_batch_interval", 5.0)
         self.viewer_frame_interval = target_interval
 
         self._log_message(
-            f"Loading AVI batch into frame viewer: {len(avi_paths)} files, "
-            f"sampling interval={target_interval}s"
+            f"Setting up AVI batch viewer: {len(avi_paths)} files, "
+            f"sampling interval={target_interval}s (streaming, no RAM preload)"
         )
 
-        # First pass: count total sampled frames
-        total_sampled = 0
-        video_infos = []
+        # Release any previously open VideoCapture handle
+        if getattr(self, "_viewer_avi_cap", None) is not None:
+            try:
+                self._viewer_avi_cap.release()
+            except Exception:
+                pass
+            self._viewer_avi_cap = None
+            self._viewer_avi_cap_path = None
+
+        # Scan metadata — opens each cap briefly, reads properties, closes
+        video_infos: List[Dict] = []
+        cumulative = 0
         for path in avi_paths:
             cap = cv2.VideoCapture(path)
             if not cap.isOpened():
-                self._log_message(f"Cannot open: {path}")
+                self._log_message(f"  ⚠️  Cannot open: {os.path.basename(path)}")
+                cap.release()
                 continue
             fps = cap.get(cv2.CAP_PROP_FPS)
             n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.release()
+            if fps <= 0 or n_frames == 0:
+                self._log_message(f"  ⚠️  Bad metadata: {os.path.basename(path)}")
+                continue
             frames_per_sample = max(1, int(fps * target_interval))
             sampled = len(range(0, n_frames, frames_per_sample))
-            video_infos.append((path, fps, n_frames, frames_per_sample, sampled))
-            total_sampled += sampled
+            video_infos.append({
+                "path": path,
+                "fps": fps,
+                "n_frames": n_frames,
+                "frames_per_sample": frames_per_sample,
+                "sampled": sampled,
+                "start_idx": cumulative,  # global index of first sampled frame
+            })
+            cumulative += sampled
 
-        if total_sampled == 0:
-            raise ValueError("No frames found in AVI batch.")
+        if not video_infos:
+            raise ValueError("No valid AVI files found in batch.")
 
         self._log_message(
-            f"Total sampled frames across all videos: {total_sampled}"
+            f"  → {len(video_infos)} valid videos, {cumulative} sampled frames total"
         )
-
-        # Second pass: load sampled frames with progress
-        progress = QProgressDialog(
-            f"Loading {total_sampled} sampled frames from {len(video_infos)} videos...",
-            "Cancel", 0, total_sampled, self,
-        )
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(500)
-
-        # Pre-estimate memory: get frame size from first video
-        _h, _w = 0, 0
-        _probe = cv2.VideoCapture(video_infos[0][0])
-        if _probe.isOpened():
-            _h = int(_probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            _w = int(_probe.get(cv2.CAP_PROP_FRAME_WIDTH))
-        _probe.release()
-        est_bytes = total_sampled * _h * _w  # grayscale = 1 byte/pixel
-        est_gb = est_bytes / 1024**3
-        if est_gb > 4.0:
+        for info in video_infos:
             self._log_message(
-                f"⚠️ AVI batch too large to load ({total_sampled} frames × "
-                f"{_h}×{_w} ≈ {est_gb:.1f} GB). "
-                f"Use a shorter time range or increase the frame interval."
-            )
-            progress.close()
-            return
-
-        all_frames = []
-        loaded = 0
-        oom_hit = False
-
-        for path, fps, n_frames, frames_per_sample, sampled in video_infos:
-            if oom_hit:
-                break
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                continue
-            for frame_idx in range(0, n_frames, frames_per_sample):
-                if progress.wasCanceled():
-                    cap.release()
-                    self._log_message("AVI batch loading canceled.")
-                    return
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                try:
-                    ret, frame = cap.read()
-                except (SystemError, MemoryError):
-                    oom_hit = True
-                    break
-                if ret and frame is not None:
-                    try:
-                        # Convert to grayscale
-                        if len(frame.shape) == 3:
-                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        all_frames.append(frame)
-                    except MemoryError:
-                        oom_hit = True
-                        break
-                loaded += 1
-                if loaded % 20 == 0:
-                    progress.setValue(loaded)
-            cap.release()
-
-        if oom_hit:
-            self._log_message(
-                f"⚠️ Out of memory after loading {len(all_frames)} frames — "
-                f"showing partial batch. Use a shorter time range."
+                f"    {os.path.basename(info['path'])}: "
+                f"{info['sampled']} frames (every {info['frames_per_sample']}th)"
             )
 
-        progress.setValue(total_sampled)
+        # Store batch info for on-demand frame reads
+        self._viewer_avi_batch_info = video_infos
+        self._viewer_is_avi_batch = True
+        self._viewer_avi_cap = None       # opened lazily in _viewer_read_raw_frame_avi
+        self._viewer_avi_cap_path = None  # path currently open in _viewer_avi_cap
 
-        if not all_frames:
-            raise ValueError("No frames loaded from AVI batch.")
-
-        try:
-            self.viewer_frames = np.stack(all_frames, axis=0)
-        except MemoryError:
-            self._log_message(
-                f"⚠️ Cannot stack {len(all_frames)} frames into memory. "
-                f"Reduce the number of videos or increase frame interval."
-            )
-            return
-        self.viewer_n_frames = len(all_frames)
+        # Viewer state
+        self.viewer_n_frames = cumulative
+        self.viewer_frames = None
         self.viewer_file_handle = None
+        self.viewer_frame_cache = None    # no preloading for streaming
         self.viewer_is_sequence = False
+
+        # Per-video boundaries for the status line
+        self._viewer_avi_video_boundaries = [
+            (info["start_idx"],
+             info["start_idx"] + info["sampled"] - 1,
+             os.path.basename(info["path"]))
+            for info in video_infos
+        ]
 
         # Update UI controls
         self.viewer_current_frame = 0
@@ -801,11 +784,10 @@ class FrameViewerMixin:
         self.viewer_frame_slider.setValue(0)
         self.viewer_frame_slider.setEnabled(True)
 
-        self.btn_viewer_first.setEnabled(True)
-        self.btn_viewer_prev.setEnabled(True)
-        self.btn_viewer_play.setEnabled(True)
-        self.btn_viewer_next.setEnabled(True)
-        self.btn_viewer_last.setEnabled(True)
+        for btn in (self.btn_viewer_first, self.btn_viewer_prev,
+                    self.btn_viewer_play, self.btn_viewer_next,
+                    self.btn_viewer_last):
+            btn.setEnabled(True)
 
         self.export_start_frame.setEnabled(True)
         self.export_start_frame.setMaximum(self.viewer_n_frames - 1)
@@ -816,42 +798,76 @@ class FrameViewerMixin:
         self.btn_export_video.setEnabled(True)
         self.btn_export_gif.setEnabled(True)
 
-        # Build per-frame video source info for status display
-        self._viewer_avi_video_boundaries = []
-        frame_offset = 0
-        for path, fps, n_frames, frames_per_sample, sampled in video_infos:
-            self._viewer_avi_video_boundaries.append(
-                (frame_offset, frame_offset + sampled - 1, os.path.basename(path))
-            )
-            frame_offset += sampled
-
-        total_duration = self.viewer_n_frames * target_interval
+        total_duration = cumulative * target_interval
         self.viewer_status_label.setText(
-            f"AVI Batch: {self.viewer_n_frames} frames from {len(video_infos)} videos "
+            f"AVI Batch (streaming): {cumulative} frames from {len(video_infos)} videos "
             f"({total_duration/60:.1f} min, interval={target_interval}s)"
         )
-        self._log_message(
-            f"Frame viewer: Loaded {self.viewer_n_frames} sampled frames "
-            f"from {len(video_infos)} AVI files as continuous video"
-        )
-        for start, end, name in self._viewer_avi_video_boundaries:
-            self._log_message(f"  {name}: frames {start}-{end}")
-
-        # Pre-process for display cache
-        self.viewer_frame_cache = [
-            self._prepare_frame_for_display(f) for f in all_frames
-        ]
 
         # Display first frame
         self._viewer_show_frame(0)
 
+    def _viewer_read_raw_frame_avi(self, frame_idx: int) -> "np.ndarray":
+        """Read one grayscale frame from the AVI batch by global frame index.
+
+        Finds which video contains the requested global index, keeps a cached
+        VideoCapture for consecutive reads within the same file, and seeks
+        directly to the correct video frame via cap.set().
+        """
+        import cv2
+
+        batch_info = getattr(self, "_viewer_avi_batch_info", [])
+        if not batch_info:
+            return np.zeros((100, 100), dtype=np.uint8)
+
+        # Locate which video owns this global frame index
+        info = None
+        for v in batch_info:
+            if frame_idx < v["start_idx"] + v["sampled"]:
+                info = v
+                break
+
+        if info is None:
+            return np.zeros((100, 100), dtype=np.uint8)
+
+        local_sampled_idx = frame_idx - info["start_idx"]
+        actual_frame_idx  = local_sampled_idx * info["frames_per_sample"]
+
+        # Reuse cap if same video, otherwise open the new one
+        if getattr(self, "_viewer_avi_cap_path", None) != info["path"]:
+            if getattr(self, "_viewer_avi_cap", None) is not None:
+                try:
+                    self._viewer_avi_cap.release()
+                except Exception:
+                    pass
+            cap = cv2.VideoCapture(info["path"])
+            self._viewer_avi_cap = cap
+            self._viewer_avi_cap_path = info["path"]
+        else:
+            cap = self._viewer_avi_cap
+
+        if cap is None or not cap.isOpened():
+            return np.zeros((100, 100), dtype=np.uint8)
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, actual_frame_idx)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return np.zeros((100, 100), dtype=np.uint8)
+
+        if frame.ndim == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        return frame
+
     def _viewer_read_raw_frame(self, frame_idx: int) -> "np.ndarray":
         """Read one raw frame from whatever source is currently active.
 
-        Handles all four combinations of (HDF5 / Zarr) × (stacked / individual).
-        ZarrFileReader has no __getitem__, so it must go through read_frame /
-        read_all instead of the h5py-style dict access.
+        Handles AVI batch streaming, HDF5 stacked/individual, and Zarr.
         """
+        # AVI batch — on-demand streaming from disk
+        if getattr(self, "_viewer_is_avi_batch", False):
+            return self._viewer_read_raw_frame_avi(frame_idx)
+
         if hasattr(self, "viewer_frame_names"):
             # Individual-frame layout: each frame is its own dataset
             frame_name = self.viewer_frame_names[frame_idx]
@@ -868,20 +884,32 @@ class FrameViewerMixin:
             else:
                 return self.viewer_file_handle.read_frame(self.viewer_dataset_name, frame_idx)
 
+    def _viewer_release_avi_cap(self):
+        """Release a cached AVI VideoCapture handle if one is open."""
+        if getattr(self, "_viewer_avi_cap", None) is not None:
+            try:
+                self._viewer_avi_cap.release()
+            except Exception:
+                pass
+            self._viewer_avi_cap = None
+            self._viewer_avi_cap_path = None
+
     def _viewer_preload_frames(self):
         """Pre-load all frames into memory cache for smooth playback."""
         from qtpy.QtWidgets import QProgressDialog
         from qtpy.QtCore import Qt
         import psutil
 
+        # AVI batch uses streaming — frames are read on demand, no preload needed
+        if getattr(self, "_viewer_is_avi_batch", False):
+            self.viewer_frame_cache = None
+            return
+
         # Get available system memory
         available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
 
         # Estimate memory usage from the first frame
-        if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-            sample_frame = self._viewer_read_raw_frame(0)
-        else:
-            sample_frame = self.viewer_frames[0]
+        sample_frame = self._viewer_read_raw_frame(0)
 
         # Calculate memory (3 channels for BGR, uint8)
         frame_size_mb = (sample_frame.shape[0] * sample_frame.shape[1] * 3) / (
@@ -948,11 +976,8 @@ class FrameViewerMixin:
                         self.viewer_frame_cache = None
                         return
 
-                # Load frame via unified helper (handles HDF5 / Zarr / stacked / individual)
-                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                    frame_data = self._viewer_read_raw_frame(i)
-                else:
-                    frame_data = self.viewer_frames[i]
+                # Load frame via unified helper (handles AVI batch, HDF5, Zarr)
+                frame_data = self._viewer_read_raw_frame(i)
 
                 # Pre-process frame to display format
                 frame_processed = self._prepare_frame_for_display(frame_data)
@@ -1155,8 +1180,10 @@ class FrameViewerMixin:
                 frame_with_text = self.viewer_frame_cache[frame_idx].copy()
                 frame_data = frame_with_text  # For info display
             else:
-                # Fallback: load and process on-the-fly (no cache or cache miss)
-                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
+                # Load on-the-fly: AVI batch streaming, HDF5/Zarr, or in-memory array
+                if getattr(self, "_viewer_is_avi_batch", False):
+                    frame_data = self._viewer_read_raw_frame_avi(frame_idx)
+                elif hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
                     frame_data = self._viewer_read_raw_frame(frame_idx)
                 else:
                     frame_data = self.viewer_frames[frame_idx]
@@ -1669,26 +1696,8 @@ class FrameViewerMixin:
         if hasattr(self, "viewer_frame_cache") and self.viewer_frame_cache:
             return self.viewer_frame_cache[frame_idx].copy()
 
-        handle = getattr(self, "viewer_file_handle", None)
-        use_abstraction = handle is not None and hasattr(handle, "read_frame")
-
-        if handle is not None:
-            if getattr(self, "viewer_is_sequence", False):
-                # Individual frames stored in a group
-                frame_name = self.viewer_frame_names[frame_idx]
-                path = f"{self.viewer_dataset_name}/{frame_name}"
-                if use_abstraction:
-                    frame = handle.read_frame(path, 0)
-                else:
-                    frame = handle[path][()]
-            else:
-                # Stacked dataset
-                if use_abstraction:
-                    frame = handle.read_frame(self.viewer_dataset_name, frame_idx)
-                else:
-                    frame = handle[self.viewer_dataset_name][frame_idx]
-        else:
-            frame = self.viewer_frames[frame_idx]
+        # Use unified reader (handles AVI batch, HDF5, Zarr)
+        frame = self._viewer_read_raw_frame(frame_idx)
 
         # Normalize to uint8 if needed
         frame = np.array(frame)
@@ -1795,45 +1804,10 @@ class FrameViewerMixin:
             progress_dlg.setValue(0)
             progress_dlg.show()
 
-            # Get first frame to determine dimensions
-            if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                if hasattr(self, "viewer_frame_names"):
-                    frame_name = self.viewer_frame_names[start_frame]
-                    first_frame = self.viewer_file_handle[
-                        f"{self.viewer_dataset_name}/{frame_name}"
-                    ][()]
-                else:
-                    if getattr(self, "_viewer_handle_is_h5py", True):
-                        first_frame = self.viewer_file_handle[self.viewer_dataset_name][
-                            start_frame
-                        ]
-                    else:
-                        first_frame = self.viewer_file_handle.read_frame(
-                            self.viewer_dataset_name, start_frame
-                        )
-            else:
-                first_frame = self.viewer_frames[start_frame]
-
-            # Prepare frame with text overlay — use float32 to halve memory usage
-            first_frame = np.array(first_frame, copy=True)
-            if first_frame.dtype != np.uint8:
-                frame_min = first_frame.min()
-                frame_max = first_frame.max()
-                if frame_max > frame_min:
-                    first_frame = (
-                        (first_frame.astype(np.float32) - frame_min)
-                        / (frame_max - frame_min)
-                        * 255
-                    ).astype(np.uint8)
-                else:
-                    first_frame = np.zeros_like(first_frame, dtype=np.uint8)
-
-            if first_frame.ndim == 3 and first_frame.shape[2] == 1:
-                first_frame = first_frame[:, :, 0]
-
-            if len(first_frame.shape) == 2:
-                first_frame = cv2.cvtColor(first_frame, cv2.COLOR_GRAY2BGR)
-
+            # Get first frame to determine video dimensions
+            first_frame = self._prepare_frame_for_display(
+                self._viewer_read_raw_frame(start_frame)
+            )
             height, width = first_frame.shape[:2]
 
             # Initialize video writer
@@ -1851,44 +1825,9 @@ class FrameViewerMixin:
                     cancelled = True
                     break
 
-                # Get frame data
-                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                    if hasattr(self, "viewer_frame_names"):
-                        frame_name = self.viewer_frame_names[frame_idx]
-                        frame_data = self.viewer_file_handle[
-                            f"{self.viewer_dataset_name}/{frame_name}"
-                        ][()]
-                    else:
-                        if getattr(self, "_viewer_handle_is_h5py", True):
-                            frame_data = self.viewer_file_handle[self.viewer_dataset_name][
-                                frame_idx
-                            ]
-                        else:
-                            frame_data = self.viewer_file_handle.read_frame(
-                                self.viewer_dataset_name, frame_idx
-                            )
-                else:
-                    frame_data = self.viewer_frames[frame_idx]
-
-                # Prepare frame — use float32 to halve memory usage
-                frame = np.array(frame_data, copy=True)
-                if frame.dtype != np.uint8:
-                    frame_min = frame.min()
-                    frame_max = frame.max()
-                    if frame_max > frame_min:
-                        frame = (
-                            (frame.astype(np.float32) - frame_min)
-                            / (frame_max - frame_min)
-                            * 255
-                        ).astype(np.uint8)
-                    else:
-                        frame = np.zeros_like(frame, dtype=np.uint8)
-
-                if frame.ndim == 3 and frame.shape[2] == 1:
-                    frame = frame[:, :, 0]
-
-                if len(frame.shape) == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                frame = self._prepare_frame_for_display(
+                    self._viewer_read_raw_frame(frame_idx)
+                )
 
                 # Add time text
                 frame_time_seconds = frame_idx * self.viewer_frame_interval
@@ -2011,51 +1950,16 @@ class FrameViewerMixin:
                     cancelled = True
                     break
 
-                # Get frame data
-                if hasattr(self, "viewer_file_handle") and self.viewer_file_handle:
-                    if hasattr(self, "viewer_frame_names"):
-                        frame_name = self.viewer_frame_names[frame_idx]
-                        frame_data = self.viewer_file_handle[
-                            f"{self.viewer_dataset_name}/{frame_name}"
-                        ][()]
-                    else:
-                        if getattr(self, "_viewer_handle_is_h5py", True):
-                            frame_data = self.viewer_file_handle[self.viewer_dataset_name][
-                                frame_idx
-                            ]
-                        else:
-                            frame_data = self.viewer_file_handle.read_frame(
-                                self.viewer_dataset_name, frame_idx
-                            )
-                else:
-                    frame_data = self.viewer_frames[frame_idx]
-
-                # Prepare frame
                 try:
-                    frame = np.array(frame_data, copy=True)
-                    if frame.dtype != np.uint8:
-                        frame_min = frame.min()
-                        frame_max = frame.max()
-                        if frame_max > frame_min:
-                            frame = (
-                                (frame.astype(np.float32) - frame_min)
-                                / (frame_max - frame_min)
-                                * 255
-                            ).astype(np.uint8)
-                        else:
-                            frame = np.zeros_like(frame, dtype=np.uint8)
+                    frame = self._prepare_frame_for_display(
+                        self._viewer_read_raw_frame(frame_idx)
+                    )
                 except MemoryError:
                     self._log_message(
                         f"⚠️ GIF export ran out of memory at frame {idx + 1}/{n_frames}. "
                         f"Use 'Export as Video (MP4)' instead."
                     )
                     return
-
-                if frame.ndim == 3 and frame.shape[2] == 1:
-                    frame = frame[:, :, 0]
-
-                if len(frame.shape) == 2:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
                 # Add time text
                 frame_time_seconds = frame_idx * self.viewer_frame_interval

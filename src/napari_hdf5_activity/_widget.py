@@ -137,6 +137,137 @@ def _fmt_p(p: float) -> str:
     return f"{p:.4f}"
 
 
+def _read_avi_media_created(path: str):
+    """Read the 'Medium erstellt' / 'Media Created' timestamp from an AVI file.
+
+    AVI is a RIFF container.  Many cameras write an IDIT or ICAL sub-chunk
+    inside the INFO LIST chunk; Windows Shell surfaces this as 'Medium erstellt'.
+    Returns a float (epoch seconds) or None if not found / not parseable.
+
+    Reads only the first 512 KB of the file so it stays fast for large AVIs.
+    """
+    import struct
+    from datetime import datetime
+
+    DATE_FORMATS = [
+        "%a %b %d %H:%M:%S %Y",   # "Thu Jan 23 10:49:44 2025"  (most cameras)
+        "%Y:%m:%d %H:%M:%S",       # "2025:01:23 10:49:44"       (EXIF style)
+        "%Y-%m-%d %H:%M:%S",       # "2025-01-23 10:49:44"
+        "%Y%m%d%H%M%S",            # "20250123104944"
+        "%d.%m.%Y %H:%M:%S",       # "23.01.2025 10:49:44"       (German locale)
+        "%m/%d/%Y %H:%M:%S",       # "01/23/2025 10:49:44"
+    ]
+
+    def _parse_date(s: str):
+        s = s.strip()
+        for fmt in DATE_FORMATS:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        return None
+
+    try:
+        limit = 512 * 1024  # search only first 512 KB
+        with open(path, "rb") as f:
+            if f.read(4) != b"RIFF":
+                return None
+            f.read(4)  # RIFF chunk size (ignore)
+            if f.read(4) != b"AVI ":
+                return None
+
+            while f.tell() < limit:
+                chunk_id = f.read(4)
+                raw_size = f.read(4)
+                if len(chunk_id) < 4 or len(raw_size) < 4:
+                    break
+                chunk_size = struct.unpack("<I", raw_size)[0]
+
+                if chunk_id == b"LIST":
+                    list_type = f.read(4)
+                    inner_size = chunk_size - 4
+                    end_pos = f.tell() + inner_size
+
+                    if list_type == b"INFO":
+                        while f.tell() < end_pos - 8:
+                            sub_id = f.read(4)
+                            raw_sub = f.read(4)
+                            if len(sub_id) < 4 or len(raw_sub) < 4:
+                                break
+                            sub_size = struct.unpack("<I", raw_sub)[0]
+                            data = f.read(sub_size)
+                            if sub_size % 2:
+                                f.read(1)  # word-align
+                            if sub_id in (b"IDIT", b"ICAL", b"ICRD"):
+                                date_str = data.rstrip(b"\x00\n\r").decode(
+                                    "ascii", errors="replace"
+                                )
+                                dt = _parse_date(date_str)
+                                if dt is not None:
+                                    return dt.timestamp()
+                        f.seek(end_pos)
+                    else:
+                        f.seek(inner_size, 1)
+                else:
+                    skip = chunk_size + (chunk_size % 2)
+                    f.seek(skip, 1)
+
+    except Exception:
+        pass
+    return None
+
+
+def _video_sort_key(path: str):
+    """Sort key for video files.
+
+    Priority:
+    1. 'Medium erstellt' timestamp from AVI RIFF IDIT/ICAL/ICRD chunk
+       — written by the camera at capture time, survives file copies
+    2. Timestamp parsed from filename: YYYYMMDD + first [HHMMSS bracket
+    3. File system mtime (unreliable after copy, used as last-resort)
+    4. Natural (numeric-aware) alphabetical sort
+    """
+    import re
+
+    # Priority 1: media creation time embedded in the file header
+    if path.lower().endswith((".avi", ".mp4")):
+        ts = _read_avi_media_created(path)
+        if ts is not None:
+            return (0, ts, "")
+
+    name = os.path.basename(path)
+
+    # Priority 2: parse YYYYMMDD + [HHMMSS from filename
+    m_date = re.match(r"(\d{8})", name)
+    if m_date:
+        date_str = m_date.group(1)
+        m_time = re.search(r"\[(\d{6})_", name)
+        time_str = m_time.group(1) if m_time else "000000"
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
+            return (1, dt.timestamp(), "")
+        except ValueError:
+            pass
+
+    # Priority 3: file system mtime
+    try:
+        return (2, os.path.getmtime(path), "")
+    except OSError:
+        pass
+
+    # Priority 4: natural sort
+    parts = [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", name)]
+    return (3, 0.0, parts)
+
+
+def _natural_sort_key(path: str):
+    """Sort key that orders embedded integers numerically (m1 < m2 < m10)."""
+    import re
+    name = os.path.basename(path)
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", name)]
+
+
 def _parse_recording_start_datetime(file_path: str):
     """Extract recording start datetime from filename pattern YYYYMMDD_HHMMSS.
 
@@ -1106,36 +1237,25 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         fixed_layout = QFormLayout()
         fixed_tab.setLayout(fixed_layout)
 
-        self.fixed_threshold_value = QDoubleSpinBox()
-        self.fixed_threshold_value.setRange(0.0001, 1.0)
-        self.fixed_threshold_value.setValue(0.05)
-        self.fixed_threshold_value.setSingleStep(0.005)
-        self.fixed_threshold_value.setDecimals(4)
-        self.fixed_threshold_value.setToolTip(
-            "Fixed threshold in normalized signal units [0-1].\n"
-            "Signal > threshold → Movement = TRUE\n"
-            "Signal < threshold × hysteresis_ratio → Movement = FALSE\n\n"
-            "Read the suggested value from 'Signal stats' below.\n"
-            "Typical range: 0.02 – 0.15 depending on recording."
+        self.fixed_threshold_multiplier = QDoubleSpinBox()
+        self.fixed_threshold_multiplier.setRange(0.1, 10.0)
+        self.fixed_threshold_multiplier.setValue(1.0)
+        self.fixed_threshold_multiplier.setSingleStep(0.1)
+        self.fixed_threshold_multiplier.setDecimals(2)
+        self.fixed_threshold_multiplier.setToolTip(
+            "Multiplier for hysteresis band (mean ± multiplier × std).\n"
+            "Upper = mean + multiplier × std\n"
+            "Lower = mean - multiplier × std\n\n"
+            "Computed per ROI from the full recording.\n"
+            "Same formula as Baseline Method — no baseline period needed."
         )
-        fixed_layout.addRow("Threshold (norm. 0-1):", self.fixed_threshold_value)
-
-        self.fixed_threshold_hysteresis = QDoubleSpinBox()
-        self.fixed_threshold_hysteresis.setRange(0.1, 1.0)
-        self.fixed_threshold_hysteresis.setValue(0.8)
-        self.fixed_threshold_hysteresis.setSingleStep(0.05)
-        self.fixed_threshold_hysteresis.setDecimals(2)
-        self.fixed_threshold_hysteresis.setToolTip(
-            "Lower threshold = fixed value × this ratio.\n"
-            "0.8 → lower = 80% of upper (20% hysteresis band)."
-        )
-        fixed_layout.addRow("Hysteresis ratio:", self.fixed_threshold_hysteresis)
+        fixed_layout.addRow("Multiplier:", self.fixed_threshold_multiplier)
 
         fixed_info = QLabel(
             "FIXED THRESHOLD:\n"
-            "Uses a paper-defined absolute pixel value.\n"
-            "Upper = threshold value\n"
-            "Lower = threshold × hysteresis ratio\n"
+            "Upper = mean + multiplier × std\n"
+            "Lower = mean - multiplier × std\n"
+            "Computed per ROI from the full recording.\n"
             "No baseline period needed."
         )
         fixed_info.setStyleSheet("color: #666; font-size: 10px;")
@@ -2468,8 +2588,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.show_real_amplitude.toggled.connect(self._update_fixed_signal_stats)
         self.chk_divide_by_pixels.toggled.connect(self._update_fixed_signal_stats)
         self.threshold_params_stack.currentChanged.connect(self._update_fixed_signal_stats)
-        self.fixed_threshold_value.valueChanged.connect(self._preview_fixed_threshold)
-        self.fixed_threshold_hysteresis.valueChanged.connect(self._preview_fixed_threshold)
+        self.fixed_threshold_multiplier.valueChanged.connect(self._update_fixed_signal_stats)
+        self.fixed_threshold_multiplier.valueChanged.connect(self._preview_fixed_threshold)
         self.btn_apply_fixed_threshold.clicked.connect(self._apply_fixed_threshold)
 
         # Y-Axis scaling controls
@@ -2521,7 +2641,15 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         else:
             # Multiple files - check if they are videos for batch processing
             if all(f.lower().endswith((".avi", ".mp4")) for f in file_paths):
-                self._load_avi_batch(file_paths)
+                sorted_paths = sorted(file_paths, key=_video_sort_key)
+                self._log_message("Video load order (timestamp source shown):")
+                for p in sorted_paths:
+                    key = _video_sort_key(p)
+                    src = {0: "RIFF/IDIT", 1: "Filename", 2: "mtime", 3: "natural"}[key[0]]
+                    from datetime import datetime
+                    t_str = datetime.fromtimestamp(key[1]).strftime("%Y-%m-%d %H:%M:%S") if key[1] else "?"
+                    self._log_message(f"  [{src}] {t_str}  {os.path.basename(p)}")
+                self._load_avi_batch(sorted_paths)
                 return
             else:
                 self._log_message(
@@ -2931,7 +3059,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             return
 
         # Check if the selected directory is itself a Zarr store
-        zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+        # zarr v2 uses .zgroup/.zarray, zarr v3 uses zarr.json
+        zarr_markers = (".zgroup", ".zarray", ".zmetadata", "zarr.json")
         if any(os.path.exists(os.path.join(directory, m)) for m in zarr_markers):
             self._load_zarr_file(directory)
             return
@@ -2986,7 +3115,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self._log_message(
                 f"Loading {len(avi_files)} AVI files from directory as batch..."
             )
-            avi_paths = [os.path.join(directory, f) for f in sorted(avi_files)]
+            avi_paths = sorted(
+                [os.path.join(directory, f) for f in avi_files],
+                key=_video_sort_key,
+            )
+            self._log_message("Video load order (timestamp source shown):")
+            for p in avi_paths:
+                key = _video_sort_key(p)
+                src = {0: "RIFF/IDIT", 1: "Filename", 2: "mtime", 3: "natural"}[key[0]]
+                from datetime import datetime
+                t_str = datetime.fromtimestamp(key[1]).strftime("%Y-%m-%d %H:%M:%S") if key[1] else "?"
+                self._log_message(f"  [{src}] {t_str}  {os.path.basename(p)}")
             self._log_message(f"AVI paths to load: {avi_paths}")
             self._log_message("Calling _load_avi_batch()...")
             self._load_avi_batch(avi_paths)
@@ -3053,7 +3192,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 "",
             )
             if zarr_path:
-                zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+                zarr_markers = (".zgroup", ".zarray", ".zmetadata", "zarr.json")
                 if not any(os.path.exists(os.path.join(zarr_path, m)) for m in zarr_markers):
                     self._log_message(
                         f"Selected directory does not appear to be a Zarr store: {zarr_path}"
@@ -5112,8 +5251,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         elif threshold_method == "fixed":
             params.update(
                 {
-                    "fixed_threshold_value": self.fixed_threshold_value.value(),
-                    "fixed_threshold_hysteresis": self.fixed_threshold_hysteresis.value(),
+                    "fixed_threshold_multiplier": self.fixed_threshold_multiplier.value(),
                 }
             )
 
@@ -5650,20 +5788,45 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
     def _preview_fixed_threshold(self, *_):
         """Update threshold lines on the Raw Intensity plot instantly — no recomputation."""
+        import numpy as np
         if not getattr(self, "merged_results", {}):
             return
-        upper = self.fixed_threshold_value.value()
-        lower = upper * self.fixed_threshold_hysteresis.value()
-        mid = (upper + lower) / 2.0
-        self.roi_upper_thresholds = {roi: upper for roi in self.merged_results}
-        self.roi_lower_thresholds = {roi: lower for roi in self.merged_results}
-        self.roi_baseline_means = {roi: mid for roi in self.merged_results}
-        self.roi_band_widths = {roi: (upper - lower) / 2.0 for roi in self.merged_results}
-        # Same for raw amplitude view
-        self.roi_upper_thresholds_raw = dict(self.roi_upper_thresholds)
-        self.roi_lower_thresholds_raw = dict(self.roi_lower_thresholds)
-        self.roi_baseline_means_raw = dict(self.roi_baseline_means)
-        self.roi_band_widths_raw = dict(self.roi_band_widths)
+        mult = self.fixed_threshold_multiplier.value()
+        norm_upper, norm_lower, norm_mid, norm_band = {}, {}, {}, {}
+        for roi, pts in self.merged_results.items():
+            if not pts:
+                continue
+            vals = np.array([v for _, v in pts])
+            m, s = float(np.mean(vals)), float(np.std(vals))
+            u = m + mult * s
+            l = m - mult * s
+            norm_upper[roi] = u
+            norm_lower[roi] = l
+            norm_mid[roi] = m
+            norm_band[roi] = mult * s
+        self.roi_upper_thresholds = norm_upper
+        self.roi_lower_thresholds = norm_lower
+        self.roi_baseline_means = norm_mid
+        self.roi_band_widths = norm_band
+        # Raw amplitude view — compute thresholds in pre-MinMax space
+        raw_data = getattr(self, "merged_results_raw", {})
+        raw_upper, raw_lower, raw_mid, raw_band = {}, {}, {}, {}
+        for roi, pts in raw_data.items():
+            if not pts:
+                continue
+            vals = np.array([v for _, v in pts])
+            m, s = float(np.mean(vals)), float(np.std(vals))
+            min_v = float(np.min(vals))
+            u = m + mult * s
+            l = max(min_v, m - mult * s)
+            raw_upper[roi] = u
+            raw_lower[roi] = l
+            raw_mid[roi] = m
+            raw_band[roi] = (u - l) / 2.0
+        self.roi_upper_thresholds_raw = raw_upper
+        self.roi_lower_thresholds_raw = raw_lower
+        self.roi_baseline_means_raw = raw_mid
+        self.roi_band_widths_raw = raw_band
         if (
             hasattr(self, "plot_type_combo")
             and self.plot_type_combo.currentText() == "Raw Intensity Changes"
@@ -5690,32 +5853,35 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self._log_message("⚠️ No preprocessed data cached — run a full analysis first.")
             return
 
-        self._log_message("Applying fixed threshold (Phase 2 only)…")
-        upper_norm = self.fixed_threshold_value.value()
-        ratio = self.fixed_threshold_hysteresis.value()
-        lower_norm = upper_norm * ratio
+        mult = self.fixed_threshold_multiplier.value()
+        self._log_message(f"Applying fixed threshold (Phase 2 only)… multiplier={mult:.2f}")
 
-        # De-normalise per ROI so movement detection is in pre-MinMax signal space
+        # Per-ROI: mean ± multiplier × std in pre-MinMax signal space
         upper_thresholds, lower_thresholds, baseline_means = {}, {}, {}
-        norm_upper, norm_lower, norm_baseline = {}, {}, {}
+        norm_upper, norm_lower, norm_baseline, norm_band = {}, {}, {}, {}
         for roi, pts in raw.items():
             if not pts:
                 continue
             vals = np.array([v for _, v in pts])
-            min_v, max_v = float(np.min(vals)), float(np.max(vals))
-            rng = max_v - min_v
-            if rng > 0:
-                u = upper_norm * rng + min_v
-                l = lower_norm * rng + min_v
-            else:
-                u, l = upper_norm, lower_norm
+            m = float(np.mean(vals))
+            s = float(np.std(vals))
+            min_v = float(np.min(vals))
+            u = m + mult * s
+            l = max(min_v, m - mult * s)  # clamp like baseline method
             upper_thresholds[roi] = u
             lower_thresholds[roi] = l
-            baseline_means[roi] = (u + l) / 2.0
-            # Normalized display values are identical for all ROIs
-            norm_upper[roi] = upper_norm
-            norm_lower[roi] = lower_norm
-            norm_baseline[roi] = (upper_norm + lower_norm) / 2.0
+            baseline_means[roi] = m
+            # Normalised display: de-normalise back to [0-1] via MinMax
+            rng = float(np.max(vals)) - min_v
+            if rng > 0:
+                norm_upper[roi] = (u - min_v) / rng
+                norm_lower[roi] = (l - min_v) / rng
+                norm_baseline[roi] = (m - min_v) / rng
+            else:
+                norm_upper[roi] = 1.0
+                norm_lower[roi] = 0.0
+                norm_baseline[roi] = 0.5
+            norm_band[roi] = (norm_upper[roi] - norm_lower[roi]) / 2.0
 
         frame_interval = getattr(self, "frame_interval_seconds", 5.0)
         bin_size_s = self.bin_size_seconds.value() if hasattr(self, "bin_size_seconds") else 60
@@ -5739,13 +5905,21 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.roi_upper_thresholds = norm_upper
         self.roi_lower_thresholds = norm_lower
         self.roi_baseline_means = norm_baseline
-        self.roi_band_widths = {roi: (upper_norm - lower_norm) / 2.0 for roi in norm_upper}
-        self.roi_upper_thresholds_raw = dict(norm_upper)
-        self.roi_lower_thresholds_raw = dict(norm_lower)
-        self.roi_baseline_means_raw = dict(norm_baseline)
-        self.roi_band_widths_raw = dict(self.roi_band_widths)
+        self.roi_band_widths = norm_band
+        # raw = pre-MinMax space, used for the Real Amplitude plot
+        self.roi_upper_thresholds_raw = upper_thresholds
+        self.roi_lower_thresholds_raw = lower_thresholds
+        self.roi_baseline_means_raw = baseline_means
+        self.roi_band_widths_raw = {
+            roi: (upper_thresholds[roi] - lower_thresholds[roi]) / 2.0
+            for roi in upper_thresholds
+        }
 
-        self._log_message(f"Fixed threshold applied: upper={upper_norm:.4f}, lower={lower_norm:.4f}")
+        ex_roi = next(iter(norm_upper))
+        self._log_message(
+            f"Fixed threshold applied: multiplier={mult:.2f}  "
+            f"(ROI {ex_roi}: upper={norm_upper[ex_roi]:.4f}, lower={norm_lower[ex_roi]:.4f})"
+        )
         self.generate_plot()
 
     def _update_fixed_signal_stats(self, *_):
@@ -5794,12 +5968,15 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 return f"{v:.3e}"
 
         mean_v = float(np.mean(all_vals))
-        p95_v = float(np.percentile(all_vals, 95))
-        max_v = float(np.max(all_vals))
+        std_v  = float(np.std(all_vals))
+        max_v  = float(np.max(all_vals))
+        mult   = self.fixed_threshold_multiplier.value() if hasattr(self, "fixed_threshold_multiplier") else 1.0
+        upper_v = mean_v + mult * std_v
+        lower_v = mean_v - mult * std_v
         self.fixed_signal_stats_label.setText(
             f"[{unit}]\n"
-            f"Mean: {fmt(mean_v)}   P95: {fmt(p95_v)}   Max: {fmt(max_v)}\n"
-            f"→ Threshold suggestion: ~{fmt(p95_v * 1.5)}"
+            f"Mean: {fmt(mean_v)}   Std: {fmt(std_v)}   Max: {fmt(max_v)}\n"
+            f"→ Upper: {fmt(upper_v)}   Lower: {fmt(lower_v)}"
         )
 
     def _update_real_amplitude_controls(self):
@@ -6619,7 +6796,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         import h5py
 
         # Determine whether this is HDF5 or Zarr so we use the right detector
-        _zarr_markers = (".zgroup", ".zarray", ".zmetadata")
+        _zarr_markers = (".zgroup", ".zarray", ".zmetadata", "zarr.json")
         _is_zarr = os.path.isdir(self.file_path) and any(
             os.path.exists(os.path.join(self.file_path, m)) for m in _zarr_markers
         )

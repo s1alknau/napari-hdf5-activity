@@ -88,40 +88,51 @@ class AVIVideoReader:
 
         return frame
 
-    def get_frames_at_indices(self, frame_indices: List[int]) -> List[np.ndarray]:
+    def get_frames_at_indices(self, frame_indices: List[int]) -> np.ndarray:
         """
-        Return grayscale frames at the given sorted frame indices.
+        Return grayscale frames at the given sorted frame indices as a (N, H, W)
+        uint8 numpy array.
 
-        Uses cap.grab() to skip unwanted frames without decoding them, which is
-        significantly faster than calling cap.set(CAP_PROP_POS_FRAMES) for each
-        frame (avoids keyframe seeks in MP4/AVI).
+        Uses direct cap.set() seeks, which are O(1) for AVI files because the
+        format stores a frame index table. This avoids reading/decoding the
+        discarded frames between sampled ones — a 100x+ speedup at 5s sampling
+        with 25fps source video (124 skipped frames per decoded frame).
+
+        Falls back to sequential grab() only for very small gaps (≤4 frames)
+        where seeking overhead would exceed the cost of grabbing.
 
         Args:
             frame_indices: Sorted list of 0-based frame indices to retrieve.
 
         Returns:
-            List of grayscale uint8 arrays, one per successfully read index.
+            Array of shape (n_valid, H, W) dtype uint8.  May be shorter than
+            frame_indices if some reads fail.
         """
         if not frame_indices:
-            return []
+            return np.empty((0, self.height, self.width), dtype=np.uint8)
 
-        results: List[np.ndarray] = []
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        cap_pos = 0
+        GRAB_THRESHOLD = 4  # grab() only when skipping ≤ this many frames
+
+        buf = np.empty((len(frame_indices), self.height, self.width), dtype=np.uint8)
+        n_valid = 0
+        cap_pos = -1  # unknown until first operation
 
         for target in frame_indices:
             if target >= self.frame_count:
                 break
-            # Skip frames with grab() — fast, no decode
-            while cap_pos < target:
-                if not self.cap.grab():
-                    break
-                cap_pos += 1
 
-            if cap_pos != target:
-                # Couldn't reach target (end of file?) — fall back to seek
+            gap = target - cap_pos
+
+            if cap_pos < 0 or gap > GRAB_THRESHOLD:
+                # Direct seek — O(1) for indexed AVI, avoids reading skipped frames
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, target)
                 cap_pos = target
+            elif gap > 0:
+                # Small gap — sequential grab keeps codec state consistent
+                while cap_pos < target:
+                    if not self.cap.grab():
+                        break
+                    cap_pos += 1
 
             ret, frame = self.cap.read()
             cap_pos += 1
@@ -132,9 +143,49 @@ class AVIVideoReader:
             if frame.ndim == 3:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            results.append(frame)
+            buf[n_valid] = frame  # in-place copy into pre-allocated slot
+            n_valid += 1
 
-        return results
+        return buf[:n_valid]
+
+    def get_frames_sequential(self, frame_indices: List[int]) -> np.ndarray:
+        """
+        Return grayscale frames by reading the video sequentially from frame 0.
+
+        Optimal for H.264/MP4: avoids repeated keyframe seeks by doing one
+        sequential pass and grabbing (without full retrieve) all non-sampled
+        frames.  For AVI, get_frames_at_indices is faster; use this only for
+        H.264-encoded sources where seeking carries a hidden decode penalty.
+
+        Args:
+            frame_indices: Sorted list of 0-based frame indices to retrieve.
+
+        Returns:
+            Array of shape (n_valid, H, W) dtype uint8.
+        """
+        if not frame_indices:
+            return np.empty((0, self.height, self.width), dtype=np.uint8)
+
+        target_set = set(frame_indices)
+        max_target = max(frame_indices)
+        buf = np.empty((len(frame_indices), self.height, self.width), dtype=np.uint8)
+        n_valid = 0
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # one seek to start
+
+        for pos in range(max_target + 1):
+            if pos in target_set:
+                ret, frame = self.cap.read()  # full decode + retrieve
+                if ret and frame is not None:
+                    if frame.ndim == 3:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    buf[n_valid] = frame
+                    n_valid += 1
+            else:
+                self.cap.grab()  # advance without pixel-buffer copy
+
+        return buf[:n_valid]
+
 
     def get_frames_sampled(self, sampling_rate: int = 1) -> np.ndarray:
         """
@@ -362,9 +413,12 @@ def _process_single_video_streaming(
         first/last_frame_gray are uint8 grayscale arrays for boundary diffs;
         both are None on error.
     """
-    from ._reader import process_chunk
+    from ._reader import process_chunk, prepare_masks_for_gpu
 
     roi_changes: Dict[int, List] = {roi_idx + 1: [] for roi_idx in range(len(masks))}
+
+    # Transfer masks to GPU once — reused across all chunks of this video.
+    gpu_masks = prepare_masks_for_gpu(masks)
 
     video_name = Path(video_path).name
     print(f"  → [{video_idx + 1}] Starting {video_name}...", flush=True)
@@ -381,53 +435,74 @@ def _process_single_video_streaming(
             if total_sampled == 0:
                 return video_idx, roi_changes, None, "No frames to sample", None, None
 
-            # Single sequential pass through the video using grab() — avoids
-            # repeated keyframe seeks (which are expensive for MP4).
-            # All sampled frames are read in one go; chunking happens in Python.
-            all_frames = reader.get_frames_at_indices(frame_indices)
+            # Load all sampled frames in a single sequential pass — no random seeks.
+            # H.264 random seeks are expensive (keyframe decode per seek); reading
+            # sequentially with grab() skips non-target frames at near-zero cost.
+            # Peak per worker: total_sampled × H × W × 1 byte (uint8).
+            print(f"  → [{video_idx + 1}] {video_name}: loading {total_sampled} frames...", flush=True)
+            all_frames = reader.get_frames_sequential(frame_indices)
 
-            if not all_frames:
-                return video_idx, roi_changes, None, "No frames read", None, None
-
-            first_frame_gray = all_frames[0]   # for cross-video boundary diff
+            first_frame_gray: Optional[np.ndarray] = None
+            last_frame_gray: Optional[np.ndarray] = None
             last_chunk_frame: Optional[np.ndarray] = None
 
-            num_chunks = (len(all_frames) + chunk_size - 1) // chunk_size
+            if len(all_frames) == 0:
+                return video_idx, roi_changes, None, "No frames read", None, None
+
+            first_frame_gray = all_frames[0].copy()
+
+            num_chunks = (total_sampled + chunk_size - 1) // chunk_size
+            report_every = max(1, num_chunks // 4)  # print progress at 25%, 50%, 75%
 
             for chunk_idx in range(num_chunks):
+                if chunk_idx > 0 and chunk_idx % report_every == 0:
+                    pct = int(100 * chunk_idx / num_chunks)
+                    print(f"  → [{video_idx + 1}] {video_name}: {pct}% ({chunk_idx}/{num_chunks} chunks)", flush=True)
                 chunk_start = chunk_idx * chunk_size
-                chunk_end = min(chunk_start + chunk_size, len(all_frames))
+                chunk_end = min(chunk_start + chunk_size, total_sampled)
+                chunk_frame_indices = frame_indices[chunk_start:chunk_end]
+
                 raw_frames = all_frames[chunk_start:chunk_end]  # slice — no copy
 
-                # Prepend last frame of previous chunk (same as HDF5 pipeline) so the
-                # diff at every chunk boundary is preserved — no data points lost.
+                if len(raw_frames) == 0:
+                    continue
+
+                # Save boundary frames before we lose the reference
+                current_last = raw_frames[-1].copy()
+
+                # Prepend last frame of previous chunk so the diff at every chunk
+                # boundary is preserved — no data points lost.
                 if last_chunk_frame is not None:
                     chunk_start_time = (
                         time_offset
-                        + (frame_indices[chunk_start] / video_fps)
+                        + (chunk_frame_indices[0] / video_fps)
                         - target_frame_interval
                     )
                     chunk_array = np.concatenate(
-                        [last_chunk_frame[np.newaxis], np.stack(raw_frames, axis=0)],
+                        [last_chunk_frame[np.newaxis], raw_frames],
                         axis=0,
                     )
                 else:
-                    chunk_start_time = time_offset + (frame_indices[chunk_start] / video_fps)
-                    chunk_array = np.stack(raw_frames, axis=0)
+                    chunk_start_time = time_offset + (chunk_frame_indices[0] / video_fps)
+                    chunk_array = raw_frames
+
+                last_chunk_frame = current_last
+                last_frame_gray = current_last
 
                 if len(chunk_array) < 2:
-                    last_chunk_frame = raw_frames[-1]
                     continue
 
                 chunk_results = process_chunk(
-                    chunk_array, masks, chunk_start_time, target_frame_interval
+                    chunk_array, gpu_masks, chunk_start_time, target_frame_interval
                 )
 
                 for roi_id in chunk_results:
                     roi_changes[roi_id].extend(chunk_results[roi_id])
 
-                last_chunk_frame = raw_frames[-1]
-                del chunk_array
+            del all_frames  # release the full frame buffer once all chunks are processed
+
+            if first_frame_gray is None or last_frame_gray is None:
+                return video_idx, roi_changes, None, "No frames read", None, None
 
             metadata = {
                 "path": video_path,
@@ -440,7 +515,7 @@ def _process_single_video_streaming(
                 "frames_per_sample": frames_per_sample,
             }
 
-            return video_idx, roi_changes, metadata, "", first_frame_gray, all_frames[-1]
+            return video_idx, roi_changes, metadata, "", first_frame_gray, last_frame_gray
 
     except Exception as e:
         return video_idx, roi_changes, None, f"Error processing {Path(video_path).name}: {str(e)}", None, None
@@ -474,7 +549,7 @@ def process_avi_batch_streaming(
         Tuple of (roi_changes dict, metadata dict)
     """
     total_videos = len(video_paths)
-    num_workers = min(max(2, (os.cpu_count() or 4) - 1), 12)
+    cpu_workers = max(2, (os.cpu_count() or 4) - 1)
 
     roi_changes: Dict[int, List] = {roi_idx + 1: [] for roi_idx in range(len(masks))}
     combined_metadata: Dict[str, Any] = {
@@ -484,7 +559,7 @@ def process_avi_batch_streaming(
         "source_type": "avi_batch_streaming",
     }
 
-    print(f"\nStreaming analysis of {total_videos} videos with {num_workers} workers...")
+    print(f"\nStreaming analysis of {total_videos} videos (workers determined after metadata scan)...")
 
     # ------------------------------------------------------------------
     # Phase 1: Parallel metadata scan → determine time offset per video
@@ -493,7 +568,7 @@ def process_avi_batch_streaming(
     scan_results: Dict[int, Tuple[Optional[Dict], str]] = {}
 
     scanned_count = 0
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ThreadPoolExecutor(max_workers=cpu_workers) as executor:
         futures = {
             executor.submit(_scan_video_metadata, idx, path, target_frame_interval): idx
             for idx, path in enumerate(video_paths)
@@ -511,16 +586,29 @@ def process_avi_batch_streaming(
                     f"Scanning {scanned_count}/{total_videos} videos...",
                 )
 
-    # Calculate time offsets in temporal order; stop at first error
+    # Calculate time offsets in temporal order; stop at first error.
+    # Resolution is validated against the mask dimensions using metadata
+    # already collected in Phase 1 — no extra file opens needed.
     time_offsets: Dict[int, float] = {}
     valid_video_indices: List[int] = []
     current_offset = 0.0
+
+    mask_h, mask_w = (masks[0].shape[:2] if masks else (None, None))
 
     for video_idx in sorted(scan_results.keys()):
         meta, error_msg = scan_results[video_idx]
         if error_msg or meta is None:
             print(f"  STOPPING before video {video_idx + 1}: {error_msg}")
             break
+        if mask_h is not None:
+            vh, vw = meta["height"], meta["width"]
+            if vh != mask_h or vw != mask_w:
+                print(
+                    f"  ⚠️  [{video_idx + 1}] {meta['name']}: "
+                    f"resolution {vw}×{vh} ≠ mask {mask_w}×{mask_h} — "
+                    f"ROI positions will be wrong, skipping this video."
+                )
+                continue
         time_offsets[video_idx] = current_offset
         current_offset += meta["duration"]
         valid_video_indices.append(video_idx)
@@ -529,6 +617,23 @@ def process_avi_batch_streaming(
         raise ValueError("No valid videos found during metadata scan")
 
     print(f"  → {len(valid_video_indices)} valid videos, total duration {current_offset:.1f}s")
+
+    # Worker count for Phase 2 is I/O-bound, not CPU-bound.
+    # H.264/MP4 seeking requires decoding from the nearest keyframe — concurrent
+    # readers thrash the disk and compete for FFMPEG decode capacity.
+    # Empirically, 2–4 workers is optimal for spinning HDD; up to 6 for SSD.
+    # We cap at 4 regardless of CPU count to avoid I/O contention.
+    first_meta = scan_results[valid_video_indices[0]][0]
+    frame_h, frame_w = first_meta["height"], first_meta["width"]
+    bytes_per_worker = chunk_size * frame_h * frame_w * 5
+    target_ram_bytes = 8 * 1024 ** 3
+    max_workers_by_ram = max(1, int(target_ram_bytes / bytes_per_worker))
+    num_workers = min(cpu_workers, max_workers_by_ram, 4)  # cap at 4: I/O bottleneck
+    print(
+        f"  → Workers: {num_workers} "
+        f"(io-cap=4, ram-limit={max_workers_by_ram}, cpu={cpu_workers} "
+        f"for {frame_w}×{frame_h} @ chunk={chunk_size})"
+    )
 
     # ------------------------------------------------------------------
     # Phase 2: Process all valid videos in parallel
@@ -575,7 +680,8 @@ def process_avi_batch_streaming(
     # ------------------------------------------------------------------
     # Phase 3: Merge results in temporal order + cross-video boundary diffs
     # ------------------------------------------------------------------
-    from ._reader import process_chunk as _process_chunk
+    from ._reader import process_chunk as _process_chunk, prepare_masks_for_gpu as _prep_masks
+    _gpu_masks_boundary = _prep_masks(masks)
 
     total_frames_processed = 0
     sorted_indices = sorted(worker_results.keys())
@@ -602,7 +708,7 @@ def process_avi_batch_streaming(
                 try:
                     boundary_array = np.stack([last_frame, next_result[3]], axis=0)
                     boundary_results = _process_chunk(
-                        boundary_array, masks, boundary_time, target_frame_interval
+                        boundary_array, _gpu_masks_boundary, boundary_time, target_frame_interval
                     )
                     for roi_id in boundary_results:
                         roi_changes[roi_id].extend(boundary_results[roi_id])
