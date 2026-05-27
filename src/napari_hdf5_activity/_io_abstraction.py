@@ -35,7 +35,7 @@ def detect_file_format(path: str) -> str:
 
     Zarr stores are recognised by:
     - any path whose name ends in ``.zarr``
-    - a directory that contains a ``.zgroup`` or ``.zarray`` marker
+    - a directory that contains a ``.zgroup``, ``.zarray``, or ``zarr.json`` marker
     - a zip-archive whose name ends in ``.zarr``
 
     HDF5 files are recognised by:
@@ -51,7 +51,7 @@ def detect_file_format(path: str) -> str:
         return "zarr"
 
     if os.path.isdir(path):
-        for marker in (".zgroup", ".zarray", ".zmetadata"):
+        for marker in (".zgroup", ".zarray", ".zmetadata", "zarr.json"):
             if os.path.exists(os.path.join(path, marker)):
                 return "zarr"
 
