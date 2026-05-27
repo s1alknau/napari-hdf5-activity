@@ -4997,7 +4997,10 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             if DUAL_STRUCTURE_AVAILABLE:
                 from ._reader import get_first_frame_enhanced
 
-                first_frame, structure_info = get_first_frame_enhanced(
+                # get_first_frame_enhanced returns (display_frame_rgb,
+                # processing_frame_grayscale, structure_info). We only need
+                # the display frame here for the napari viewer overlay.
+                first_frame, _, _ = get_first_frame_enhanced(
                     self.calibration_file_path_stored
                 )
             else:
