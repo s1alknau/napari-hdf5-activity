@@ -1758,20 +1758,35 @@ def equalize_signal_per_illumination_period(
     data: List[Tuple[float, float]],
     periods: List[Tuple[float, float, str]],
     floor_percentile: float = 15.0,
+    use_mode: bool = True,
+    transition_ramp_minutes: float = 2.0,
 ) -> List[Tuple[float, float]]:
     """
     Level-correct activity signal so all illumination periods share the same baseline floor.
 
-    For each period, computes the resting floor (low percentile of values — represents
-    quiet/resting activity level) then shifts that period's values so all floors align
-    to a common global reference. This removes the DC offset caused by different
-    illumination intensities while fully preserving animal movement amplitudes.
+    For each L/D period the resting floor is estimated as the **mode** of a
+    coarse histogram of the per-frame differences (default) — i.e. the value
+    where the signal spends most of its time, which is the true resting
+    baseline independent of how active the animal happens to be. The legacy
+    low-percentile estimator is kept available via use_mode=False.
+
+    All floors are aligned to a global reference (median of the per-period
+    floors) by adding a per-frame shift. To avoid an audible "click" at L/D
+    boundaries the per-frame shift is convolved with a Gaussian whose width
+    is set by transition_ramp_minutes, so the correction ramps smoothly
+    across the transition instead of stepping discontinuously.
 
     Args:
         data: List of (time_s, value) tuples (frame-to-frame differences)
         periods: List of (start_s, end_s, phase) from extract_illumination_periods()
-        floor_percentile: Percentile used as resting floor estimate (default 15)
-                          Low enough to represent quiet frames, robust to brief spikes.
+        floor_percentile: Percentile used as fallback floor when
+                          use_mode=False (default 15).
+        use_mode: When True (default), use the histogram mode of each period's
+                  values as the resting floor — robust to very active animals.
+                  When False, fall back to the legacy floor_percentile behaviour.
+        transition_ramp_minutes: Smoothing half-width applied to the per-frame
+                                  shift around L/D boundaries (default 2.0).
+                                  Set to 0 to keep hard step transitions.
 
     Returns:
         Level-corrected data as List of (time_s, value) tuples
@@ -1782,38 +1797,62 @@ def equalize_signal_per_illumination_period(
     times = np.array([t for t, _ in data])
     values = np.array([v for _, v in data])
 
-    # Compute per-period floor
-    period_floors = []
-    period_masks = []
+    def _estimate_floor(period_values: np.ndarray) -> Optional[float]:
+        if len(period_values) < 5:
+            return None
+        if use_mode:
+            # Histogram peak = mode of the value distribution = where the
+            # signal sits most of the time. Activity bursts pile up in the
+            # upper tail and don't displace the peak — far more robust than
+            # a low percentile when the animal is frequently active.
+            n_bins = max(50, int(np.sqrt(len(period_values))))
+            hist, edges = np.histogram(period_values, bins=n_bins)
+            peak = int(np.argmax(hist))
+            return float(0.5 * (edges[peak] + edges[peak + 1]))
+        return float(np.percentile(period_values, floor_percentile))
+
+    period_floors: List[Optional[float]] = []
+    period_masks: List[np.ndarray] = []
     for start_s, end_s, _ in periods:
         mask = (times >= start_s) & (times < end_s)
-        if np.sum(mask) < 5:
-            period_masks.append(mask)
-            period_floors.append(None)
-            continue
-        floor = np.percentile(values[mask], floor_percentile)
-        period_floors.append(floor)
+        period_floors.append(_estimate_floor(values[mask]))
         period_masks.append(mask)
 
     valid_floors = [f for f in period_floors if f is not None]
     if not valid_floors:
         return data
 
-    # Global reference = median of per-period floors
     global_floor = float(np.median(valid_floors))
 
-    corrected = values.copy()
+    # Step 1: per-frame shift as a piecewise-constant step function.
+    per_frame_shift = np.zeros_like(values, dtype=float)
     for mask, floor in zip(period_masks, period_floors):
-        if floor is None or np.sum(mask) == 0:
+        if floor is None:
             continue
-        corrected[mask] += (global_floor - floor)
+        per_frame_shift[mask] = global_floor - floor
 
-    # Clamp to >= 0 (frame differences are non-negative)
-    corrected = np.clip(corrected, 0.0, None)
+    # Step 2: blur the step function with a Gaussian so frames near a L/D
+    # boundary receive a smoothly-interpolated shift instead of a jump.
+    if transition_ramp_minutes > 0 and len(times) > 1:
+        try:
+            from scipy.ndimage import gaussian_filter1d
+            dt = float(np.median(np.diff(times)))
+            if dt > 0:
+                sigma_frames = (transition_ramp_minutes * 60.0 / dt) / 2.0
+                if sigma_frames >= 0.5:
+                    per_frame_shift = gaussian_filter1d(
+                        per_frame_shift, sigma=sigma_frames, mode="nearest"
+                    )
+        except ImportError:
+            pass  # scipy missing — keep hard step (fail-safe)
+
+    corrected = np.clip(values + per_frame_shift, 0.0, None)
 
     logger.debug(
         f"Signal equalization: {len(valid_floors)} periods, "
-        f"floors {[f'{f:.4f}' for f in valid_floors]}, global ref={global_floor:.4f}"
+        f"floors {[f'{f:.4f}' for f in valid_floors]}, global ref={global_floor:.4f}, "
+        f"floor_method={'mode' if use_mode else f'p{floor_percentile:.0f}'}, "
+        f"transition_ramp_min={transition_ramp_minutes:.1f}"
     )
     return list(zip(times, corrected))
 
