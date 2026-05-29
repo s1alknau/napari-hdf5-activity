@@ -1758,17 +1758,20 @@ def equalize_signal_per_illumination_period(
     data: List[Tuple[float, float]],
     periods: List[Tuple[float, float, str]],
     floor_percentile: float = 15.0,
-    use_mode: bool = True,
+    use_mode: bool = False,
     transition_ramp_minutes: float = 2.0,
 ) -> List[Tuple[float, float]]:
     """
     Level-correct activity signal so all illumination periods share the same baseline floor.
 
-    For each L/D period the resting floor is estimated as the **mode** of a
-    coarse histogram of the per-frame differences (default) — i.e. the value
-    where the signal spends most of its time, which is the true resting
-    baseline independent of how active the animal happens to be. The legacy
-    low-percentile estimator is kept available via use_mode=False.
+    For each L/D period the resting floor is estimated as a low percentile of
+    the period's frame-to-frame differences (default 15%). This is robust
+    across periods with very different activity proportions because the lower
+    tail of the distribution is dominated by quiet frames regardless of the
+    overall activity level. A histogram-mode estimator is available via
+    use_mode=True for special cases, but it can pick the wrong baseline when
+    the active-frame count exceeds the resting-frame count (the mode then
+    sits on the activity peak, not the resting peak), so it is OFF by default.
 
     All floors are aligned to a global reference (median of the per-period
     floors) by adding a per-frame shift. To avoid an audible "click" at L/D
