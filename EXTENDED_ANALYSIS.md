@@ -235,10 +235,16 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 
 ### Parameters
 
-- **Minimum Period**: Shortest cycle to test (default: 12.0 hours)
-- **Maximum Period**: Longest cycle to test (default: 36.0 hours)
-- **Significance Level**: Statistical threshold (default: 0.05 = 95% confidence)
+The **period range is shared** by the Chi² periodogram and the FFT.
+
+- **Minimum Period / Maximum Period**: Shortest / longest cycle to test. The spin-boxes **default to 0.5 – 8.0 hours** (an ultradian range). Set the range with the preset buttons or by hand:
+    - **Ultradian (0.5–8 h)** · **Infradian (8–20 h)** · **Circadian (20–28 h)**
+    - **Auto-Detect Range** — picks a range from the recording duration: `< 12 h` → 0.5 h to ½·duration; `12–48 h` → 1–18 h; **`≥ 48 h` → 12–36 h** (circadian). This is where the 12–36 h "circadian" range comes from — it is applied only when you click *Auto-Detect* (or *Circadian*), not automatically on load.
+- **Significance Level (α)**: Statistical threshold (default: 0.05 = 95% confidence)
 - **Bin Size**: Optional data averaging (seconds)
+
+!!! tip
+    For circadian rhythms, click **Circadian (20–28 h)** or **Auto-Detect** before running — the initial 0.5–8 h range only scans ultradian periods and will not find a ~24 h rhythm.
 
 ### Output Interpretation
 
@@ -458,8 +464,7 @@ Fast Fourier Transform (FFT) converts time-series data into the frequency domain
 
 ### Parameters
 
-- **Minimum Period**: Shortest cycle to analyze (hours)
-- **Maximum Period**: Longest cycle to analyze (hours)
+- **Minimum Period / Maximum Period**: Analysis range in hours. This is the **same period-range control as the Chi² periodogram** (shared spin-boxes + preset buttons), so it likewise **defaults to 0.5 – 8.0 hours** — use the *Circadian* / *Auto-Detect* presets for a ~24 h search.
 - **Window Function**: Type of windowing (default: "hann")
   - "hann": Good general-purpose window
   - "hamming": Similar to Hann, slightly different sidelobe properties
