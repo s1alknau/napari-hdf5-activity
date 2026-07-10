@@ -157,6 +157,11 @@ Consider two experimental groups with identical mean activity levels (30% moveme
 
 ## Fisher/Chi² Periodogram
 
+!!! info "At a glance"
+    **Output:** χ² statistic Z(T) per tested period + a Bonferroni-corrected significance threshold (≈ 15.2).
+
+    **Use for:** confirming a hypothesized rhythm (e.g. 24 h) with rigorous, correction-built-in statistics.
+
 ### What It Does
 
 The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method for detecting periodic patterns in time-series data. It tests whether activity follows a rhythmic pattern by correlating the signal with sine and cosine waves at different candidate periods. The method provides formal statistical significance testing with a Bonferroni-corrected threshold.
@@ -169,64 +174,64 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 4. **Z-Score Calculation**: Transform to a test statistic with known null distribution
 5. **Significance Testing**: Compare to chi-square distribution (df=2) for p-values
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**Step 1: Correlation with Reference Signals**
+    **Step 1: Correlation with Reference Signals**
 
-For each candidate period T with angular frequency ω = 2π/T, compute Pearson correlations:
+    For each candidate period T with angular frequency ω = 2π/T, compute Pearson correlations:
 
-```
-r_cos = Σᵢ(xᵢ - x̄)(cos(ωtᵢ) - cos̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(cos(ωtᵢ) - cos̄)²]
+    ```
+    r_cos = Σᵢ(xᵢ - x̄)(cos(ωtᵢ) - cos̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(cos(ωtᵢ) - cos̄)²]
 
-r_sin = Σᵢ(xᵢ - x̄)(sin(ωtᵢ) - sin̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(sin(ωtᵢ) - sin̄)²]
-```
+    r_sin = Σᵢ(xᵢ - x̄)(sin(ωtᵢ) - sin̄) / √[Σᵢ(xᵢ - x̄)² × Σᵢ(sin(ωtᵢ) - sin̄)²]
+    ```
 
-These correlations measure how well the data aligns with cosine and sine waves at the test period. Both components are needed because a sinusoid of arbitrary phase can be expressed as a linear combination: A·cos(ωt + φ) = A·cos(φ)·cos(ωt) - A·sin(φ)·sin(ωt).
+    These correlations measure how well the data aligns with cosine and sine waves at the test period. Both components are needed because a sinusoid of arbitrary phase can be expressed as a linear combination: A·cos(ωt + φ) = A·cos(φ)·cos(ωt) - A·sin(φ)·sin(ωt).
 
-**Step 2: Squared Coherence (R²)**
+    **Step 2: Squared Coherence (R²)**
 
-The squared coherence represents the proportion of variance explained by a sinusoid at period T:
+    The squared coherence represents the proportion of variance explained by a sinusoid at period T:
 
-```
-R²(T) = r_cos² + r_sin²
-```
+    ```
+    R²(T) = r_cos² + r_sin²
+    ```
 
-This ranges from 0 (no periodic component) to ~1 (perfect sinusoidal fit). The sum of squared correlations arises because cosine and sine are orthogonal basis functions—their independent contributions to explained variance are additive.
+    This ranges from 0 (no periodic component) to ~1 (perfect sinusoidal fit). The sum of squared correlations arises because cosine and sine are orthogonal basis functions—their independent contributions to explained variance are additive.
 
-**Step 3: Chi-Squared Test Statistic**
+    **Step 3: Chi-Squared Test Statistic**
 
-Convert R² to a test statistic with known null distribution:
+    Convert R² to a test statistic with known null distribution:
 
-```
-Z(T) = n × (r_cos² + r_sin²)
-```
+    ```
+    Z(T) = n × (r_cos² + r_sin²)
+    ```
 
-where n is the number of observations. **Note:** The y-axis in the plot is labeled "Z-score" but the quantity plotted is actually the chi-squared statistic Z(T), which directly follows χ²(df=2) under the null hypothesis.
+    where n is the number of observations. **Note:** The y-axis in the plot is labeled "Z-score" but the quantity plotted is actually the chi-squared statistic Z(T), which directly follows χ²(df=2) under the null hypothesis.
 
-**Step 4: Statistical Significance**
+    **Step 4: Statistical Significance**
 
-Under H₀ (no periodic component at frequency ω), Z(T) follows a **chi-square distribution with 2 degrees of freedom**. The 2 df correspond to the two free parameters: the cosine coefficient and sine coefficient (equivalently, amplitude and phase).
+    Under H₀ (no periodic component at frequency ω), Z(T) follows a **chi-square distribution with 2 degrees of freedom**. The 2 df correspond to the two free parameters: the cosine coefficient and sine coefficient (equivalently, amplitude and phase).
 
-This distributional result derives from: under H₀, √n·r_cos and √n·r_sin are asymptotically independent standard normal variables, and the sum of squares of two independent standard normals follows χ²₂.
+    This distributional result derives from: under H₀, √n·r_cos and √n·r_sin are asymptotically independent standard normal variables, and the sum of squares of two independent standard normals follows χ²₂.
 
-**Bonferroni correction (m = 100 tested periods):**
+    **Bonferroni correction (m = 100 tested periods):**
 
-The plugin tests m = 100 candidate periods simultaneously. Without correction, α = 0.05 over 100 tests produces ~5 false positives on average. The Bonferroni-corrected threshold is:
+    The plugin tests m = 100 candidate periods simultaneously. Without correction, α = 0.05 over 100 tests produces ~5 false positives on average. The Bonferroni-corrected threshold is:
 
-```
-threshold = χ²(1 − α/m, df=2) ≈ 15.2    (for α = 0.05, m = 100)
-```
+    ```
+    threshold = χ²(1 − α/m, df=2) ≈ 15.2    (for α = 0.05, m = 100)
+    ```
 
-`is_significant` is set to True when Z(T) > 15.2 — **not** when a raw per-test p-value < 0.05.
+    `is_significant` is set to True when Z(T) > 15.2 — **not** when a raw per-test p-value < 0.05.
 
-The "mean threshold" line on the population plot also shows this Bonferroni-corrected value.
+    The "mean threshold" line on the population plot also shows this Bonferroni-corrected value.
 
-**p-value calculation (closed form for χ²₂):**
-```
-p = 1 - F_χ²₂(Z) = e^(-Z/2)
-```
+    **p-value calculation (closed form for χ²₂):**
+    ```
+    p = 1 - F_χ²₂(Z) = e^(-Z/2)
+    ```
 
-The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom. Reported p-values are per-test (not corrected); significance decisions use the Bonferroni threshold on Z(T).
+    The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom. Reported p-values are per-test (not corrected); significance decisions use the Bonferroni threshold on Z(T).
 
 ### Parameters
 
@@ -236,6 +241,10 @@ The second equality uses the closed-form CDF of chi-square with 2 degrees of fre
 - **Bin Size**: Optional data averaging (seconds)
 
 ### Output Interpretation
+
+![Chi² periodogram example output](docs/images/extended/chi2_example.png)
+
+*Example Chi² periodogram output: per-ROI Z(T) with the Bonferroni threshold (≈ 15.2) and the population mean (real *Nematostella* recording, 4 ROIs).*
 
 #### Chi² Statistic Plot
 
@@ -358,6 +367,11 @@ ROI 1:
 
 ## FFT Power Spectrum
 
+!!! info "At a glance"
+    **Output:** power spectrum (|FFT|², a.u.) across all frequencies + a permutation p-value.
+
+    **Use for:** exploring unknown or multiple rhythms and harmonics across all frequencies at once.
+
 ### What It Does
 
 Fast Fourier Transform (FFT) converts time-series data into the frequency domain, revealing all periodic components simultaneously. Unlike the Chi² periodogram which tests specific candidate periods, FFT provides a complete spectral decomposition that can reveal unexpected periodicities, harmonics, and the overall noise floor.
@@ -371,76 +385,76 @@ Fast Fourier Transform (FFT) converts time-series data into the frequency domain
 5. **Permutation Test**: Assesses statistical significance
 6. **Peak Detection**: Identifies significant frequency peaks
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**Discrete Fourier Transform (DFT)**
+    **Discrete Fourier Transform (DFT)**
 
-The DFT decomposes a time series x[n] of N samples into complex-valued frequency components:
+    The DFT decomposes a time series x[n] of N samples into complex-valued frequency components:
 
-```
-X[k] = Σₙ₌₀^(N-1) x[n] × e^(-i2πkn/N),    k = 0, 1, ..., N-1
-```
+    ```
+    X[k] = Σₙ₌₀^(N-1) x[n] × e^(-i2πkn/N),    k = 0, 1, ..., N-1
+    ```
 
-Each coefficient X[k] corresponds to frequency f_k = k/(N×Δt) Hz, where Δt is the sampling interval.
+    Each coefficient X[k] corresponds to frequency f_k = k/(N×Δt) Hz, where Δt is the sampling interval.
 
-**Power Spectral Density (PSD)**
+    **Power Spectral Density (PSD)**
 
-The PSD quantifies signal energy at each frequency:
+    The PSD quantifies signal energy at each frequency:
 
-```
-P[k] = |X[k]|² = Re(X[k])² + Im(X[k])²
-```
+    ```
+    P[k] = |X[k]|² = Re(X[k])² + Im(X[k])²
+    ```
 
-For real-valued signals, the spectrum is symmetric, so only frequencies up to the Nyquist frequency f_Nyq = 1/(2Δt) contain unique information.
+    For real-valued signals, the spectrum is symmetric, so only frequencies up to the Nyquist frequency f_Nyq = 1/(2Δt) contain unique information.
 
-### Preprocessing Steps
+    **Preprocessing Steps**
 
-**Linear Detrending**
+    **Linear Detrending**
 
-Biological time series often exhibit slow baseline drift. A linear trend produces a large DC component and spectral leakage into low frequencies, potentially masking circadian signals:
+    Biological time series often exhibit slow baseline drift. A linear trend produces a large DC component and spectral leakage into low frequencies, potentially masking circadian signals:
 
-```
-x_detrended[n] = x[n] - (â×n + b̂)
-```
+    ```
+    x_detrended[n] = x[n] - (â×n + b̂)
+    ```
 
-where â and b̂ are least-squares estimates of the linear trend.
+    where â and b̂ are least-squares estimates of the linear trend.
 
-**Hann Windowing**
+    **Hann Windowing**
 
-The DFT assumes the signal is periodic with period N. Non-integer cycles cause spectral leakage—energy spreads into adjacent frequency bins. The Hann (raised cosine) window tapers the signal to reduce this:
+    The DFT assumes the signal is periodic with period N. Non-integer cycles cause spectral leakage—energy spreads into adjacent frequency bins. The Hann (raised cosine) window tapers the signal to reduce this:
 
-```
-w[n] = 0.5 × (1 - cos(2πn/(N-1))),    n = 0, ..., N-1
-```
+    ```
+    w[n] = 0.5 × (1 - cos(2πn/(N-1))),    n = 0, ..., N-1
+    ```
 
-The Hann window provides ~32 dB sidelobe suppression with a good trade-off between frequency resolution and leakage reduction.
+    The Hann window provides ~32 dB sidelobe suppression with a good trade-off between frequency resolution and leakage reduction.
 
-**Zero-Padding**
+    **Zero-Padding**
 
-Native frequency resolution is Δf = 1/(N×Δt). Zero-padding—appending zeros before FFT—interpolates additional frequency bins, providing a smoother spectral estimate:
+    Native frequency resolution is Δf = 1/(N×Δt). Zero-padding—appending zeros before FFT—interpolates additional frequency bins, providing a smoother spectral estimate:
 
-```
-N_FFT = 4 × N    (rounded to next power of 2 for computational efficiency)
-```
+    ```
+    N_FFT = 4 × N    (rounded to next power of 2 for computational efficiency)
+    ```
 
-This improves apparent resolution by 4× without adding new information.
+    This improves apparent resolution by 4× without adding new information.
 
-### Statistical Significance (Permutation Test)
+    **Statistical Significance (Permutation Test)**
 
-Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test with 1000 shuffles:
+    Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test with 1000 shuffles:
 
-1. Compute observed **maximum** power P_obs over the full tested period range
-2. Generate N_perm = 1000 surrogate time series by randomly shuffling sample order (destroys temporal structure, preserves amplitude distribution)
-3. For each surrogate, apply same preprocessing and compute the **maximum** FFT power over the same period range
-4. Calculate p-value:
+    1. Compute observed **maximum** power P_obs over the full tested period range
+    2. Generate N_perm = 1000 surrogate time series by randomly shuffling sample order (destroys temporal structure, preserves amplitude distribution)
+    3. For each surrogate, apply same preprocessing and compute the **maximum** FFT power over the same period range
+    4. Calculate the p-value with the Phipson & Smyth (2010) add-one correction:
 
-```
-p = (1/N_perm) × Σᵢ 𝟙[P_perm,i ≥ P_obs]
-```
+    ```
+    p = (b + 1) / (N_perm + 1),    where b = Σᵢ 𝟙[P_perm,i ≥ P_obs]
+    ```
 
-where 𝟙[·] is the indicator function.
+    Here 𝟙[·] is the indicator function and `b` counts the surrogates whose max-power matched or exceeded the observed max-power. The **+1** add-on treats the observed statistic as one draw from the discrete permutation null distribution and prevents the impossible-as-a-probability value p = 0 when no surrogate is more extreme (Phipson & Smyth, *SAGMB* 2010).
 
-Using the **maximum** power over the full period range (rather than power at a single frequency) correctly handles the multiple-comparisons problem inherent in scanning many frequencies. The p-value represents the probability that a shuffled (non-periodic) signal would produce as strong a spectral peak anywhere in the tested range. With 1000 permutations, the minimum achievable p-value is 0.001.
+    Using the **maximum** power over the full period range (rather than power at a single frequency) correctly handles the multiple-comparisons problem inherent in scanning many frequencies. The p-value represents the probability that a shuffled (non-periodic) signal would produce as strong a spectral peak anywhere in the tested range. With 1000 permutations, the smallest achievable p-value is 1/(1000 + 1) ≈ 0.001.
 
 ### Parameters
 
@@ -453,6 +467,10 @@ Using the **maximum** power over the full period range (rather than power at a s
 - **Bin Size**: Optional data averaging
 
 ### Output Interpretation
+
+![FFT power spectrum example output](docs/images/extended/fft_example.png)
+
+*Example FFT power-spectrum output across the tested period range (real *Nematostella* recording).*
 
 #### Power Spectrum Plot
 - **Colored curve**: Power across all frequencies
@@ -590,130 +608,139 @@ Differences < 1 hour indicate excellent agreement.
 
 ## Cosinor Analysis
 
+!!! info "At a glance"
+    **Output:** MESOR, Amplitude and Acrophase with 95% CIs and an F-test (plus a population Nelson F-test).
+
+    **Use for:** quantifying a known-period rhythm and comparing rhythm parameters between groups.
+
 ### What It Does
 
 Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activity data and extracting key rhythmic parameters: MESOR (mean level), Amplitude (rhythm strength), and Acrophase (peak timing). This is the gold standard method in chronobiology for rhythm characterization.
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**The Cosinor Model**
+    **The Cosinor Model**
 
-The single-cosinor model assumes activity follows a sinusoidal pattern:
+    The single-cosinor model assumes activity follows a sinusoidal pattern:
 
-```
-x(t) = M + A × cos(2πt/T + φ) + ε
-```
+    ```
+    x(t) = M + A × cos(2πt/T + φ) + ε
+    ```
 
-Where:
-- **M (MESOR)**: Midline Estimating Statistic Of Rhythm—the rhythm-adjusted mean level
-- **A (Amplitude)**: Half the peak-to-trough difference—rhythm strength
-- **φ (Acrophase)**: Phase angle at peak activity—timing within cycle
-- **T (Period)**: Duration of one complete cycle (e.g., 24h for circadian)
-- **ε**: Residual error (assumed i.i.d. normal)
+    Where:
+    - **M (MESOR)**: Midline Estimating Statistic Of Rhythm—the rhythm-adjusted mean level
+    - **A (Amplitude)**: Half the peak-to-trough difference—rhythm strength
+    - **φ (Acrophase)**: Phase angle at peak activity—timing within cycle
+    - **T (Period)**: Duration of one complete cycle (e.g., 24h for circadian)
+    - **ε**: Residual error (assumed i.i.d. normal)
 
-### Linearization for Least-Squares Estimation
+    **Linearization for Least-Squares Estimation**
 
-Direct estimation of A and φ would require nonlinear optimization. Using the trigonometric identity cos(θ+φ) = cos(θ)cos(φ) - sin(θ)sin(φ), the model becomes linear:
+    Direct estimation of A and φ would require nonlinear optimization. Using the trigonometric identity cos(θ+φ) = cos(θ)cos(φ) - sin(θ)sin(φ), the model becomes linear:
 
-```
-x(t) = β₀ + β₁×cos(ωt) + β₂×sin(ωt) + ε
-```
+    ```
+    x(t) = β₀ + β₁×cos(ωt) + β₂×sin(ωt) + ε
+    ```
 
-where ω = 2π/T, and:
-- β₀ = M (MESOR)
-- β₁ = A×cos(φ)
-- β₂ = -A×sin(φ)
+    where ω = 2π/T, and:
+    - β₀ = M (MESOR)
+    - β₁ = A×cos(φ)
+    - β₂ = -A×sin(φ)
 
-### Ordinary Least Squares (OLS) Estimation
+    **Ordinary Least Squares (OLS) Estimation**
 
-Construct the n×3 design matrix:
+    Construct the n×3 design matrix:
 
-```
-X = | 1   cos(ωt₁)   sin(ωt₁) |
-    | 1   cos(ωt₂)   sin(ωt₂) |
-    | ⋮      ⋮          ⋮     |
-    | 1   cos(ωtₙ)   sin(ωtₙ) |
-```
+    ```
+    X = | 1   cos(ωt₁)   sin(ωt₁) |
+        | 1   cos(ωt₂)   sin(ωt₂) |
+        | ⋮      ⋮          ⋮     |
+        | 1   cos(ωtₙ)   sin(ωtₙ) |
+    ```
 
-The OLS estimator is:
+    The OLS estimator is:
 
-```
-β̂ = (X'X)⁻¹X'x
-```
+    ```
+    β̂ = (X'X)⁻¹X'x
+    ```
 
-where x = [x(t₁), ..., x(tₙ)]' is the observation vector.
+    where x = [x(t₁), ..., x(tₙ)]' is the observation vector.
 
-**Parameter Recovery:**
+    **Parameter Recovery:**
 
-```
-M = β̂₀
-A = √(β̂₁² + β̂₂²)
-φ = atan2(-β̂₂, β̂₁)
-```
+    ```
+    M = β̂₀
+    A = √(β̂₁² + β̂₂²)
+    φ = atan2(-β̂₂, β̂₁)
+    ```
 
-The four-quadrant arctangent (atan2) correctly resolves phase to (-π, π] regardless of coefficient signs. Convert to clock time: t_acro = (φ/ω) mod T.
+    The four-quadrant arctangent (atan2) correctly resolves phase to (-π, π] regardless of coefficient signs. Convert to clock time: t_acro = (φ/ω) mod T.
 
-### Significance Testing (F-test)
+    **Significance Testing (F-test)**
 
-The null hypothesis H₀: A = 0 (no rhythm) is tested by comparing the full model to the mean-only model:
+    The null hypothesis H₀: A = 0 (no rhythm) is tested by comparing the full model to the mean-only model:
 
-```
-F = [(SS_tot - SS_res)/k] / [SS_res/(n-k-1)] = [SS_model/2] / [SS_res/(n-3)]
-```
+    ```
+    F = [(SS_tot - SS_res)/k] / [SS_res/(n-k-1)] = [SS_model/2] / [SS_res/(n-3)]
+    ```
 
-where:
-- SS_tot = Σᵢ(xᵢ - x̄)² — total sum of squares
-- SS_res = Σᵢ(xᵢ - x̂ᵢ)² — residual sum of squares
-- SS_model = SS_tot - SS_res — model sum of squares
-- k = 2 — number of model parameters (cos and sin coefficients)
-- n-3 — residual degrees of freedom
+    where:
+    - SS_tot = Σᵢ(xᵢ - x̄)² — total sum of squares
+    - SS_res = Σᵢ(xᵢ - x̂ᵢ)² — residual sum of squares
+    - SS_model = SS_tot - SS_res — model sum of squares
+    - k = 2 — number of model parameters (cos and sin coefficients)
+    - n-3 — residual degrees of freedom
 
-Under H₀, F follows an F-distribution with (2, n-3) degrees of freedom.
+    Under H₀, F follows an F-distribution with (2, n-3) degrees of freedom.
 
-**Goodness of Fit:**
+    **Goodness of Fit:**
 
-```
-R² = 1 - SS_res/SS_tot = SS_model/SS_tot
-```
+    ```
+    R² = 1 - SS_res/SS_tot = SS_model/SS_tot
+    ```
 
-R² represents the proportion of variance explained by the fitted sinusoid.
+    R² represents the proportion of variance explained by the fitted sinusoid.
 
-### Confidence Intervals
+    **Confidence Intervals**
 
-Standard errors are computed from the variance-covariance matrix:
+    Standard errors are computed from the variance-covariance matrix:
 
-```
-Var(β̂) = σ̂² × (X'X)⁻¹,    where σ̂² = SS_res/(n-3)
-```
+    ```
+    Var(β̂) = σ̂² × (X'X)⁻¹,    where σ̂² = SS_res/(n-3)
+    ```
 
-For MESOR: SE(M) = √Var(β̂₀)
+    For MESOR: SE(M) = √Var(β̂₀)
 
-For Amplitude (nonlinear function), use the **delta method**:
+    For Amplitude (nonlinear function), use the **delta method**:
 
-```
-SE(A) ≈ (1/A) × √[β̂₁²×Var(β̂₁) + β̂₂²×Var(β̂₂)]
-```
+    ```
+    SE(A) ≈ (1/A) × √[β̂₁²×Var(β̂₁) + β̂₂²×Var(β̂₂)]
+    ```
 
-Confidence intervals: θ ± t_{n-3,1-α/2} × SE(θ)
+    Confidence intervals: θ ± t_{n-3,1-α/2} × SE(θ)
 
-### Population-Mean Cosinor (Nelson et al. 1979)
+    **Population-Mean Cosinor (Nelson et al. 1979)**
 
-For multiple individuals (ROIs), the **population cosinor** uses the Nelson et al. (1979) F-test. Each individual ROI's OLS fit produces β_cos,j and β_sin,j. The population-level hypothesis H₀: mean(β_cos) = mean(β_sin) = 0 is tested with:
+    For multiple individuals (ROIs), the **population cosinor** uses the Nelson et al. (1979) F-test. Each individual ROI's OLS fit produces β_cos,j and β_sin,j. The population-level hypothesis H₀: mean(β_cos) = mean(β_sin) = 0 is tested with:
 
-```
-F(dfn=2, dfd=2(n−1))
-```
+    ```
+    F(dfn=2, dfd=2(n−1))
+    ```
 
-where n = number of ROIs. The numerator is built from the mean β_cos and mean β_sin across all ROIs; the denominator uses the variance of those coefficients. This tests whether the population as a whole oscillates — not merely whether individual ROIs oscillate.
+    where n = number of ROIs. The numerator is built from the mean β_cos and mean β_sin across all ROIs; the denominator uses the variance of those coefficients. This tests whether the population as a whole oscillates — not merely whether individual ROIs oscillate.
 
-Population amplitude and acrophase are derived via vector averaging of individual (Aⱼ, φⱼ):
-```
-xⱼ = Aⱼ×cos(φⱼ),    yⱼ = Aⱼ×sin(φⱼ)
-x̄ = (1/J)Σⱼxⱼ,    ȳ = (1/J)Σⱼyⱼ
-A_pop = √(x̄² + ȳ²),    φ_pop = atan2(ȳ, x̄)
-```
+    Population amplitude and acrophase are derived via vector averaging of individual (Aⱼ, φⱼ):
+    ```
+    xⱼ = Aⱼ×cos(φⱼ),    yⱼ = Aⱼ×sin(φⱼ)
+    x̄ = (1/J)Σⱼxⱼ,    ȳ = (1/J)Σⱼyⱼ
+    A_pop = √(x̄² + ȳ²),    φ_pop = atan2(ȳ, x̄)
+    ```
 
 ### Output Parameters
+
+![Cosinor example output](docs/images/extended/cosinor_example.png)
+
+*Example cosinor output: fitted cosine curves overlaid on the activity data (real *Nematostella* recording).*
 
 **Individual ROI Results:**
 - **Best-fit period**: Period with highest R² among tested periods
@@ -913,6 +940,11 @@ Population:
 
 ## ROI Similarity Matrix
 
+!!! info "At a glance"
+    **Output:** a pairwise cross-correlation matrix, the optimal lag per pair, and UPGMA clusters.
+
+    **Use for:** finding synchronized or anti-phase ROI groups (social structure, dominance).
+
 ### What It Does
 
 Computes pairwise cross-correlations between all ROIs to identify synchronized or anti-phase activity patterns. Uses hierarchical clustering to group similar ROIs. Provides both a similarity metric and phase offset estimates.
@@ -925,94 +957,98 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
 4. **Significance Testing**: t-test for correlation significance
 5. **Clustering**: Groups ROIs by similarity using hierarchical clustering
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**Signal Normalization**
+    **Signal Normalization**
 
-For each time series, normalize to zero mean and unit variance:
+    For each time series, normalize to zero mean and unit variance:
 
-```
-x̃(t) = (x(t) - x̄) / σₓ,    ỹ(t) = (y(t) - ȳ) / σᵧ
-```
+    ```
+    x̃(t) = (x(t) - x̄) / σₓ,    ỹ(t) = (y(t) - ȳ) / σᵧ
+    ```
 
-**Cross-Correlation Function**
+    **Cross-Correlation Function**
 
-The normalized cross-correlation at lag τ is computed with **unbiased** normalisation — each lag is divided by the number of overlapping samples (n − |τ|), not by the full n, so the result is always a valid Pearson-r equivalent in [−1, 1]:
+    The normalized cross-correlation at lag τ is computed with **unbiased** normalisation — each lag is divided by the number of overlapping samples (n − |τ|), not by the full n, so the result is always a valid Pearson-r equivalent in [−1, 1]:
 
-```
-r_xy(τ) = (1/(n − |τ|)) × Σₜ x̃(t) × ỹ(t+τ)
-```
+    ```
+    r_xy(τ) = (1/(n − |τ|)) × Σₜ x̃(t) × ỹ(t+τ)
+    ```
 
-This yields values in [-1, 1]:
-- r_xy(τ) = 1: Perfect positive correlation at lag τ
-- r_xy(τ) = -1: Perfect negative correlation (anti-phase)
-- r_xy(τ) = 0: No linear relationship
+    This yields values in [-1, 1]:
+    - r_xy(τ) = 1: Perfect positive correlation at lag τ
+    - r_xy(τ) = -1: Perfect negative correlation (anti-phase)
+    - r_xy(τ) = 0: No linear relationship
 
-The lag range is limited to ±12 hours (half the circadian period).
+    The lag range is limited to ±12 hours (half the circadian period).
 
-**Peak Correlation and Optimal Lag**
+    **Peak Correlation and Optimal Lag**
 
-```
-r_max = max_τ |r_xy(τ)|
-τ_opt = argmax_τ |r_xy(τ)|
-```
+    ```
+    r_max = max_τ |r_xy(τ)|
+    τ_opt = argmax_τ |r_xy(τ)|
+    ```
 
-ROIs with |τ_opt| < 1h are considered in-phase (synchronized).
+    ROIs with |τ_opt| < 1h are considered in-phase (synchronized).
 
-### Statistical Significance Testing
+    **Statistical Significance Testing**
 
-To determine if correlation differs significantly from zero, use the **t-test for Pearson correlation**:
+    To determine if correlation differs significantly from zero, use the **t-test for Pearson correlation**:
 
-Under H₀: ρ = 0 (true population correlation is zero):
+    Under H₀: ρ = 0 (true population correlation is zero):
 
-```
-t = r × √[(n-2)/(1-r²)]
-```
+    ```
+    t = r × √[(n-2)/(1-r²)]
+    ```
 
-This follows a Student's t-distribution with ν = n-2 degrees of freedom.
+    This follows a Student's t-distribution with ν = n-2 degrees of freedom.
 
-**Two-tailed p-value:**
-```
-p = 2 × (1 - F_{t,ν}(|t|))
-```
+    **Two-tailed p-value:**
+    ```
+    p = 2 × (1 - F_{t,ν}(|t|))
+    ```
 
-**Critical correlation threshold** for significance at level α:
+    **Critical correlation threshold** for significance at level α:
 
-```
-r_crit = √[t²_crit / (n-2 + t²_crit)]
-```
+    ```
+    r_crit = √[t²_crit / (n-2 + t²_crit)]
+    ```
 
-where t_crit = F⁻¹_{t,ν}(1-α/2). This shows r_crit decreases as sample size increases.
+    where t_crit = F⁻¹_{t,ν}(1-α/2). This shows r_crit decreases as sample size increases.
 
-**Bonferroni correction for multiple pairs:**
+    **Bonferroni correction for multiple pairs:**
 
-With N ROIs, there are N(N−1)/2 simultaneous pair tests. The corrected significance level is:
+    With N ROIs, there are N(N−1)/2 simultaneous pair tests. The corrected significance level is:
 
-```
-corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
-```
+    ```
+    corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
+    ```
 
-`is_significant` is only set to True when the per-pair p-value < corrected_alpha.
+    `is_significant` is only set to True when the per-pair p-value < corrected_alpha.
 
-### Hierarchical Clustering
+    **Hierarchical Clustering**
 
-To identify groups with similar activity patterns, correlations are converted to distances:
+    To identify groups with similar activity patterns, correlations are converted to distances:
 
-```
-d_ij = 1 - r_ij
-```
+    ```
+    d_ij = 1 - r_ij
+    ```
 
-Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
+    Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
 
-**Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The clustering threshold is controlled by the GUI slider (`Similarity threshold (r)`); the code fallback when no slider is set is r = 0.5 (so the dendrogram is cut at distance d = 1 − r = 0.5).
+    **Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The clustering threshold is controlled by the GUI slider (`Similarity threshold (r)`); the code fallback when no slider is set is r = 0.5 (so the dendrogram is cut at distance d = 1 − r = 0.5).
 
-**Important:** Hierarchical clustering is **exploratory and descriptive only**. Cluster assignments are not statistically tested and should not be used as primary statistical evidence. Use the Bonferroni-corrected pairwise correlations for significance claims.
+    **Important:** Hierarchical clustering is **exploratory and descriptive only**. Cluster assignments are not statistically tested and should not be used as primary statistical evidence. Use the Bonferroni-corrected pairwise correlations for significance claims.
 
 ### Parameters
 
 - **Maximum Lag**: Maximum time shift to test (default: 12 hours)
 
 ### Output Interpretation
+
+![ROI similarity matrix example output](docs/images/extended/similarity_example.png)
+
+*Example ROI-similarity output: the pairwise cross-correlation matrix (real *Nematostella* recording).*
 
 #### Correlation Matrix Heatmap
 - **Green**: High positive correlation (synchronized)
@@ -1163,6 +1199,11 @@ Low Similarity:
 
 ## Coherence Analysis
 
+!!! info "At a glance"
+    **Output:** frequency-specific magnitude-squared coherence γ²(f) for every ROI pair.
+
+    **Use for:** detecting a shared rhythm at a specific frequency even when signals are phase-shifted.
+
 ### What It Does
 
 Measures frequency-specific synchronization between ROI pairs using Welch's method. Unlike cross-correlation (which measures overall similarity), coherence identifies which specific frequency components are synchronized. Two ROIs might have low overall correlation but high coherence at the circadian frequency.
@@ -1174,69 +1215,71 @@ Measures frequency-specific synchronization between ROI pairs using Welch's meth
 3. **Coherence Calculation**: Normalizes to 0-1 scale at each frequency
 4. **Significance Testing**: Compares to threshold based on number of segments
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**Welch's Method for Spectral Estimation**
+    **Welch's Method for Spectral Estimation**
 
-Rather than computing a single periodogram (high variance), Welch's method averages across K overlapping segments:
+    Rather than computing a single periodogram (high variance), Welch's method averages across K overlapping segments:
 
-1. Divide each signal into segments of length L with 50% overlap
-2. Apply Hann window w[n] to each segment
-3. Compute DFT of each windowed segment: X_k[f], Y_k[f]
-4. Estimate spectral densities by averaging:
+    1. Divide each signal into segments of length L with 50% overlap
+    2. Apply Hann window w[n] to each segment
+    3. Compute DFT of each windowed segment: X_k[f], Y_k[f]
+    4. Estimate spectral densities by averaging:
 
-```
-P̂₁₁(f) = (1/K) × Σₖ |Xₖ[f]|²
-P̂₂₂(f) = (1/K) × Σₖ |Yₖ[f]|²
-P̂₁₂(f) = (1/K) × Σₖ Xₖ*[f] × Yₖ[f]
-```
+    ```
+    P̂₁₁(f) = (1/K) × Σₖ |Xₖ[f]|²
+    P̂₂₂(f) = (1/K) × Σₖ |Yₖ[f]|²
+    P̂₁₂(f) = (1/K) × Σₖ Xₖ*[f] × Yₖ[f]
+    ```
 
-where Xₖ* denotes complex conjugate.
+    where Xₖ* denotes complex conjugate.
 
-**Magnitude-Squared Coherence**
+    **Magnitude-Squared Coherence**
 
-```
-γ²(f) = |P̂₁₂(f)|² / [P̂₁₁(f) × P̂₂₂(f)]
-```
+    ```
+    γ²(f) = |P̂₁₂(f)|² / [P̂₁₁(f) × P̂₂₂(f)]
+    ```
 
-This is analogous to squared correlation but computed at each frequency:
-- γ²(f) = 1: Perfect linear relationship at frequency f
-- γ²(f) = 0: No linear relationship at frequency f
+    This is analogous to squared correlation but computed at each frequency:
+    - γ²(f) = 1: Perfect linear relationship at frequency f
+    - γ²(f) = 0: No linear relationship at frequency f
 
-### Significance Threshold
+    **Significance Threshold**
 
-Under H₀ (two signals are independent), the coherence estimator follows a distribution that depends on K segments. The significance threshold for detecting non-zero coherence at level α is:
+    Under H₀ (two signals are independent), the coherence estimator follows a distribution that depends on K segments. The significance threshold for detecting non-zero coherence at level α is:
 
-```
-γ²_crit = 1 - α^(1/(K-1))
-```
+    ```
+    γ²_crit = 1 - α^(1/(K-1))
+    ```
 
-This derives from the beta distribution of coherence under the null hypothesis.
+    This derives from the beta distribution of coherence under the null hypothesis.
 
-**Example:** K = 8 segments, α = 0.05:
-```
-γ²_crit = 1 - 0.05^(1/7) ≈ 0.37
-```
+    **Example:** K = 8 segments, α = 0.05:
+    ```
+    γ²_crit = 1 - 0.05^(1/7) ≈ 0.37
+    ```
 
-More segments → lower threshold → more statistical power, but reduced frequency resolution.
+    More segments → lower threshold → more statistical power, but reduced frequency resolution.
 
-For circadian analysis, extract coherence within ±20% of the target period (e.g., 24h) and compare to γ²_crit.
+    > **In practice (this implementation):** `nperseg` is set to one full target period and capped at `n // 2`, so a typical circadian recording yields only **~2–3 Welch segments**. With so few segments the threshold is *high* — e.g. K = 3 gives γ²_crit = 1 − 0.05^(1/2) ≈ 0.78 — so only very strong frequency-specific synchronization is flagged significant. The K = 8 example above is illustrative, not typical.
 
-### Bonferroni Correction for Multiple Pairs
+    For circadian analysis, extract coherence within ±20% of the target period (e.g., 24h) and compare to γ²_crit.
 
-With N ROIs, coherence is computed for all N(N−1)/2 pairs simultaneously. The per-pair significance level is Bonferroni-corrected:
+    **Bonferroni Correction for Multiple Pairs**
 
-```
-corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
-```
+    With N ROIs, coherence is computed for all N(N−1)/2 pairs simultaneously. The per-pair significance level is Bonferroni-corrected:
 
-The per-pair threshold then becomes:
+    ```
+    corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
+    ```
 
-```
-γ²_crit = 1 − corrected_alpha^(1/(K−1))
-```
+    The per-pair threshold then becomes:
 
-where K is the number of Welch segments. This prevents inflation of false-positive pair detections.
+    ```
+    γ²_crit = 1 − corrected_alpha^(1/(K−1))
+    ```
+
+    where K is the number of Welch segments. This prevents inflation of false-positive pair detections.
 
 ### Parameters
 
@@ -1245,6 +1288,10 @@ where K is the number of Welch segments. This prevents inflation of false-positi
 - **Window**: Hann window (fixed)
 
 ### Output Interpretation
+
+![Coherence example output](docs/images/extended/coherence_example.png)
+
+*Example coherence output: pairwise magnitude-squared coherence near the target period (real *Nematostella* recording).*
 
 #### Coherence Heatmap
 
@@ -1384,6 +1431,11 @@ The matrix uses a **viridis** colormap: 0 = dark purple (no coherence), 1 = yell
 
 ## Phase Clustering
 
+!!! info "At a glance"
+    **Output:** each ROI's activity-weighted peak phase and concentration R, plus a population R_pop (polar plot).
+
+    **Use for:** seeing when each ROI peaks and how tightly the group's activity phases cluster.
+
 ### What It Does
 
 Computes each ROI's mean activity phase as the **activity-weighted circular mean of time-of-day**, clusters ROIs into four chronotype quadrants, and visualises them on a polar plot with light/dark sector shading. A separate pairwise Phase Locking Value (PLV), based on Hilbert-transform phase differences, quantifies how consistently any two ROIs maintain a fixed phase offset.
@@ -1407,94 +1459,94 @@ Computes each ROI's mean activity phase as the **activity-weighted circular mean
 
 **Note:** The per-ROI mean phase is a quantitative *peak-activity time* with a per-ROI rhythm-concentration index (R_roi ∈ [0, 1]). The pairwise PLV is descriptive (no formal significance test). For statistical confirmation of rhythmicity, use Chi² periodogram or Cosinor.
 
-### Mathematical Foundation
+??? note "Mathematical details"
 
-**Activity-weighted resultant vector (per-ROI phase)**
+    **Activity-weighted resultant vector (per-ROI phase)**
 
-Let x(tᵢ) be the activity at timepoint tᵢ. Let T be the dominant period and ω = 2π/T. Define:
+    Let x(tᵢ) be the activity at timepoint tᵢ. Let T be the dominant period and ω = 2π/T. Define:
 
-```
-wᵢ = x(tᵢ) − min(x)
-θᵢ = ω · (tᵢ mod T)
-V  = Σᵢ wᵢ · e^(iθᵢ)
-```
+    ```
+    wᵢ = x(tᵢ) − min(x)
+    θᵢ = ω · (tᵢ mod T)
+    V  = Σᵢ wᵢ · e^(iθᵢ)
+    ```
 
-Then:
+    Then:
 
-```
-phase_radians = arg(V)
-phase_hours   = (phase_radians / 2π) · T   (mod T)
-R_roi         = |V| / Σᵢ wᵢ                (rhythm concentration ∈ [0, 1])
-```
+    ```
+    phase_radians = arg(V)
+    phase_hours   = (phase_radians / 2π) · T   (mod T)
+    R_roi         = |V| / Σᵢ wᵢ                (rhythm concentration ∈ [0, 1])
+    ```
 
-Quiescent timepoints (wᵢ ≈ 0) contribute nothing, so the resultant vector points to *when* the animal is actually active. The method makes no waveform assumption (sinusoidal or otherwise) and is independent of the cosinor fit, which makes it a genuine cross-validation of the cosinor acrophase rather than a circular restatement.
+    Quiescent timepoints (wᵢ ≈ 0) contribute nothing, so the resultant vector points to *when* the animal is actually active. The method makes no waveform assumption (sinusoidal or otherwise) and is independent of the cosinor fit, which makes it a genuine cross-validation of the cosinor acrophase rather than a circular restatement.
 
-**Why not the Hilbert circular mean of instantaneous phase?**
+    **Why not the Hilbert circular mean of instantaneous phase?**
 
-For a single oscillating signal, the circular mean of arg(hilbert(x − x̄)) is biased toward the *trough* of the signal because activity data dwell near their minimum (long quiescence + brief bouts of movement). The estimator therefore returns ~12 h regardless of true peak timing for a 24-h rhythm, producing a spurious ~12 h offset against the cosinor acrophase and an artefactually inflated population resultant length (~0.98). The activity-weighted method above avoids this bias by construction. The Hilbert circular mean is still used correctly for pairwise *phase differences* (PLV, below) because the difference is stable even when each individual phase sweeps uniformly.
+    For a single oscillating signal, the circular mean of arg(hilbert(x − x̄)) is biased toward the *trough* of the signal because activity data dwell near their minimum (long quiescence + brief bouts of movement). The estimator therefore returns ~12 h regardless of true peak timing for a 24-h rhythm, producing a spurious ~12 h offset against the cosinor acrophase and an artefactually inflated population resultant length (~0.98). The activity-weighted method above avoids this bias by construction. The Hilbert circular mean is still used correctly for pairwise *phase differences* (PLV, below) because the difference is stable even when each individual phase sweeps uniformly.
 
-**Hilbert Transform and Analytic Signal (used by PLV only)**
+    **Hilbert Transform and Analytic Signal (used by PLV only)**
 
-For a real-valued signal x(t), the analytic signal is:
+    For a real-valued signal x(t), the analytic signal is:
 
-```
-z(t) = x(t) + i × H{x(t)}
-```
+    ```
+    z(t) = x(t) + i × H{x(t)}
+    ```
 
-where H{x(t)} is the Hilbert transform — a 90° phase shift of all frequency components:
+    where H{x(t)} is the Hilbert transform — a 90° phase shift of all frequency components:
 
-```
-H{x(t)} = (1/π) × P.V. ∫ x(τ)/(t-τ) dτ
-```
+    ```
+    H{x(t)} = (1/π) × P.V. ∫ x(τ)/(t-τ) dτ
+    ```
 
-The analytic signal in polar form:
+    The analytic signal in polar form:
 
-```
-z(t) = a(t) × e^(iφ(t))
-```
+    ```
+    z(t) = a(t) × e^(iφ(t))
+    ```
 
-where:
-- a(t) = |z(t)| is the **instantaneous amplitude** (envelope)
-- φ(t) = arg(z(t)) is the **instantaneous phase**
+    where:
+    - a(t) = |z(t)| is the **instantaneous amplitude** (envelope)
+    - φ(t) = arg(z(t)) is the **instantaneous phase**
 
-### Phase Locking Value (PLV)
+    **Phase Locking Value (PLV)**
 
-For two signals with instantaneous phases φ₁(t) and φ₂(t), the phase difference is Δφ(t) = φ₂(t) - φ₁(t). The PLV measures consistency of this phase difference:
+    For two signals with instantaneous phases φ₁(t) and φ₂(t), the phase difference is Δφ(t) = φ₂(t) - φ₁(t). The PLV measures consistency of this phase difference:
 
-```
-PLV = |(1/N) × Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
-```
+    ```
+    PLV = |(1/N) × Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
+    ```
 
-**Geometric interpretation:** Each term e^(iΔφ(t)) is a unit vector at angle Δφ(t) on the complex plane:
-- Constant phase difference → all vectors point same direction → PLV = 1
-- Uniformly varying phase → vectors cancel → PLV ≈ 0
+    **Geometric interpretation:** Each term e^(iΔφ(t)) is a unit vector at angle Δφ(t) on the complex plane:
+    - Constant phase difference → all vectors point same direction → PLV = 1
+    - Uniformly varying phase → vectors cancel → PLV ≈ 0
 
-**Interpretation guidelines (heuristic thresholds — not statistically derived):**
-- PLV > 0.8: Strong phase synchronization
-- PLV ∈ [0.5, 0.8]: Moderate synchronization
-- PLV ∈ [0.3, 0.5]: Weak synchronization
-- PLV < 0.3: No meaningful synchronization
+    **Interpretation guidelines (heuristic thresholds — not statistically derived):**
+    - PLV > 0.8: Strong phase synchronization
+    - PLV ∈ [0.5, 0.8]: Moderate synchronization
+    - PLV ∈ [0.3, 0.5]: Weak synchronization
+    - PLV < 0.3: No meaningful synchronization
 
-These thresholds are conventional heuristics. No formal significance test is applied to PLV values.
+    These thresholds are conventional heuristics. No formal significance test is applied to PLV values.
 
-**Mean Phase Difference (circular mean):**
+    **Mean Phase Difference (circular mean):**
 
-```
-Δφ̄ = arg(Σₜ e^(iΔφ(t)))
-```
+    ```
+    Δφ̄ = arg(Σₜ e^(iΔφ(t)))
+    ```
 
-Convert to hours: Δt = (Δφ̄/2π) × T gives the average time by which signal 2 leads/lags signal 1.
+    Convert to hours: Δt = (Δφ̄/2π) × T gives the average time by which signal 2 leads/lags signal 1.
 
-### Phase Clustering for Chronotype Identification
+    **Phase Clustering for Chronotype Identification**
 
-Each ROI's per-ROI mean phase (in clock hours, mod T) is assigned to one of four equal chronotype quadrants of width T/4 (for T = 24 h, each quadrant spans 6 h):
+    Each ROI's per-ROI mean phase (in clock hours, mod T) is assigned to one of four equal chronotype quadrants of width T/4 (for T = 24 h, each quadrant spans 6 h):
 
-- **Early-active** (0–T/4): ZT 0–6 h
-- **Mid-active** (T/4–T/2): ZT 6–12 h
-- **Late-active** (T/2–3T/4): ZT 12–18 h
-- **Night-active** (3T/4–T): ZT 18–24 h
+    - **Early-active** (0–T/4): ZT 0–6 h
+    - **Mid-active** (T/4–T/2): ZT 6–12 h
+    - **Late-active** (T/2–3T/4): ZT 12–18 h
+    - **Night-active** (3T/4–T): ZT 18–24 h
 
-The polar plot additionally shades a **Light sector** (yellow) and **Dark sector** (gray) derived from the recording's LED telemetry: the light fraction is computed as the proportion of telemetry samples with `white_power > 0.5`, times T. If no LED data is available the plot falls back to a 12 h light / 12 h dark default.
+    The polar plot additionally shades a **Light sector** (yellow) and **Dark sector** (gray) derived from the recording's LED telemetry: the light fraction is computed as the proportion of telemetry samples with `white_power > 0.5`, times T. If no LED data is available the plot falls back to a 12 h light / 12 h dark default.
 
 ### Parameters
 
@@ -1502,6 +1554,10 @@ The polar plot additionally shades a **Light sector** (yellow) and **Dark sector
 - **Bin size** (seconds): optional re-binning before phase extraction (default: 60 s when called from the GUI; `None` skips re-binning)
 
 ### Output Interpretation
+
+![Phase clustering example output](docs/images/extended/phase_example.png)
+
+*Example phase-clustering output: each ROI's activity-weighted peak phase on a polar plot (real *Nematostella* recording).*
 
 #### Polar Plot
 
