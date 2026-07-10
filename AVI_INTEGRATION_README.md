@@ -36,7 +36,15 @@ viewer.open('video.avi', plugin='napari-hdf5-activity')
 
 ### 2. Load Multiple AVI Files (Batch)
 
-**Via UI:**
+The easiest way to load many files is **Load Directory** — point it at the folder
+and every `.avi` inside is loaded as one continuous timeseries (see section 3).
+
+**Via UI (recommended — whole folder):**
+1. Click "Load Directory"
+2. Select the folder containing your `.avi` files
+3. All AVIs loaded as one continuous timeseries (sorted by timestamp/name)
+
+**Via UI (individual files):**
 1. Click "Load File"
 2. Hold Ctrl/Cmd and select multiple `.avi` files
 3. Files loaded as continuous timeseries with temporal concatenation
@@ -106,18 +114,11 @@ When loading multiple videos:
 
 ## Differences from HDF5
 
-| Feature | HDF5 | Zarr | AVI |
-|---------|------|------|-----|
-| Frame Loading | Direct dataset access | Direct array access | opencv video reader |
-| LED Data | ✓ Available in timeseries | ✗ Not available | ✗ Not available |
-| Lighting Plot | ✓ Automatic from LED data | ✗ Not shown | ✗ Not shown |
-| Metadata | ✓ Embedded in file | ✗ Basic (shape, dtype) | ✗ Basic (FPS, duration) |
-| Batch Processing | Directory scan | Single directory store | Multi-select or directory |
-| Movement Analysis | ✓ Identical | ✓ Identical | ✓ Identical |
-| Threshold Methods | ✓ All methods | ✓ All methods | ✓ All methods |
-| Export | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots |
-
-**Note:** Lighting conditions plots are only available for HDF5 files where LED power data is stored in the timeseries.
+AVI is one of three supported input formats (HDF5, Zarr, AVI). See the
+[format comparison table](docs/USER_GUIDE.md#format-comparison) in the User Guide
+for how they differ. In short: AVI carries no embedded LED/timing data, so
+lighting-condition overlays are unavailable — movement analysis, threshold
+methods and export work identically to HDF5/Zarr.
 
 ## Requirements
 

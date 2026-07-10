@@ -101,6 +101,24 @@ The plugin has 5 tabs:
 - Only first frame is loaded initially (~2 MB instead of 500 MB)
 - Full dataset loaded during analysis
 
+#### Format comparison
+
+| Feature | HDF5 | Zarr | AVI |
+|---------|------|------|-----|
+| Frame Loading | Direct dataset access | Direct array access | opencv video reader |
+| LED Data | ✓ Available in timeseries | ✓ Available in timeseries | ✗ Not available |
+| Lighting Plot | ✓ Automatic from LED data | ✓ Automatic from LED data | ✗ Not shown |
+| Metadata | ✓ Embedded in file | ✗ Basic (shape, dtype) | ✗ Basic (FPS, duration) |
+| Batch Processing | Directory scan | Single directory store | Directory scan or Ctrl multi-select |
+| Movement Analysis | ✓ Identical | ✓ Identical | ✓ Identical |
+| Threshold Methods | ✓ All methods | ✓ All methods | ✓ All methods |
+| Export | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots | ✓ Excel/CSV/Plots |
+
+**Note:** Lighting conditions plots require LED power data in the `timeseries`
+group, which the recording plugin writes to **both HDF5 and Zarr** stores
+(`white_led_power` / `ir_led_power`). AVI files carry no LED data, so lighting
+plots are unavailable for them.
+
 ### ROI Detection
 
 **What are ROIs?**
