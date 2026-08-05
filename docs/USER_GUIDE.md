@@ -200,9 +200,10 @@ The plugin offers three methods for determining movement thresholds:
 - Single recordings
 
 **Parameters:**
-- **Baseline Duration**: Length of baseline period (default: 200 minutes)
-  - Should be long enough to capture typical activity
-  - Usually first portion of recording
+- **Baseline Duration**: Length of the baseline window used to compute the mean
+  and standard deviation of the activity signal. On loading a dataset the plugin
+  sets this to the **full recording** by default (matching the methods used in
+  the paper); shorten it only to take the baseline from a specific window.
 - **Threshold Multiplier**: Sensitivity factor (default: 0.10)
   - Higher = less sensitive (fewer movements detected)
   - Lower = more sensitive (more movements detected)
@@ -268,27 +269,29 @@ Threshold = baseline_mean + (multiplier × baseline_std)
 #### 3. Adaptive Method
 
 **When to use:**
-- Long recordings (> 24 hours)
-- Variable environmental conditions
-- Gradual changes in activity levels
+- Noisy recordings or variable signal quality
+- When the threshold should adapt to the data's noise level automatically
 
 **Parameters:**
-- **Adaptive Duration**: Window size for moving baseline (minutes)
-  - Shorter = more responsive to changes
-  - Longer = more stable thresholds
-- **Adaptive Multiplier**: Sensitivity factor
-- **Adaptive Recalculation Interval**: How often to update baseline (minutes)
+- **Analysis Duration (min)**: the sample period whose signal quality is analysed
+  (default: 15 min, range 5–120)
+- **Base Multiplier**: base threshold multiplier before quality scaling
+  (default: 2.5, range 1.0–5.0)
 
 **How it works:**
-- Baseline is recalculated periodically
-- Uses sliding window approach
-- Adapts to gradual changes (e.g., developmental effects)
+- Analyses the sample period and computes signal-quality metrics: signal-to-noise
+  ratio (SNR = mean / std), coefficient of variation (CV = std / mean), and the
+  percentage of outliers (IQR fencing).
+- For high-noise signals (CV > 0.5 or > 10 % outliers) the **median** replaces the
+  mean as the baseline estimator (robust to outliers).
+- The base multiplier is scaled by SNR and CV — relaxed for noisy signals (fewer
+  false positives), tightened for clean signals (higher sensitivity).
+- Movement is then detected with the **same hysteresis logic** as the baseline method.
 
 **Configuration:**
 1. Navigate to **"Adaptive Method"** tab
-2. Set adaptive duration
-3. Set recalculation interval
-4. Set multiplier
+2. Set the analysis duration
+3. Set the base multiplier
 
 ### Additional Options
 
@@ -558,7 +561,7 @@ Displays statistics for current frame:
 2. Detect ROIs (adjust min/max radius as needed)
 3. Configure analysis (Analysis tab):
    - Frame interval: 5 seconds
-   - Baseline method: 200 minutes baseline, 0.10 multiplier
+   - Baseline method: full-recording baseline (default), 0.10 multiplier
    - Enable detrending: ON
 4. Start analysis
 5. Generate plots (Results tab)
