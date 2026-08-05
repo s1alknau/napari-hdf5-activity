@@ -314,7 +314,7 @@ Threshold = baseline_mean + (multiplier × baseline_std)
 
 **Processing Time:**
 - Depends on: File size, number of ROIs, chunk size, number of processes
-- Typical: 1-5 minutes for 3-day recording with 6 ROIs
+- Typical: 1-5 minutes for 3-day recording with 4 ROIs
 
 ---
 

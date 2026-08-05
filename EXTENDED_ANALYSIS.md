@@ -1793,7 +1793,9 @@ R_roi separates *when* activity happens from *how much* activity there is:
 
 ### Example: Complete Analysis
 
-**Dataset**: 6 animals, 72 hours of recording
+> *Illustrative teaching example with hypothetical data (three synchronized groups) — **not** this study's results. For the real four-ROI dataset see the example plots under each method above.*
+
+**Dataset**: 6 hypothetical ROIs, 72 hours of recording
 
 **Chi² Periodogram Results**:
 ```
@@ -2232,7 +2234,7 @@ Bushell 1978; Z(T) > 15.2, Bonferroni-corrected for m=100 periods,
 (ROI 1: period = 24.2 ± 0.3 h, Z(T) = 125.4, Bonferroni-corrected
 threshold 15.2, p < 0.0001;
 ROI 2: period = 23.8 ± 0.2 h, Z(T) = 118.7, p < 0.0001;
-n = 6 animals; Chi² periodogram, Sokolove & Bushell 1978)"
+n = 4 animals; Chi² periodogram, Sokolove & Bushell 1978)"
 ```
 
 **Synchronization**:
@@ -2269,7 +2271,7 @@ indicate dominant periods. All ROIs showed significant circadian rhythms
 Figure 3. Phase relationships of circadian activity.
 Polar plot showing per-ROI mean activity phase (angular position;
 clockwise from ZT 0 at top) and resultant length R_roi ∈ [0, 1]
-(radial distance, rhythm concentration) for each animal (n = 6).
+(radial distance, rhythm concentration) for each animal (n = 4).
 Per-ROI phase is the activity-weighted circular mean of time-of-day
 within one 24 h cycle. Background sectors mark light (yellow) and
 dark (gray) phases. The black population-mean vector has length

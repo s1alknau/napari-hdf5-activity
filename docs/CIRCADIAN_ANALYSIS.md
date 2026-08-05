@@ -8,7 +8,7 @@ quantifying periodic patterns in biological activity data:
 | Method | Best For | Requires |
 |--------|----------|----------|
 | **Chi² Periodogram** | Exploratory period detection, robust to non-sinusoidal signals | ≥ 3 cycles |
-| **Cosinor Analysis** | Quantifying amplitude and acrophase of a known period | ≥ 7 cycles, sinusoidal signal |
+| **Cosinor Analysis** | Quantifying amplitude and acrophase of a known period | ≥ 3 cycles, sinusoidal signal |
 | **Population Mean** | Cross-individual consistency, SEM across ROIs | ≥ 2 ROIs |
 
 ---
@@ -88,13 +88,13 @@ Shown automatically when ≥ 2 ROIs are analyzed:
 
 Fits the model `y(t) = MESOR + Amplitude × cos(2πt/τ + φ)` to the timeseries.
 
-| Parameter | Meaning |
-|-----------|---------|
-| **MESOR** | Midline Estimating Statistic of Rhythm — rhythm-adjusted mean level |
-| **Amplitude** | Half the peak-to-trough difference — biological rhythm strength |
-| **φ (phase)** | Phase offset of the fitted cosine |
-| **Peak Time** | Time from recording start to first cosine peak |
-| **R²** | Goodness of fit (proportion of variance explained by the cosine) |
+| Parameter | Symbol | Meaning |
+|-----------|:------:|---------|
+| MESOR | *M* | Midline Estimating Statistic of Rhythm — rhythm-adjusted mean level |
+| Amplitude | *A* | Half the peak-to-trough difference — biological rhythm strength |
+| Acrophase | *φ* | Phase offset of the fitted cosine (radians) |
+| Peak Time | *t*<sub>peak</sub> | Clock time of the first cosine peak (*φ* converted to hours from recording start) |
+| Goodness of fit | *R*² | Proportion of variance explained by the fitted cosine |
 
 ### R² interpretation
 
@@ -115,7 +115,7 @@ Each additional cycle reduces estimation error by √n:
 | 7 days | 7 | ~0.20–0.35 | ± 0.3 h |
 | 14 days | 14 | ~0.35–0.50 | ± 0.2 h |
 
-**Minimum: 7 cycles (= 7 days for 24h rhythm)**
+**Minimum: 3 cycles (= 3 days for a 24 h rhythm)** — the same as the Chi² periodogram. More cycles are not required; they simply tighten the confidence intervals and raise R² (see the table above).
 
 ### p-values in Cosinor
 
@@ -164,22 +164,23 @@ If the recording started at ZT0 (lights-on = recording start): no correction nee
 - Continuous signal in [0, 1]
 - Threshold-dependent: the hysteresis threshold determines what counts as "active"
 - **Standard for circadian biology** (comparable to running wheel activity counts)
-- Recommended for: Chi² periodogram, actogram visualization
+- Recommended for: Chi² periodogram, Cosinor, actogram visualization
 
 ### Raw Intensity
 
 - Per-frame pixel change values (frame differences), MinMax-normalized per ROI
 - Continuous signal, preserves amplitude information
 - Independent of movement threshold
-- Recommended for: Cosinor analysis, detecting subtle rhythms below the
-  movement threshold
+- Optional alternative when you want to preserve sub-threshold amplitude
+  (e.g. very weak rhythms). The analyses in this project use Fraction
+  Movement throughout, including Cosinor.
 
 ### When to use which
 
 | Analysis | Recommended source | Reason |
 |----------|-------------------|--------|
 | Chi² Periodogram | Fraction Movement | Literature standard, robust |
-| Cosinor | Raw Intensity | Assumes sinusoidal, benefits from amplitude info |
+| Cosinor | Fraction Movement | Continuous [0,1] activity; consistent with the other analyses |
 | Actogram | Fraction Movement | Interpretable as % time active |
 
 ---
@@ -259,7 +260,7 @@ without requiring per-period thresholds.
 | Goal | Minimum | Recommended |
 |------|---------|-------------|
 | Chi² period detection | 3 cycles (3 days for τ=24h) | 5–7 days |
-| Cosinor fit | 7 cycles | 10–14 days |
+| Cosinor fit | 3 cycles (3 days for τ=24h) | 7–14 days |
 | Entrainment verification | 5 days LD + 5 days DD | 7 days LD + 7 days DD |
 
 ### Period range
@@ -273,7 +274,7 @@ without requiring per-period thresholds.
 - Use Full Recording by default
 - Use segment analysis only when recording is long enough to split into
   transient and stable phases (≥ 7 days total)
-- Minimum window for reliable analysis: 5 × expected period
+- Minimum window for reliable analysis: 3 × expected period
 
 ### Environmental control
 
