@@ -1,9 +1,8 @@
 # napari-hdf5-activity
 
-[![License MIT](https://img.shields.io/pypi/l/napari-hdf5-activity.svg?color=green)](https://github.com/s1alknau/napari-hdf5-activity/raw/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/napari-hdf5-activity.svg?color=green)](https://pypi.org/project/napari-hdf5-activity)
-[![Python Version](https://img.shields.io/pypi/pyversions/napari-hdf5-activity.svg?color=green)](https://python.org)
-[![napari hub](https://img.shields.io/endpoint?url=https://api.napari-hub.org/shields/napari-hdf5-activity)](https://napari-hub.org/plugins/napari-hdf5-activity)
+![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![Python](https://img.shields.io/badge/python-3.12%2B-green.svg)
+![napari](https://img.shields.io/badge/napari-0.5%2B-green.svg)
 
 A napari plugin for analyzing activity and movement behavior from HDF5, Zarr, and AVI timelapse recordings.
 
@@ -304,34 +303,55 @@ Detailed documentation for advanced features and workflows:
 
 ## Installation
 
-### From PyPI
+This plugin is **not published on PyPI** — install it from source.
 
-```bash
-pip install napari-hdf5-activity
-```
-
-### From Source
+Requires **Python 3.12 or newer**. Developed and run against napari 0.6.6 on
+Python 3.12.
 
 ```bash
 git clone https://github.com/s1alknau/napari-hdf5-activity.git
 cd napari-hdf5-activity
-pip install -e .
+pip install -e ".[zarr]"
 ```
+
+### Qt binding
+
+napari needs one, and this plugin works with all three — it goes through `qtpy`
+and follows whatever is installed. **If your environment already runs napari,
+install nothing here**; adding a second binding is what breaks such setups.
+
+For a fresh environment, pick one:
+
+| | |
+|---|---|
+| `pip install -e ".[pyside6]"` | Qt 6 — recommended |
+| `pip install -e ".[pyqt6]"` | Qt 6 |
+| `pip install -e ".[pyqt5]"` | Qt 5; shears the client area on some dual-GPU machines |
+
+With PySide6, `site-packages/PyQt5` must be **fully removed** — several packages
+treat even an emptied directory as an installed binding and then pick the wrong
+one.
+
+### Zarr
+
+The `[zarr]` extra is what makes Zarr stores readable; without it the plugin
+still handles HDF5 and AVI. Recordings from the current rig are Zarr **format
+v3**. zarr-python 2.x reads v2 only, 3.x reads both — so on Python 3.12 the
+extra installs 3.x and every store works. Opening a v3 store with zarr-python 2
+raises an explicit error naming the fix rather than a bare "nothing found at
+path".
 
 ### Dependencies
 
-Required:
-- `napari >= 0.4.17`
-- `numpy`
-- `h5py`
-- `opencv-python` (for AVI support)
-- `matplotlib`
-- `qtpy`
-- `scikit-image`
+Installed automatically:
 
-Optional:
-- `pandas` (for Excel export)
-- `openpyxl` (for Excel export)
+`napari>=0.5.0` · `qtpy>=2.0.0` · `numpy>=1.22.0` · `scipy>=1.9.0` ·
+`pandas>=1.5.0` · `h5py>=3.0.0` · `matplotlib>=3.5.0` · `psutil>=5.8.0` ·
+`opencv-python>=4.5.0` (AVI support)
+
+Extras: `[zarr]` as above · `[testing]` for the test suite (adds pytest and
+pytest-qt) · `openpyxl` is needed for Excel export and must be installed by
+hand — it is not declared in any extra.
 
 ## Quick Start
 
