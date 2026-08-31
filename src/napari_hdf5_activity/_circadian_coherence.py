@@ -14,14 +14,15 @@ Target period = (min_period + max_period) / 2  (read from GUI spinboxes).
 
 Algorithm:
   1. Re-bin signals to bin_size_seconds.
-  2. Auto-select nperseg = min(256, n // 8), minimum 16.
+  2. Auto-select nperseg = samples per target period, clamped to [16, n // 2].
   3. Compute coherence via Welch (50 % overlap).
   4. Extract coherence within ±20 % of target period.
   5. Significance threshold = 1 − α^(1 / (n_segments − 1)).
 
-⚠ Frequency resolution = fs / nperseg. For a 24 h recording at 5-min bins
-  (288 points), nperseg ≈ 36 → resolution ≈ 3 h. Use 30–60 min bins or
-  longer recordings (≥ 3× target period) for reliable results.
+⚠ With nperseg set to one target period and capped at n // 2, only ~2-3 Welch
+  segments are available from a short record, so coherence estimates are noisy
+  and the significance threshold is high. Use longer recordings (≥ several
+  target periods) for reliable results.
 
 ⚠ Period range MUST be centred on the target rhythm:
   e.g. 20–28 h for circadian (24 h), 4–8 h for ultradian (6 h).
@@ -72,6 +73,8 @@ Recommended settings:
 import numpy as np
 from typing import Dict, List, Tuple, Any
 from scipy import signal
+
+from ._batch import roi_label
 
 
 def coherence_significance_threshold(n_segments: int, alpha: float = 0.05) -> float:
@@ -229,24 +232,38 @@ def calculate_coherence_matrix(
     Returns:
         Dictionary with coherence matrix, significance matrix, and ROI information
     """
+    from ._batch import build_common_grid, overlapping_pair, spans_multiple_datasets
     from ._fisher_analysis import _bin_data
 
     # Prepare data
     roi_ids = sorted(movement_data.keys())
     roi_signals = {}
 
-    for roi_id in roi_ids:
-        data = movement_data[roi_id]
-        if not data or len(data) < 10:
-            continue
+    # Coherence pairs its two inputs by sample index, which only equals time
+    # alignment inside one recording — pooled datasets go on a shared grid.
+    pooled = spans_multiple_datasets(roi_ids)
+    if pooled:
+        _, roi_signals = build_common_grid(
+            movement_data, bin_size_seconds or sampling_interval
+        )
+        roi_signals = {
+            roi_id: sig
+            for roi_id, sig in roi_signals.items()
+            if np.sum(np.isfinite(sig)) >= 10
+        }
+    else:
+        for roi_id in roi_ids:
+            data = movement_data[roi_id]
+            if not data or len(data) < 10:
+                continue
 
-        times = np.array([t for t, _ in data])
-        values = np.array([v for _, v in data])
+            times = np.array([t for t, _ in data])
+            values = np.array([v for _, v in data])
 
-        if bin_size_seconds:
-            values, _ = _bin_data(times, values, bin_size_seconds)
+            if bin_size_seconds:
+                values, _ = _bin_data(times, values, bin_size_seconds)
 
-        roi_signals[roi_id] = values
+            roi_signals[roi_id] = values
 
     # Calculate coherence for all pairs
     n_rois = len(roi_signals)
@@ -259,6 +276,12 @@ def calculate_coherence_matrix(
     # Bonferroni correction: testing n_pairs simultaneously at α → α / n_pairs
     n_pairs = max(1, n_rois * (n_rois - 1) // 2)
     corrected_alpha = significance_level / n_pairs
+    skipped_pairs = []
+
+    # Coherence at the target period needs at least two cycles of overlap;
+    # anything shorter has no frequency resolution there.
+    step_seconds = float(bin_size_seconds if bin_size_seconds else sampling_interval)
+    min_overlap = max(10, int(2 * target_period_hours * 3600.0 / max(step_seconds, 1e-9)))
 
     for i, roi1 in enumerate(roi_list):
         for j, roi2 in enumerate(roi_list):
@@ -273,9 +296,19 @@ def calculate_coherence_matrix(
                 significance_matrix[i, j] = significance_matrix[j, i]
                 continue
 
+            sig1, sig2 = roi_signals[roi1], roi_signals[roi2]
+            if pooled:
+                sig1, sig2, n_overlap = overlapping_pair(
+                    sig1, sig2, min_samples=min_overlap
+                )
+                if sig1 is None:
+                    skipped_pairs.append((roi1, roi2, n_overlap))
+                    coherence_matrix[i, j] = np.nan
+                    continue
+
             result = calculate_coherence(
-                roi_signals[roi1],
-                roi_signals[roi2],
+                sig1,
+                sig2,
                 sampling_interval=(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
@@ -301,6 +334,9 @@ def calculate_coherence_matrix(
         "significance_level": significance_level,
         "corrected_alpha": corrected_alpha,
         "n_pairs_tested": n_pairs,
+        "pooled_datasets": pooled,
+        "n_pairs_skipped_no_overlap": len(skipped_pairs),
+        "skipped_pairs": skipped_pairs,
     }
 
 
@@ -499,6 +535,17 @@ def generate_coherence_summary(coherence_results: Dict[str, Any]) -> str:
 
     summary_lines.append(f"Total ROIs analyzed: {n_rois}")
     summary_lines.append(f"Target period: {target_period:.1f} hours")
+    n_skipped = coherence_results.get("n_pairs_skipped_no_overlap", 0)
+    if coherence_results.get("pooled_datasets"):
+        summary_lines.append(
+            "Pooled datasets: ROIs aligned on a shared time grid; "
+            "each pair uses only the samples both recordings cover."
+        )
+        if n_skipped:
+            summary_lines.append(
+                f"  {n_skipped} pair(s) skipped — overlap shorter than "
+                f"2 x {target_period:.1f} h (shown as blank)."
+            )
     summary_lines.append("")
 
     # Find highly coherent pairs
@@ -525,7 +572,7 @@ def generate_coherence_summary(coherence_results: Dict[str, Any]) -> str:
         summary_lines.append("Top 5 most coherent ROI pairs:")
         for i, pair in enumerate(coherent_pairs[:5], 1):
             summary_lines.append(
-                f"  {i}. ROI {pair['roi1']} ↔ ROI {pair['roi2']}: "
+                f"  {i}. {roi_label(pair['roi1'])} ↔ {roi_label(pair['roi2'])}: "
                 f"coherence={pair['coherence']:.3f} at {pair['period']:.1f}h"
             )
 
@@ -558,8 +605,8 @@ def export_coherence_to_excel(file_path: str, coherence_results: Dict) -> None:
         if len(coherence_matrix) > 0:
             coherence_df = pd.DataFrame(
                 coherence_matrix,
-                index=[f"ROI {r}" for r in roi_ids],
-                columns=[f"ROI {r}" for r in roi_ids],
+                index=[f"{roi_label(r)}" for r in roi_ids],
+                columns=[f"{roi_label(r)}" for r in roi_ids],
             )
             coherence_df.to_excel(writer, sheet_name="Coherence_Matrix")
 

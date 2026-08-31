@@ -10,6 +10,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Any
 from scipy import signal
 
+from ._batch import roi_label
+
 
 def _permutation_test_fft(
     time_series: np.ndarray,
@@ -82,8 +84,14 @@ def _permutation_test_fft(
         else:
             permuted_powers.append(0.0)
 
-    # p-value: proportion of permuted max-powers >= observed max-power
-    p_value = np.sum(np.array(permuted_powers) >= observed_power) / n_permutations
+    # p-value: (b + 1) / (N + 1), where b is the count of permutations whose
+    # max-power matched or exceeded the observed max-power. The +1 add-on
+    # treats the observed statistic as a draw from the discrete permutation
+    # null distribution and prevents the impossible-as-probability value p = 0
+    # when no permutation is more extreme (Phipson & Smyth, SAGMB 2010,
+    # doi 10.2202/1544-6115.1585).
+    b = int(np.sum(np.array(permuted_powers) >= observed_power))
+    p_value = (b + 1.0) / (n_permutations + 1.0)
     return p_value
 
 
@@ -471,7 +479,7 @@ def generate_fft_summary(results: Dict[int, Dict[str, Any]]) -> str:
         summary_lines.append("")
 
     for roi_id, result in sorted(results.items()):
-        summary_lines.append(f"ROI {roi_id}:")
+        summary_lines.append(f"{roi_label(roi_id)}:")
 
         if "error" in result:
             summary_lines.append(f"  ⚠️  {result['error']}")

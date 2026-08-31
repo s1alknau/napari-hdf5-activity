@@ -43,6 +43,8 @@ from scipy import signal, stats
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 
+from ._batch import roi_label
+
 
 def correlation_significance_test(
     r: float, n: int, alpha: float = 0.05
@@ -133,8 +135,13 @@ def calculate_cross_correlation(
     correlation = signal.correlate(s1, s2, mode="same", method="auto")
 
     # Calculate lags
+    # The window must stay inside the correlation array on both sides:
+    # centre - max_lag >= 0 and centre + max_lag + 1 <= len, which for an even
+    # length means max_lag <= len // 2 - 1. Clamping to len // 2 leaves the lag
+    # array one longer than the window whenever the requested lag covers half
+    # the signal or more.
     max_lag_samples = int((max_lag_hours * 3600) / sampling_interval)
-    max_lag_samples = min(max_lag_samples, len(correlation) // 2)
+    max_lag_samples = min(max_lag_samples, (len(correlation) - 1) // 2)
 
     center = len(correlation) // 2
     lag_range = slice(center - max_lag_samples, center + max_lag_samples + 1)
@@ -196,24 +203,39 @@ def calculate_roi_correlation_matrix(
     Returns:
         Dictionary containing correlation matrix, ROI pairs, and significance matrix
     """
+    from ._batch import build_common_grid, overlapping_pair, spans_multiple_datasets
     from ._fisher_analysis import _bin_data
 
     # Prepare data
     roi_ids = sorted(movement_data.keys())
     roi_signals = {}
 
-    for roi_id in roi_ids:
-        data = movement_data[roi_id]
-        if not data or len(data) < 10:
-            continue
+    # Cross-correlation aligns its two inputs by sample index. Within one
+    # recording that is also time alignment; across pooled datasets it is not,
+    # so put every ROI on a shared absolute time grid first.
+    pooled = spans_multiple_datasets(roi_ids)
+    if pooled:
+        _, roi_signals = build_common_grid(
+            movement_data, bin_size_seconds or sampling_interval
+        )
+        roi_signals = {
+            roi_id: sig
+            for roi_id, sig in roi_signals.items()
+            if np.sum(np.isfinite(sig)) >= 10
+        }
+    else:
+        for roi_id in roi_ids:
+            data = movement_data[roi_id]
+            if not data or len(data) < 10:
+                continue
 
-        times = np.array([t for t, _ in data])
-        values = np.array([v for _, v in data])
+            times = np.array([t for t, _ in data])
+            values = np.array([v for _, v in data])
 
-        if bin_size_seconds:
-            values, _ = _bin_data(times, values, bin_size_seconds)
+            if bin_size_seconds:
+                values, _ = _bin_data(times, values, bin_size_seconds)
 
-        roi_signals[roi_id] = values
+            roi_signals[roi_id] = values
 
     # Calculate all pairwise correlations
     n_rois = len(roi_signals)
@@ -227,6 +249,14 @@ def calculate_roi_correlation_matrix(
     # Bonferroni correction: testing n_pairs simultaneously at α → α / n_pairs
     n_pairs = max(1, n_rois * (n_rois - 1) // 2)
     corrected_alpha = significance_level / n_pairs
+    skipped_pairs = []
+
+    # A pair needs enough shared samples to actually scan the lag window;
+    # otherwise the "optimal lag" is read off a handful of points.
+    step_seconds = float(bin_size_seconds if bin_size_seconds else sampling_interval)
+    min_overlap = max(
+        10, int(2 * max_lag_hours * 3600.0 / max(step_seconds, 1e-9))
+    )
 
     for i, roi1 in enumerate(roi_list):
         for j, roi2 in enumerate(roi_list):
@@ -245,9 +275,23 @@ def calculate_roi_correlation_matrix(
                 significance_matrix[i, j] = significance_matrix[j, i]
                 continue
 
+            sig1, sig2 = roi_signals[roi1], roi_signals[roi2]
+            if pooled:
+                sig1, sig2, n_overlap = overlapping_pair(
+                    sig1, sig2, min_samples=min_overlap
+                )
+                if sig1 is None:
+                    # Datasets at different ZT offsets can barely overlap —
+                    # a correlation from a handful of samples is noise.
+                    skipped_pairs.append((roi1, roi2, n_overlap))
+                    p_value_matrix[i, j] = np.nan
+                    correlation_matrix[i, j] = np.nan
+                    lag_matrix[i, j] = np.nan
+                    continue
+
             result = calculate_cross_correlation(
-                roi_signals[roi1],
-                roi_signals[roi2],
+                sig1,
+                sig2,
                 max_lag_hours=max_lag_hours,
                 sampling_interval=(
                     bin_size_seconds if bin_size_seconds else sampling_interval
@@ -273,6 +317,9 @@ def calculate_roi_correlation_matrix(
         "significance_level": significance_level,
         "corrected_alpha": corrected_alpha,
         "n_pairs_tested": n_pairs,
+        "pooled_datasets": pooled,
+        "n_pairs_skipped_no_overlap": len(skipped_pairs),
+        "skipped_pairs": skipped_pairs,
     }
 
 
@@ -450,6 +497,16 @@ def generate_similarity_summary(
 
     summary_lines.append(f"Total ROIs analyzed: {n_rois}")
     summary_lines.append(f"Total pairwise comparisons: {n_rois * (n_rois - 1) // 2}")
+    n_skipped = correlation_results.get("n_pairs_skipped_no_overlap", 0)
+    if correlation_results.get("pooled_datasets"):
+        summary_lines.append(
+            "Pooled datasets: ROIs aligned on a shared time grid; "
+            "each pair uses only the samples both recordings cover."
+        )
+        if n_skipped:
+            summary_lines.append(
+                f"  {n_skipped} pair(s) skipped — too little overlap (shown as blank)."
+            )
     summary_lines.append("")
 
     # Find similar pairs using the caller-supplied threshold
@@ -466,7 +523,7 @@ def generate_similarity_summary(
                 else f"lag: {pair['lag_hours']:.1f}h"
             )
             summary_lines.append(
-                f"  {i}. ROI {pair['roi1']} ↔ ROI {pair['roi2']}: "
+                f"  {i}. {roi_label(pair['roi1'])} ↔ {roi_label(pair['roi2'])}: "
                 f"r={pair['correlation']:.3f} ({sync_status})"
             )
 
@@ -512,8 +569,8 @@ def export_similarity_to_excel(file_path: str, similarity_results: Dict) -> None
         if len(corr_matrix) > 0:
             corr_df = pd.DataFrame(
                 corr_matrix,
-                index=[f"ROI {r}" for r in roi_ids],
-                columns=[f"ROI {r}" for r in roi_ids],
+                index=[f"{roi_label(r)}" for r in roi_ids],
+                columns=[f"{roi_label(r)}" for r in roi_ids],
             )
             corr_df.to_excel(writer, sheet_name="Correlation_Matrix")
 

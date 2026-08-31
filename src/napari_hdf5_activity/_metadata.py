@@ -19,6 +19,39 @@ except ImportError:
     pd = None
 
 # ===================================================================
+# FORMAT GUARD
+# ===================================================================
+
+HDF5_SUFFIXES = (".h5", ".hdf5")
+
+
+class UnsupportedFormatError(ValueError):
+    """A metadata function was handed something that is not an HDF5 file."""
+
+
+def _require_hdf5(file_path: str) -> None:
+    """Reject non-HDF5 input loudly instead of returning an empty result.
+
+    The functions in this module read HDF5 *storage internals* — libver,
+    driver, chunks, compression, fletcher32, fillvalue — and walk the file with
+    ``visititems``. None of that has a Zarr or video equivalent, so they are
+    HDF5-specific by design, not by omission.
+
+    Without this guard the failure is invisible: h5py raises a permission error
+    on a Zarr *directory*, the surrounding ``except`` swallows it, and the
+    caller receives a complete-looking dictionary with zero datasets and zero
+    groups. Nothing outside this module reads ``extraction_info["error"]``, so
+    nobody ever finds out.
+    """
+    if not str(file_path).lower().endswith(HDF5_SUFFIXES):
+        raise UnsupportedFormatError(
+            f"'{os.path.basename(file_path)}' is not an HDF5 file. "
+            f"Metadata extraction reads HDF5 storage internals and supports "
+            f"{' / '.join(HDF5_SUFFIXES)} only."
+        )
+
+
+# ===================================================================
 # EXISTING METADATA FUNCTIONS (PRESERVED)
 # ===================================================================
 
@@ -33,6 +66,7 @@ def extract_hdf5_metadata(file_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing all metadata
     """
+    _require_hdf5(file_path)
     metadata = {
         "file_info": {},
         "datasets": {},
@@ -164,30 +198,8 @@ def extract_hdf5_metadata(file_path: str) -> Dict[str, Any]:
     return metadata
 
 
-def detect_hdf5_structure_type(file_path: str) -> str:
-    """
-    Detect the type of HDF5 structure.
-
-    Returns:
-        'individual_frames': Individual frames in images/ group
-        'stacked_frames': All frames in single 'frames' dataset
-        'unknown': Cannot determine structure
-    """
-    try:
-        with h5py.File(file_path, "r") as h5_file:
-            if "images" in h5_file and "timeseries" in h5_file:
-                images_group = h5_file["images"]
-                if len(images_group.keys()) > 100:  # Many individual frames
-                    return "individual_frames"
-            elif "frames" in h5_file:
-                return "stacked_frames"
-            else:
-                return "unknown"
-    except:
-        return "unknown"
-
-
 # def extract_hdf5_metadata_timeseries(file_path: str) -> Dict[str, Any]:
+    _require_hdf5(file_path)
 #     """Extract time-series data from JSON metadata attributes and dataset groups."""
 #     metadata = extract_hdf5_metadata(file_path)
 
@@ -1144,6 +1156,7 @@ def analyze_nematostella_hdf5_file(file_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing analysis results and export paths
     """
+    _require_hdf5(file_path)
     try:
         # Initialize analyzer
         analyzer = NematostellaTimeseriesAnalyzer(file_path)
@@ -1185,6 +1198,7 @@ def get_nematostella_timeseries_summary(file_path: str) -> str:
     Returns:
         String summary of available timeseries data
     """
+    _require_hdf5(file_path)
     try:
         with h5py.File(file_path, "r") as h5_file:
             if "timeseries" not in h5_file:
@@ -1833,6 +1847,7 @@ def _safe_filter_hdf5_metadata(ts_data: dict) -> dict:
 
 def debug_metadata_quick(file_path: str):
     """Quick debug to see what's in the HDF5 file"""
+    _require_hdf5(file_path)
     if not file_path or not os.path.exists(file_path):
         print("No valid file path provided")
         return

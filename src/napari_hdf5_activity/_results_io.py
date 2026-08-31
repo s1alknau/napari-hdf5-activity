@@ -206,6 +206,21 @@ def save_comprehensive_results(
                     if key in led and led[key] is not None:
                         led_group.create_dataset(key, data=np.array(led[key], dtype="f8"))
 
+            # Save environment data (temperature / humidity timeseries).
+            # Stored so the temperature-control analysis works from a results
+            # file alone, without needing the raw recording alongside.
+            if "environment_data" in core_results and core_results["environment_data"]:
+                env = core_results["environment_data"]
+                env_group = core_group.create_group("environment_data")
+                for key in ("times", "temperature", "humidity"):
+                    if key in env and env[key] is not None:
+                        env_group.create_dataset(
+                            key, data=np.array(env[key], dtype="f8")
+                        )
+                for key in ("temperature_source", "humidity_source", "units"):
+                    if key in env and env[key] is not None:
+                        env_group.attrs[key] = _hdf5_safe(env[key])
+
             # Save ROI masks — binary arrays (uint8, one per ROI)
             try:
                 if "masks" in core_results and core_results["masks"]:
@@ -720,6 +735,16 @@ def load_comprehensive_results(file_path: str) -> Dict[str, Any]:
                         if key in led_group:
                             led_data[key] = led_group[key][:].tolist()
                     results["core_analysis"]["led_data"] = led_data
+
+                # Load environment data (temperature / humidity)
+                if "environment_data" in core_group:
+                    env_group = core_group["environment_data"]
+                    env_data = {}
+                    for key in ("times", "temperature", "humidity"):
+                        if key in env_group:
+                            env_data[key] = env_group[key][:].tolist()
+                    env_data.update(dict(env_group.attrs))
+                    results["core_analysis"]["environment_data"] = env_data
 
                 # Load ROI masks
                 if "roi_masks" in core_group:

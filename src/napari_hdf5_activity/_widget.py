@@ -12,12 +12,14 @@ import pandas as pd
 import psutil
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from napari.qt.threading import thread_worker
 from qtpy.QtCore import QTimer, Signal, Qt, QSettings
+from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import (
+    QFrame,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -42,6 +44,9 @@ from qtpy.QtWidgets import (
     QHeaderView,
     QListWidget,
     QListWidgetItem,
+    QTableWidget,
+    QTableWidgetItem,
+    QAbstractItemView,
 )
 
 class _ScaledPixmapLabel(QLabel):
@@ -1683,7 +1688,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.per_roi_scroll = QScrollArea()
         self.per_roi_scroll.setWidgetResizable(True)
         self.per_roi_scroll.setMaximumHeight(180)
-        self.per_roi_scroll.setFrameShape(self.per_roi_scroll.NoFrame)
+        self.per_roi_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.per_roi_inner = QWidget()
         self.per_roi_inner_layout = QVBoxLayout()
         self.per_roi_inner_layout.setSpacing(2)
@@ -1877,6 +1882,12 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("color: #666; font-size: 10px; margin-bottom: 10px;")
         layout.addWidget(desc_label)
+
+        # Batch datasets — pool several saved analyses into one population
+        layout.addWidget(self._build_batch_group())
+
+        # Temperature control — is the rhythm an artefact of temperature?
+        layout.addWidget(self._build_temperature_group())
 
         # Period range parameters
         fisher_params_group = QGroupBox("Period Range Parameters")
@@ -2664,26 +2675,33 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         basename = os.path.basename(file_path)
 
         # === AUTOMATISCHE LEGACY-DETECTION BEIM LADEN ===
-        try:
-            # Quick legacy check
-            with h5py.File(file_path, "r") as f:
-                is_legacy = self._quick_legacy_check(f)
-
-            if is_legacy:
-                self._log_message(f"Legacy file detected: {basename}")
-                self._log_message(
-                    "   Will automatically enhance with unit documentation during analysis"
-                )
-                self.lbl_file_info.setText(
-                    f"Loaded LEGACY file: {basename} (auto-enhancement enabled)"
-                )
-            else:
-                self._log_message(f"Modern file detected: {basename}")
-                self.lbl_file_info.setText(f"Loaded file: {basename}")
-
-        except Exception as e:
-            self._log_message(f"Could not determine file type: {e}")
+        # Only meaningful for HDF5: the legacy marker is an HDF5 attribute
+        # layout. Zarr stores are always current-format, and probing one with
+        # h5py raises a permission error that reads like a real failure.
+        if not str(file_path).lower().endswith((".h5", ".hdf5")):
+            self._log_message(f"Loaded file: {basename}")
             self.lbl_file_info.setText(f"Loaded file: {basename}")
+        else:
+            try:
+                with h5py.File(file_path, "r") as f:
+                    is_legacy = self._quick_legacy_check(f)
+
+                if is_legacy:
+                    self._log_message(f"Legacy file detected: {basename}")
+                    self._log_message(
+                        "   Will automatically enhance with unit documentation "
+                        "during analysis"
+                    )
+                    self.lbl_file_info.setText(
+                        f"Loaded LEGACY file: {basename} (auto-enhancement enabled)"
+                    )
+                else:
+                    self._log_message(f"Modern file detected: {basename}")
+                    self.lbl_file_info.setText(f"Loaded file: {basename}")
+
+            except Exception as e:
+                self._log_message(f"Could not determine file type: {e}")
+                self.lbl_file_info.setText(f"Loaded file: {basename}")
 
         # Clear any existing ROI detection
         self.masks = []
@@ -2691,9 +2709,14 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         # Enhanced structure detection and loading
         if DUAL_STRUCTURE_AVAILABLE:
             try:
-                # Detect structure first
-                structure_info = detect_hdf5_structure_type(file_path)
-                self._log_message(f"Detected HDF5 structure: {structure_info['type']}")
+                # Format-agnostic: works for HDF5 and Zarr alike. The
+                # HDF5-only variant returns type="error" for a Zarr store,
+                # which used to abort the load four lines below.
+                structure_info = detect_file_structure_type(file_path)
+                self._log_message(
+                    f"Detected {structure_info.get('file_format', 'file')} "
+                    f"structure: {structure_info['type']}"
+                )
 
                 if structure_info["type"] == "error":
                     self._log_message(
@@ -3305,10 +3328,13 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                         else:
                             raise Exception("Structure detection failed")
                     else:
-                        # Fallback to original method
-                        with h5py.File(self.file_path, "r") as f:
-                            if "frames" in f:
-                                frame_count = len(f["frames"])
+                        # Fallback: count frames through the reader, so this
+                        # path works for Zarr stores as well as HDF5.
+                        from ._io_abstraction import open_file_reader
+
+                        with open_file_reader(self.file_path) as _r:
+                            if "frames" in _r.keys("/"):
+                                frame_count = int(_r.shape("frames")[0])
                             else:
                                 raise Exception("No 'frames' dataset found")
 
@@ -3433,25 +3459,28 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self._log_message("ERROR: Could not read first frame")
                 return
 
-            # Convert to grayscale and enhance
-            if len(first_frame.shape) == 3:
-                gray_frame = cv2.cvtColor(first_frame, cv2.COLOR_RGB2GRAY)
-            else:
-                gray_frame = first_frame.copy()
-
-            # Ensure uint8 for CLAHE (required by OpenCV)
-            if gray_frame.dtype != np.uint8:
-                # Normalize to 0-255 range and convert to uint8
-                gray_float = gray_frame.astype(np.float32)
-                gray_min, gray_max = gray_float.min(), gray_float.max()
-                if gray_max > gray_min:
-                    gray_norm = (gray_float - gray_min) / (gray_max - gray_min)
+            # Reduce whatever we got (2D gray, colour frame, or a frame stack) to a
+            # single 2D uint8 grayscale image — cv2.HoughCircles requires CV_8UC1.
+            gray_frame = first_frame
+            if gray_frame.ndim == 4:  # (N, H, W, C) -> first frame
+                gray_frame = gray_frame[0]
+            if gray_frame.ndim == 3 and gray_frame.shape[-1] in (3, 4):  # colour -> gray
+                code = cv2.COLOR_RGB2GRAY if gray_frame.shape[-1] == 3 else cv2.COLOR_RGBA2GRAY
+                gray_frame = cv2.cvtColor(gray_frame, code)
+            elif gray_frame.ndim == 3:  # (N, H, W) grayscale stack -> first frame
+                gray_frame = gray_frame[0]
+            if gray_frame.dtype != np.uint8:  # 12-bit uint16 / float -> 8-bit
+                gmin, gmax = float(np.min(gray_frame)), float(np.max(gray_frame))
+                if gmax > gmin:
+                    gray_frame = (
+                        (gray_frame.astype(np.float32) - gmin) / (gmax - gmin) * 255.0
+                    ).astype(np.uint8)
                 else:
-                    gray_norm = gray_float
-                gray_frame = (gray_norm * 255).astype(np.uint8)
+                    gray_frame = np.zeros(gray_frame.shape, dtype=np.uint8)
                 self._log_message(
-                    f"Converted frame from {first_frame.dtype} to uint8 for CLAHE"
+                    f"Normalized detection frame ({first_frame.dtype}, {first_frame.shape}) to uint8"
                 )
+            gray_frame = np.ascontiguousarray(gray_frame)
 
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             enhanced_frame = clahe.apply(gray_frame)
@@ -6808,11 +6837,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
         try:
             if DUAL_STRUCTURE_AVAILABLE:
-                # Use format-agnostic detection for Zarr, HDF5-specific for HDF5
-                if _is_zarr:
-                    structure_info = detect_file_structure_type(self.file_path)
-                else:
-                    structure_info = detect_hdf5_structure_type(self.file_path)
+                structure_info = detect_file_structure_type(self.file_path)
 
                 self._log_message("=== ENHANCED HDF5 FILE STRUCTURE ANALYSIS ===")
                 self._log_message(f"Structure type: {structure_info['type']}")
@@ -7162,9 +7187,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self.log_text.append(formatted_message)
                 # Auto-scroll to bottom - use moveCursor instead of setTextCursor
                 cursor = self.log_text.textCursor()
-                cursor.movePosition(cursor.End)
+                # Enums must be read from the class, not from an instance:
+                # PySide6 does not expose them on instances.
+                cursor.movePosition(QTextCursor.MoveOperation.End)
                 # Don't connect the cursor, just move to end
-                self.log_text.moveCursor(cursor.End)
+                self.log_text.moveCursor(QTextCursor.MoveOperation.End)
                 self.log_text.ensureCursorVisible()
             except Exception as e:
                 print(f"Logging error: {e}")

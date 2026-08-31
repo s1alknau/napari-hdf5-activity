@@ -80,6 +80,8 @@ Shown automatically when ≥ 2 ROIs are analyzed:
 - **Horizontal dashed line**: The Bonferroni-corrected significance threshold (≈ 15.2 for
   α = 0.05, m = 100 tested periods)
 
+To increase n, pool several recordings — see [Batch Datasets](#batch-datasets-pooling-several-recordings).
+
 ---
 
 ## Cosinor Analysis
@@ -152,6 +154,220 @@ Acrophase = (12.5 + 7) mod 24 = ZT 19.5  (7.5 h into dark phase)
 If the recording started at ZT0 (lights-on = recording start): no correction needed.
 
 > **Always document:** recording start clock time AND ZT0 clock time.
+
+---
+
+## Batch Datasets (pooling several recordings)
+
+The **Batch Datasets** group at the top of the Extended Analysis tab pools the ROIs of
+several saved analysis HDF5 files into one population, so every method runs on
+n = ROIs × datasets instead of a single recording's worth.
+
+### Workflow
+
+1. **Add Dataset…** — pick one or more saved results files. The first row is the
+   **main dataset**: its analysis parameters, ROI masks and time base are used for
+   the whole batch.
+2. Set the **ZT reference** for each additional dataset (see below).
+3. **Load / Reload Pooled Data** — re-reads every file and pools the ROIs.
+4. Run the rhythmic pattern analysis as usual.
+
+A single row behaves exactly like the old "Load Results from HDF5" button — same
+results, same ROI labels, same colours.
+
+### ROI naming and colours
+
+| Dataset | ROI keys | Labels | Colour |
+|---------|----------|--------|--------|
+| 1 (main) | 1, 2, 3, … | `ROI 1`, `ROI 2`, … | cycle position 1, 2, 3, … |
+| 2 | 2001, 2002, … | `ROI1_2`, `ROI2_2`, … | same as `ROI 1`, `ROI 2`, … |
+| 3 | 3001, 3002, … | `ROI1_3`, `ROI2_3`, … | same as `ROI 1`, `ROI 2`, … |
+
+Colour encodes the **ROI number**, the suffix encodes the **dataset**. `ROI1_1`,
+`ROI1_2` and `ROI1_3` therefore share one colour, and individual traces are drawn
+with a per-dataset linestyle (solid / dashed / dotted) so they stay distinguishable.
+
+CSV and Excel exports use `ROI_1`, `ROI_1_2`, … as column names and gain a
+**BATCH DATASETS** and **ROI PROVENANCE** block mapping every pooled ROI back to its
+source file and ZT shift.
+
+### ZT reference
+
+Each additional dataset is aligned by one of two modes:
+
+**`ZT0 = own recording start`** (default)
+Each recording's own first sample is ZT0, so all datasets share a time origin of
+"hours since recording start". This is the correct choice when every recording was
+started at the same point in the light cycle — the usual protocol of starting at
+lights-on. It is what makes pooled cosinor acrophases comparable: peak time is
+measured from the series' time origin, so a common origin means a common phase
+reference.
+
+**`ZT relative to main dataset`**
+The dataset is shifted by an explicit offset (hours) so its first sample sits at
+that ZT on the main dataset's clock. Use this when a recording started at a
+different light-cycle phase — e.g. dataset 2 started 8 h later, so it is entered as
+`ZT +8.00 h` and its samples line up with dataset 1's ZT8 onward.
+
+> Declaring a recording ZT0 when it actually started at an arbitrary time of day
+> smears the pooled acrophase and flattens the population mean by exactly the
+> difference in start times. When in doubt, enter the real offset.
+
+Modes can be mixed within one batch. The analysis output states the alignment
+actually used for every dataset.
+
+### What the mode does and does not affect
+
+| Unaffected by the mode | Affected by the mode |
+|------------------------|----------------------|
+| Period estimates (Chi², FFT, Cosinor) | Cosinor acrophase / peak time |
+| Amplitude, MESOR, R² | Population mean trace shape |
+| Rhythmicity p-values | Coherence and similarity overlap |
+
+Period and amplitude are computed per ROI in the frequency domain and do not
+depend on the time origin, so **n improves for those regardless of the mode chosen**.
+
+### Pairwise methods on pooled data
+
+Similarity and Coherence align their two inputs by sample index, which equals time
+alignment only inside one recording. On pooled data every ROI is first resampled
+onto one shared absolute time grid, and each pair is then computed on the samples
+both recordings actually cover. Pairs with too little overlap are skipped rather
+than reported from a handful of points:
+
+- **Similarity**: needs ≥ 2 × `max_lag_hours` of overlap
+- **Coherence**: needs ≥ 2 × target period of overlap
+
+Skipped pairs appear blank in the matrix and are counted in the summary text.
+
+### Reading the pooled population panel
+
+- The **Significant: k/n** box gains a per-dataset breakdown (`D1: 8/12`, `D2: 6/12`)
+  so a result carried by one dataset alone is visible rather than hidden in the pooled n.
+- When the recordings differ in length or ZT alignment, the number of contributing
+  ROIs varies over time. The population mean plot then shows an **n(t)** step trace on
+  a right-hand axis, and the mean is labelled with its range (`Mean (n=8–16)`).
+  Treat thinly-supported stretches of the mean with the same caution as a small sample.
+
+---
+
+## Temperature Control
+
+Temperature is itself a Zeitgeber, so a reviewer will ask whether the rhythm you
+report is simply the animals tracking a temperature cycle in the rig. The
+**Temperature Control** group in the Extended Analysis tab answers that question.
+
+### Why correlation alone is not enough
+
+If the incubator temperature happens to drift on a 24 h cycle, activity and
+temperature correlate strongly **whether or not temperature drives the behaviour**
+— both are 24 h periodic. A low correlation is not conclusive either, since a
+temperature response may be lagged or nonlinear. The panel therefore runs four
+tests, in increasing order of the weight they carry:
+
+| # | Panel | What a clean result looks like |
+|---|------|-------------------------------|
+| 1 | Temperature variation | Small SD and range (e.g. ±0.05 °C, range 0.35 °C) |
+| 2 | Is the temperature itself rhythmic? | No significant component in the period band |
+| 3 | Correlation vs lag | Low r at lag 0, little variance explained |
+| 4 | Rhythm after regressing temperature out | Rhythm survives, period unchanged |
+| 5 | Q10 ceiling | Observed rhythm far exceeds what ΔT allows |
+| 6 | Rhythms differ between individuals | Scattered amplitudes **and** phases |
+
+**Test 2 decides which of the others can answer your question.** If temperature
+carries no significant rhythm in the analysed band, the causal story fails
+immediately and test 4 confirms it directly. If temperature *is* rhythmic at the
+same period, tests 4 becomes uninterpretable and **tests 5 and 6 carry the
+argument** — see the confounded case below.
+
+**Test 4** regresses each ROI's activity on temperature at its optimal lag
+(`activity = a + b × temperature(t − lag)`) and re-runs the periodogram on the
+residual. A surviving peak at essentially the same period means temperature does
+not explain the rhythm — *provided the two are not collinear*.
+
+**Test 5, the Q10 ceiling,** is a physiological limit rather than a statistical
+test, which is why it still works under collinearity. Metabolic rate scales as
+`Q10^(ΔT/10)`, so the measured temperature swing sets a hard upper bound on the
+modulation it could cause. A rhythm several-fold larger than that bound cannot be
+thermally driven, whatever the correlation says.
+
+**Test 6** exploits a fact the other tests ignore: every ROI in a dish sees the
+*identical* temperature trace, so its between-individual variance is exactly zero.
+A common driver predicts near-identical rhythms. Differing sensitivity could
+scatter amplitudes, but a linear response cannot shift phase — scattered
+acrophases argue for independent internal clocks.
+
+### Reading the correlation panel
+
+Panel 3 plots r as a function of lag rather than a single "strongest
+correlation" number, and that is deliberate. **Both signals are periodic, so a
+large |r| exists at some lag by construction** — near half a period it is large
+and negative. Ranking by |r| over a full cycle therefore manufactures a dramatic
+number that carries no information about causation.
+
+What is interpretable:
+
+- the **dot at lag 0** — the genuine concurrent correlation, with its sign
+- the **shaded window** (0 to *Response window*, temperature leading) — the only
+  direction in which temperature could drive behaviour
+- the **oscillation of the curve itself** — visible proof that a big |r| further
+  out is an artefact of periodicity, not a finding
+
+### The confounded case — read this before quoting a negative result
+
+If your temperature **is** rhythmic at the same period as the activity, the two
+are collinear at that frequency and **no regression can separate them**. Removing
+temperature also removes a genuine endogenous rhythm, so "rhythm lost" would be a
+false negative.
+
+The analysis detects this and refuses to conclude: the report prints
+`⚠ NOT CONCLUSIVE`, per-ROI rows are marked `n/c`, and panel 4 of the figure is
+outlined in red with the caveat in its title. It will never claim a clean result
+in this situation.
+
+When that happens, what actually discriminates, in order of strength:
+
+1. **Amplitude argument** — from test 1. A swing of a few tenths of a degree
+   cannot produce a large behavioural rhythm; a Q10 of 2–3 yields only a few
+   percent metabolic change.
+2. **Free-run under constant temperature** — the rhythm persisting with τ ≠ 24 h
+   is decisive.
+3. **Phase relationship** — from test 3. A rhythm that peaks at a phase the
+   temperature cycle cannot explain, or that *leads* temperature, argues against a
+   temperature cause. A positive lag means temperature leads activity, the
+   direction expected if temperature were driving behaviour.
+4. **Fix the rig** so temperature no longer cycles, and re-record.
+
+### Where the temperature comes from
+
+Temperature is read from `timeseries/temperature` (or `temperature_celsius`) in
+the **raw recording** — the same source the Telemetry tab uses. Resolution order:
+
+1. The results file, if it was saved after temperature storage was added.
+2. Otherwise, the loaded raw recording.
+3. Otherwise, the analysis reports what is missing and how to fix it.
+
+Results files saved from now on include the temperature record, so the analysis
+works from a results file alone. **Re-save older results files** to make them
+self-contained — this matters for batch mode, where each pooled dataset needs its
+own temperature record and only the main dataset's raw file is typically loaded.
+
+### With pooled datasets
+
+Every ROI is tested against **its own dataset's** temperature record, shifted onto
+the pooled time base. Recordings made in different incubators or at different
+times are therefore handled correctly rather than all being compared to dataset 1.
+
+### Settings
+
+| Setting | Meaning |
+|---------|---------|
+| **Rhythm test** | Periodogram used for all three rhythm tests (activity, temperature, residual). Chi² is the robust default. |
+| **Response window** | Upper end of the physiologically plausible response delay. Only lags from 0 to this value are searched, with temperature *leading*. Default 6 h — deliberately less than a full period, for the reason given above. |
+| **Q10 (max)** | Temperature coefficient for the amplitude ceiling. The figure reports 2.0, 2.5 and this value and quotes the most generous, so a **higher** Q10 is the conservative choice. Default 3.0. |
+
+Period range and significance level are taken from the **Period Range Parameters**
+below, so the control test uses exactly the settings your main analysis used.
 
 ---
 
@@ -278,7 +494,10 @@ without requiring per-period thresholds.
 
 ### Environmental control
 
-- **Temperature**: constant ± 0.5 °C (temperature is itself a Zeitgeber)
+- **Temperature**: constant ± 0.5 °C (temperature is itself a Zeitgeber).
+  Verify it with [Temperature Control](#temperature-control) rather than assuming
+  it — and note that a temperature that *does* cycle at 24 h makes the residual
+  test inconclusive, so it is worth fixing at the rig rather than in analysis.
 - **Feeding**: document time; regular feeding is a Zeitgeber
 - **Vibration/sound**: minimize at fixed times (can mask rhythms)
 - **ZT0 consistency**: use the same lights-on time across experiments

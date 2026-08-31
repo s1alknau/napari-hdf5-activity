@@ -11,6 +11,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Any
 from scipy import stats
 
+from ._batch import roi_label
+
 
 def fisher_z_periodogram(
     time_series: np.ndarray,
@@ -339,7 +341,7 @@ def generate_circadian_summary(results: Dict[int, Dict[str, Any]]) -> str:
         summary_lines.append("")
 
     for roi_id, result in sorted(results.items()):
-        summary_lines.append(f"ROI {roi_id}:")
+        summary_lines.append(f"{roi_label(roi_id)}:")
 
         if "error" in result:
             summary_lines.append(f"  ⚠️  {result['error']}")

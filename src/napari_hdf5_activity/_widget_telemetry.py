@@ -12,7 +12,7 @@ import os
 from typing import Any, Dict, List
 
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer, Qt, QSettings
 from qtpy.QtGui import QColor, QBrush
@@ -466,15 +466,24 @@ class TelemetryMixin:
                                             av = av.decode("utf-8", errors="replace")
                                         QTreeWidgetItem(ds_tree, [f"  @{ak}", str(av)])
 
-            # Try to populate the HDF5 datasets tree (HDF5-only, with fallback)
-            try:
-                import h5py
-                with h5py.File(file_path, "r") as f:
-                    datasets_item = QTreeWidgetItem(self.telemetry_tree, ["Datasets", ""])
-                    datasets_item.setExpanded(True)
-                    self._add_hdf5_items_to_tree(f, datasets_item)
-            except Exception:
-                pass  # Not an HDF5 file or h5py not available — skip recursive tree
+            # Recursive dataset tree — HDF5 only: _add_hdf5_items_to_tree walks
+            # h5py Group/Dataset objects, which have no Zarr counterpart here.
+            if str(file_path).lower().endswith((".h5", ".hdf5")):
+                try:
+                    import h5py
+
+                    with h5py.File(file_path, "r") as f:
+                        datasets_item = QTreeWidgetItem(
+                            self.telemetry_tree, ["Datasets", ""]
+                        )
+                        datasets_item.setExpanded(True)
+                        self._add_hdf5_items_to_tree(f, datasets_item)
+                except Exception as exc:
+                    self._log_message(f"  Dataset tree unavailable: {exc}")
+            else:
+                self._log_message(
+                    "  Recursive dataset tree is HDF5-only — skipped for this format"
+                )
 
             n_ts = len(self.telemetry_timeseries)
             self._log_message(f"Telemetry loaded: {n_ts} timeseries datasets found")
@@ -836,7 +845,7 @@ class TelemetryMixin:
 
         if DUAL_STRUCTURE_AVAILABLE:
             try:
-                structure_info = detect_hdf5_structure_type(self.file_path)
+                structure_info = detect_file_structure_type(self.file_path)
                 self._log_message(f"Structure type: {structure_info['type']}")
 
                 if structure_info["type"] == "stacked_frames":
@@ -858,11 +867,13 @@ class TelemetryMixin:
                 elif structure_info["type"] == "error":
                     self._log_message(f"  ERROR: {structure_info['error']}")
 
-                # File version + compatibility check
-                import h5py
-                with h5py.File(self.file_path, "r") as f:
-                    file_ver = str(f.attrs.get("file_version", "unknown"))
-                    creator  = str(f.attrs.get("creator", f.attrs.get("software", "unknown")))
+                # File version + compatibility check (format-agnostic)
+                from ._io_abstraction import open_file_reader
+
+                with open_file_reader(self.file_path) as f:
+                    _attrs = f.get_attrs("/")
+                    file_ver = str(_attrs.get("file_version", "unknown"))
+                    creator  = str(_attrs.get("creator", _attrs.get("software", "unknown")))
                     self._log_message(f"  File version    : {file_ver}  (creator: {creator})")
 
                     # Compatibility assessment
@@ -890,15 +901,20 @@ class TelemetryMixin:
                 self._log_message(f"HDF5 structure debug failed: {e}")
         else:
             try:
-                import h5py
-                with h5py.File(self.file_path, "r") as f:
-                    self._log_message(f"  Root keys: {list(f.keys())}")
-                    for key in f.keys():
-                        node = f[key]
-                        if hasattr(node, "shape"):
-                            self._log_message(f"  Dataset '{key}': shape={node.shape} dtype={node.dtype}")
-                        elif hasattr(node, "keys"):
-                            self._log_message(f"  Group   '{key}': {len(node.keys())} items")
+                from ._io_abstraction import open_file_reader
+
+                with open_file_reader(self.file_path) as f:
+                    self._log_message(f"  Root keys: {list(f.keys('/'))}")
+                    for key in f.keys("/"):
+                        if f.is_array(key):
+                            self._log_message(
+                                f"  Dataset '{key}': shape={f.shape(key)} "
+                                f"dtype={f.dtype(key)}"
+                            )
+                        else:
+                            self._log_message(
+                                f"  Group   '{key}': {len(f.keys(key))} items"
+                            )
             except Exception as e:
                 self._log_message(f"HDF5 debug failed: {e}")
 

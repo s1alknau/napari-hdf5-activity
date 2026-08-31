@@ -13,6 +13,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from ._batch import roi_label, roi_short_label
+
 import h5py
 
 import numpy as np
@@ -293,7 +295,7 @@ class ExportMixin:
 
         msg.setDetailedText("\n".join(file_details))
         msg.setInformativeText("Analysis results saved successfully")
-        msg.exec_()
+        msg.exec()
 
     def add_nematostella_analysis_to_widget(widget_instance):
         """
@@ -591,7 +593,7 @@ class ExportMixin:
                 "Files include comprehensive HDF5 metadata in time-series format matching analysis data structure."
             )
 
-        msg.exec_()
+        msg.exec()
         # Adjust informative text based on analysis type
         if nematostella_results and nematostella_results["success"]:
             msg.setInformativeText(
@@ -602,7 +604,7 @@ class ExportMixin:
                 "Files include comprehensive HDF5 metadata in time-series format matching analysis data structure."
             )
 
-        msg.exec_()
+        msg.exec()
 
     def _show_threshold_stats_in_log(self):
         """
@@ -647,7 +649,7 @@ class ExportMixin:
             upper_threshold = roi_upper_thresholds.get(roi, baseline_mean + band_width)
             lower_threshold = roi_lower_thresholds.get(roi, baseline_mean - band_width)
 
-            self._log_message(f"\nROI {roi} HYSTERESIS SYSTEM:")
+            self._log_message(f"\n{roi_label(roi)} HYSTERESIS SYSTEM:")
             self._log_message(f"  Baseline Mean: {baseline_mean:.3f}")
             self._log_message(f"  Band Width: ±{band_width:.3f}")
             self._log_message(
@@ -696,7 +698,7 @@ class ExportMixin:
         msg.setInformativeText(
             "Files can be opened in Excel, analyzed further, or imported into other analysis software."
         )
-        msg.exec_()
+        msg.exec()
 
     def _save_results_excel_to_path(self, excel_path: str):
         """
@@ -756,7 +758,7 @@ class ExportMixin:
                 # Transpose: metrics as rows, one column per ROI
                 summary_df = pd.DataFrame(summary_data).set_index("ROI").T.reset_index()
                 summary_df.rename(columns={"index": "Metric"}, inplace=True)
-                summary_df.columns = ["Metric"] + [f"ROI_{roi}" for roi in sorted_rois]
+                summary_df.columns = ["Metric"] + [f"ROI_{roi_short_label(roi)}" for roi in sorted_rois]
                 summary_df.to_excel(writer, sheet_name="Summary", index=False, startrow=1)
                 writer.sheets["Summary"].cell(row=1, column=1).value = (
                     "Summary of ROI statistics: movement events, sleep bins, and detection "
@@ -1048,6 +1050,51 @@ class ExportMixin:
         except Exception as e:
             raise Exception(f"Complete Excel save error: {e}")
 
+    def _write_batch_provenance_csv(self, writer):
+        """Write the pooled-dataset provenance table, if a batch is loaded.
+
+        Without it a pooled CSV cannot be traced back to its source files.
+        Does nothing in single-dataset mode, so existing exports are unchanged.
+        """
+        from ._batch import provenance_rows
+
+        batch = getattr(self, "_batch_result", None)
+        if batch is None or batch.n_datasets < 2:
+            return
+
+        writer.writerow(["BATCH DATASETS"])
+        writer.writerow(
+            ["Dataset", "Name", "ROIs", "Duration (h)", "ZT reference",
+             "ZT offset (h)", "Source file"]
+        )
+        for info in batch.datasets:
+            writer.writerow([
+                info["dataset_idx"],
+                info["name"],
+                info["n_rois"],
+                f"{info['duration_hours']:.2f}",
+                info["zt_mode"],
+                f"{info['zt_offset_hours']:.2f}",
+                info["file_path"],
+            ])
+        writer.writerow([])
+
+        writer.writerow(["ROI PROVENANCE"])
+        writer.writerow(
+            ["ROI", "ROI number", "Dataset", "Dataset name",
+             "ZT shift (h)", "Source file"]
+        )
+        for row in provenance_rows(batch):
+            writer.writerow([
+                row["roi_label"],
+                row["roi_id"],
+                row["dataset_index"],
+                row["dataset_name"],
+                f"{row['zt_shift_hours']:.3f}",
+                row["source_file"],
+            ])
+        writer.writerow([])
+
     def _save_results_csv(self, file_path: str):
         """Save results in clear CSV format."""
         try:
@@ -1073,6 +1120,9 @@ class ExportMixin:
                 )
                 writer.writerow([f"Number of ROIs: {len(sorted_rois)}"])
                 writer.writerow([])  # Empty row
+
+                # === BATCH PROVENANCE (only when several datasets are pooled) ===
+                self._write_batch_provenance_csv(writer)
 
                 # === ROI SUMMARY TABLE (one column per ROI) ===
                 writer.writerow(["ROI SUMMARY"])
@@ -1104,7 +1154,7 @@ class ExportMixin:
                     sleep_minutes_map[roi] = sleep_min
 
                 # Header row: Metric, ROI_x, ROI_y, ...
-                writer.writerow(["Metric"] + [f"ROI_{roi}" for roi in sorted_rois])
+                writer.writerow(["Metric"] + [f"ROI_{roi_short_label(roi)}" for roi in sorted_rois])
                 # One row per metric
                 writer.writerow(
                     ["Baseline Mean"] + [f"{roi_baseline_means.get(roi, 0):.3f}" for roi in sorted_rois]
@@ -1137,7 +1187,7 @@ class ExportMixin:
                 sorted_times = sorted(all_times)
 
                 # Header row: Time, ROI1, ROI2, ROI3, ...
-                header = ["Time (min)"] + [f"ROI_{roi}" for roi in sorted_rois]
+                header = ["Time (min)"] + [f"ROI_{roi_short_label(roi)}" for roi in sorted_rois]
                 writer.writerow(header)
 
                 # Create data rows
@@ -1211,7 +1261,7 @@ class ExportMixin:
                     roi_values.append(None)  # Missing data as None
 
             # Column name format: ROI_1, ROI_2, etc.
-            df_data[f"ROI_{roi}"] = roi_values
+            df_data[f"ROI_{roi_short_label(roi)}"] = roi_values
 
         return pd.DataFrame(df_data)
 
@@ -1286,7 +1336,7 @@ class ExportMixin:
             upper_threshold = roi_upper_thresholds.get(roi, baseline_mean + band_width)
             lower_threshold = roi_lower_thresholds.get(roi, baseline_mean - band_width)
 
-            stats_text += f"ROI {roi} - HYSTERESIS SYSTEM:\n"
+            stats_text += f"{roi_label(roi)} - HYSTERESIS SYSTEM:\n"
             stats_text += f"  Baseline Mean: {baseline_mean:.3f}\n"
             stats_text += f"  Band Width: ±{band_width:.3f}\n"
             stats_text += f"  Upper Threshold: {upper_threshold:.3f} (Movement = TRUE when above)\n"
@@ -2030,7 +2080,7 @@ class ExportMixin:
         msg.setInformativeText(
             "Files include comprehensive HDF5 metadata in time-series format matching analysis data structure."
         )
-        msg.exec_()
+        msg.exec()
 
     def _append_hdf5_sheets_to_excel(self, excel_path: str, metadata_dict: dict):
         """

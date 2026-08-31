@@ -20,6 +20,8 @@ from matplotlib import ticker
 from matplotlib.figure import Figure
 from typing import Dict, List, Tuple, Optional
 
+from ._batch import base_roi_id, dataset_linestyle, roi_label
+
 # ---------------------------------------------------------------------------
 # Publication-quality figure standards
 # Standard journal column widths in inches (e.g. 85 / 114 / 174 mm)
@@ -287,7 +289,7 @@ class PlotGenerator:
                 ax_roi.text(
                     0.5,
                     0.5,
-                    f"No data for ROI {roi} in selected time range",
+                    f"No data for {roi_label(roi)} in selected time range",
                     ha="center",
                     va="center",
                     transform=ax_roi.transAxes,
@@ -342,7 +344,7 @@ class PlotGenerator:
 
                 else:
                     # No threshold data available - skip visualization
-                    print(f"Warning: No threshold data available for ROI {roi}")
+                    print(f"Warning: No threshold data available for {roi_label(roi)}")
                     # Format subplot without thresholds
                     self._format_subplot_enhanced(
                         ax_roi, roi, i, n_rois, color, merged_results, plot_config
@@ -435,11 +437,32 @@ class PlotGenerator:
                             return f"{v:.2e}"
                         return f"{v:.4g}"
 
+                    # Relative band metrics — necessary because each subplot has its
+                    # own y-axis scale, so the absolute Band number alone is not
+                    # comparable across ROIs by eye:
+                    #   Band/Mean  : CV-like; how big the band is relative to baseline
+                    #   Band/Range : how much of the visible y-axis the full band fills
+                    cv_pct = (
+                        abs(band_width) / abs(baseline_mean) * 100.0
+                        if baseline_mean not in (0, 0.0)
+                        else float("nan")
+                    )
+                    displayed_min = min(y_min_plot, lower_threshold)
+                    displayed_max = max(y_max_plot, upper_threshold)
+                    displayed_span = displayed_max - displayed_min
+                    band_pct_range = (
+                        2.0 * abs(band_width) / displayed_span * 100.0
+                        if displayed_span > 0
+                        else float("nan")
+                    )
+
                     stats_text = (
-                        f"Baseline: {fmt(baseline_mean)}\n"
-                        f"Upper:    {fmt(upper_threshold)}\n"
-                        f"Lower:    {fmt(lower_threshold)}\n"
-                        f"Band:   ±{fmt(band_width)}"
+                        f"Baseline:   {fmt(baseline_mean)}\n"
+                        f"Upper:      {fmt(upper_threshold)}\n"
+                        f"Lower:      {fmt(lower_threshold)}\n"
+                        f"Band:     ±{fmt(band_width)}\n"
+                        f"Band/Mean:  {cv_pct:5.1f}%\n"
+                        f"Band/Range: {band_pct_range:5.1f}%"
                     )
                     ax_roi.text(
                         0.01, 0.97,
@@ -673,7 +696,7 @@ class PlotGenerator:
                     ax_roi.text(
                         0.5,
                         0.5,
-                        f"No data for ROI {roi} in selected time range",
+                        f"No data for {roi_label(roi)} in selected time range",
                         ha="center",
                         va="center",
                         transform=ax_roi.transAxes,
@@ -693,7 +716,7 @@ class PlotGenerator:
                     ax_roi.text(
                         0.5,
                         0.5,
-                        f"No data for ROI {roi} in selected time range",
+                        f"No data for {roi_label(roi)} in selected time range",
                         ha="center",
                         va="center",
                         transform=ax_roi.transAxes,
@@ -730,7 +753,7 @@ class PlotGenerator:
                 ax_roi.text(
                     1.01,
                     0.5,
-                    f"ROI {roi}",
+                    f"{roi_label(roi)}",
                     transform=ax_roi.transAxes,
                     fontsize=10,
                     fontweight="bold",
@@ -858,7 +881,7 @@ class PlotGenerator:
                 if not data:
                     ax_roi.text(
                         0.5, 0.5,
-                        f"No data for ROI {roi}",
+                        f"No data for {roi_label(roi)}",
                         ha="center", va="center", transform=ax_roi.transAxes,
                     )
                     ax_roi.set_xlim(start_hours, end_hours)
@@ -925,7 +948,7 @@ class PlotGenerator:
 
                 # ROI label
                 ax_roi.text(
-                    1.01, 0.5, f"ROI {roi}",
+                    1.01, 0.5, f"{roi_label(roi)}",
                     transform=ax_roi.transAxes, fontsize=10,
                     fontweight="bold", color=color, ha="left", va="center",
                 )
@@ -969,7 +992,7 @@ class PlotGenerator:
         reader can judge variability.
 
         Args:
-            data_dict:   ``{roi_id: [(time_min, value), ...]}`` — same format
+            data_dict:   ``{roi_id: [(time_seconds, value), ...]}`` — same format
                          used by every other plot method.
             roi_colors:  Mapping from ROI id to colour string (not used for
                          the mean line itself, but individual traces use it).
@@ -1023,8 +1046,9 @@ class PlotGenerator:
                 roi_arrays.append((roi, interp))
 
                 if show_individuals:
-                    color = roi_colors.get(roi, f"C{(roi - 1) % 10}")
-                    ax.plot(t_grid / 60.0, interp, color=color,
+                    color = roi_colors.get(roi, f"C{(base_roi_id(roi) - 1) % 10}")
+                    ax.plot(t_grid / 3600.0, interp, color=color,
+                            linestyle=dataset_linestyle(roi),
                             linewidth=0.5, alpha=0.3, zorder=1)
 
             if not roi_arrays:
@@ -1043,16 +1067,40 @@ class PlotGenerator:
                 error = np.where(n_valid > 1, std / np.sqrt(n_valid), np.nan)
                 band_label = "± SEM"
 
-            t_hours = t_grid / 60.0
+            # Stored times are seconds, as in every other plot method here.
+            t_hours = t_grid / 3600.0
+            n_max = int(np.nanmax(n_valid)) if n_valid.size else 0
+            n_min = int(np.nanmin(n_valid)) if n_valid.size else 0
+            mean_label = (
+                f"Mean (n={len(roi_arrays)})"
+                if n_min == n_max
+                else f"Mean (n={n_min}–{n_max})"
+            )
             ax.plot(t_hours, mean, color="black", linewidth=1.0,
-                    zorder=3, label=f"Mean (n={len(roi_arrays)})")
+                    zorder=3, label=mean_label)
             ax.fill_between(t_hours, mean - error, mean + error,
                             color="black", alpha=0.2, zorder=2,
                             label=band_label)
 
+            # When the pooled recordings differ in length or ZT alignment the
+            # number of contributing ROIs varies over time — show it, so a
+            # thinly-supported stretch of the mean is not read as solid.
+            if n_min != n_max:
+                ax_n = ax.twinx()
+                ax_n.step(t_hours, n_valid, where="mid", color="#888888",
+                          linewidth=0.8, alpha=0.7, zorder=0)
+                ax_n.set_ylabel("ROIs contributing (n)", fontsize=8,
+                                color="#888888")
+                ax_n.set_ylim(0, n_max * 1.15)
+                ax_n.tick_params(axis="y", labelsize=7, colors="#888888")
+                ax_n.spines["top"].set_visible(False)
+                ax_n.set_zorder(0)
+                ax.set_zorder(1)
+                ax.patch.set_visible(False)
+
             # Lighting overlay
             if kwargs.get("led_data") is not None:
-                self._add_lighting_periods(ax, t_min / 60.0, t_max / 60.0,
+                self._add_lighting_periods(ax, t_min / 3600.0, t_max / 3600.0,
                                            add_legend=True, led_data=kwargs["led_data"],
                                            time_divisor=3600.0)
 
@@ -1124,7 +1172,7 @@ class PlotGenerator:
                 ax_roi.text(
                     0.5,
                     0.5,
-                    f"No data for ROI {roi} in selected time range",
+                    f"No data for {roi_label(roi)} in selected time range",
                     ha="center",
                     va="center",
                     transform=ax_roi.transAxes,
@@ -1153,7 +1201,7 @@ class PlotGenerator:
             ax_roi.text(
                 1.01,
                 0.5,
-                f"ROI {roi}",
+                f"{roi_label(roi)}",
                 transform=ax_roi.transAxes,
                 fontsize=10,
                 fontweight="bold",
@@ -1230,7 +1278,7 @@ class PlotGenerator:
                 ax_roi.text(
                     0.5,
                     0.5,
-                    f"No data for ROI {roi} in selected time range",
+                    f"No data for {roi_label(roi)} in selected time range",
                     ha="center",
                     va="center",
                     transform=ax_roi.transAxes,
@@ -1268,7 +1316,7 @@ class PlotGenerator:
             ax_roi.text(
                 1.01,
                 0.5,
-                f"ROI {roi}",
+                f"{roi_label(roi)}",
                 transform=ax_roi.transAxes,
                 fontsize=10,
                 fontweight="bold",
@@ -1369,7 +1417,7 @@ class PlotGenerator:
         ax_roi.text(
             1.01,
             0.5,
-            f"ROI {roi}",
+            f"{roi_label(roi)}",
             transform=ax_roi.transAxes,
             fontsize=10,
             fontweight="bold",

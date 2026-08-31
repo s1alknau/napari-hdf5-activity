@@ -326,7 +326,7 @@ class FrameViewerMixin:
         sync_plot_layout.addLayout(sync_type_layout)
 
         # Matplotlib canvas for synchronized plots
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
         from matplotlib.figure import Figure
 
         self.sync_figure = Figure(figsize=(12, 6), dpi=100)
@@ -512,137 +512,36 @@ class FrameViewerMixin:
 
         self._log_message(f"Loading file into frame viewer: {self.file_path}")
 
-        # ---- structure detection (format-agnostic) ----------------------
+        # ---- open the recording -----------------------------------------
+        # FrameSource resolves the layout (stacked / individual, HDF5 / Zarr)
+        # and keeps one open handle for the whole viewing session.
+        from ._frame_source import FrameSource, FrameSourceError
+
+        self._viewer_close_source()
         try:
-            from ._reader import detect_file_structure_type
-            structure = detect_file_structure_type(self.file_path)
-        except Exception:
-            structure = {"type": "error", "error": "detect_file_structure_type unavailable"}
+            source = FrameSource(self.file_path).open()
+        except FrameSourceError as exc:
+            self._log_message(f"Frame viewer: {exc}")
+            raise ValueError(str(exc)) from exc
 
-        if structure.get("type") == "error":
-            # Fallback: h5py direct probe
-            structure = None
+        self.viewer_file_handle = source
+        self.viewer_frames = None
+        self.viewer_n_frames = source.n_frames
+        self.viewer_dataset_name = source.dataset_name
+        self.viewer_is_sequence = source.layout == "individual"
+        self._log_message(f"Frame viewer: {source.describe()}")
 
-        # ---- metadata / frame interval ----------------------------------
-        # Try to read frame_interval from root attributes
+        # ---- frame interval from the root metadata attribute --------------
         self.viewer_frame_interval = 5.0
         try:
-            if IO_ABSTRACTION_AVAILABLE:
-                with open_file_reader(self.file_path) as r:
-                    root_attrs = r.get_attrs("/")
-                    if "metadata" in root_attrs:
-                        meta = json.loads(root_attrs["metadata"])
-                        self.viewer_frame_interval = meta.get("frame_interval", 5.0)
-            else:
-                import h5py as _h5py
-                with _h5py.File(self.file_path, "r") as f:
-                    if "metadata" in f.attrs:
-                        meta = json.loads(f.attrs["metadata"])
-                        self.viewer_frame_interval = meta.get("frame_interval", 5.0)
+            root_attrs = source.read_attrs("/")
+            if "metadata" in root_attrs:
+                meta = json.loads(root_attrs["metadata"])
+                self.viewer_frame_interval = meta.get("frame_interval", 5.0)
+            elif "frame_interval" in root_attrs:
+                self.viewer_frame_interval = float(root_attrs["frame_interval"])
         except Exception:
             pass
-
-        # ---- dataset location -------------------------------------------
-        dataset_found = False
-
-        if structure is not None and structure.get("type") not in ("unknown", "error"):
-            stype = structure["type"]
-            dataset_path = structure.get("data_location", structure.get("dataset_name", "frames"))
-            n_frames = structure.get("frame_count", 0)
-
-            is_zarr = structure.get("file_format") == "zarr"
-            # _viewer_handle_is_h5py drives all downstream frame-access branches
-            self._viewer_handle_is_h5py = not is_zarr
-
-            if stype == "stacked_frames":
-                self._log_message(
-                    f"Found stacked dataset: {dataset_path} "
-                    f"with shape {(n_frames,) + tuple(structure['frame_shape'])}"
-                )
-                if is_zarr and IO_ABSTRACTION_AVAILABLE:
-                    self.viewer_file_handle = open_file_reader(self.file_path)
-                    self.viewer_file_handle.open()
-                    self.viewer_frames = None
-                else:
-                    import h5py as _h5py
-                    self.viewer_file_handle = _h5py.File(self.file_path, "r")
-                    self.viewer_frames = self.viewer_file_handle[dataset_path]
-                self.viewer_n_frames = n_frames
-                self.viewer_dataset_name = dataset_path
-                self.viewer_is_sequence = False
-                dataset_found = True
-
-            elif stype == "individual_frames":
-                key_template = structure.get("key_template")
-                frame_keys = structure.get("frame_keys")
-                frame_names = (
-                    [key_template.format(i) for i in range(n_frames)]
-                    if key_template else list(frame_keys)
-                )
-                self._log_message(
-                    f"Found individual frames in group: images ({n_frames} frames)"
-                )
-                if is_zarr and IO_ABSTRACTION_AVAILABLE:
-                    self.viewer_file_handle = open_file_reader(self.file_path)
-                    self.viewer_file_handle.open()
-                else:
-                    import h5py as _h5py
-                    self.viewer_file_handle = _h5py.File(self.file_path, "r")
-                self.viewer_frames = None
-                self.viewer_frame_names = frame_names
-                self.viewer_n_frames = n_frames
-                self.viewer_dataset_name = "images"
-                self.viewer_is_sequence = True
-                dataset_found = True
-
-        if not dataset_found:
-            # Last-resort h5py fallback (original probe loop)
-            self._viewer_handle_is_h5py = True
-            import h5py as _h5py
-            with _h5py.File(self.file_path, "r") as f:
-                for dataset_name in ["frames", "images", "data"]:
-                    if dataset_name not in f:
-                        continue
-                    data_obj = f[dataset_name]
-                    if isinstance(data_obj, _h5py.Dataset):
-                        self.viewer_n_frames = data_obj.shape[0] if data_obj.ndim >= 3 else 1
-                        self.viewer_file_handle = _h5py.File(self.file_path, "r")
-                        self.viewer_frames = self.viewer_file_handle[dataset_name]
-                        self.viewer_dataset_name = dataset_name
-                        self.viewer_is_sequence = False
-                        dataset_found = True
-                        self._log_message(f"Found stacked dataset: {dataset_name} shape {data_obj.shape}")
-                        break
-                    if isinstance(data_obj, _h5py.Group):
-                        if "frames" in data_obj and isinstance(data_obj["frames"], _h5py.Dataset):
-                            ds = data_obj["frames"]
-                            self.viewer_file_handle = _h5py.File(self.file_path, "r")
-                            self.viewer_frames = self.viewer_file_handle[dataset_name]["frames"]
-                            self.viewer_n_frames = ds.shape[0]
-                            self.viewer_dataset_name = f"{dataset_name}/frames"
-                            self.viewer_is_sequence = False
-                            dataset_found = True
-                            self._log_message(f"Found stacked dataset: {dataset_name}/frames shape {ds.shape}")
-                            break
-                        frame_names = sorted(k for k in data_obj.keys() if k.startswith("frame_"))
-                        if frame_names:
-                            self.viewer_frames = None
-                            self.viewer_frame_names = frame_names
-                            self.viewer_n_frames = len(frame_names)
-                            self.viewer_file_handle = _h5py.File(self.file_path, "r")
-                            self.viewer_dataset_name = dataset_name
-                            self.viewer_is_sequence = True
-                            dataset_found = True
-                            self._log_message(f"Found individual frames in group: {dataset_name} ({len(frame_names)} frames)")
-                            break
-            if not dataset_found:
-                import h5py as _h5py
-                with _h5py.File(self.file_path, "r") as f:
-                    available_keys = list(f.keys())
-                self._log_message(f"Available keys: {available_keys}")
-                raise ValueError(
-                    f"No suitable image dataset found. Available keys: {available_keys}"
-                )
 
         # Update UI
         self.viewer_current_frame = 0
@@ -766,7 +665,7 @@ class FrameViewerMixin:
         # Viewer state
         self.viewer_n_frames = cumulative
         self.viewer_frames = None
-        self.viewer_file_handle = None
+        self._viewer_close_source()   # release any HDF5/Zarr file first
         self.viewer_frame_cache = None    # no preloading for streaming
         self.viewer_is_sequence = False
 
@@ -868,21 +767,22 @@ class FrameViewerMixin:
         if getattr(self, "_viewer_is_avi_batch", False):
             return self._viewer_read_raw_frame_avi(frame_idx)
 
-        if hasattr(self, "viewer_frame_names"):
-            # Individual-frame layout: each frame is its own dataset
-            frame_name = self.viewer_frame_names[frame_idx]
-            path = f"{self.viewer_dataset_name}/{frame_name}"
-            if getattr(self, "_viewer_handle_is_h5py", True):
-                return self.viewer_file_handle[path][()]
-            else:
-                # ZarrFileReader: read_all returns the full 2-D array
-                return self.viewer_file_handle.read_all(path)
-        else:
-            # Stacked dataset: shape = (N, H, W[, C])
-            if getattr(self, "_viewer_handle_is_h5py", True):
-                return np.array(self.viewer_file_handle[self.viewer_dataset_name][frame_idx])
-            else:
-                return self.viewer_file_handle.read_frame(self.viewer_dataset_name, frame_idx)
+        # FrameSource knows the layout and the format; nothing to branch on.
+        return self.viewer_file_handle.read_frame(frame_idx)
+
+    def _viewer_close_source(self):
+        """Close the open recording, if any.
+
+        The previous code only set the attribute to None, so on a 130 GB file
+        the handle survived until the garbage collector happened to run.
+        """
+        source = getattr(self, "viewer_file_handle", None)
+        if source is not None:
+            try:
+                source.close()
+            except Exception:
+                pass
+        self.viewer_file_handle = None
 
     def _viewer_release_avi_cap(self):
         """Release a cached AVI VideoCapture handle if one is open."""
@@ -1699,13 +1599,25 @@ class FrameViewerMixin:
         # Use unified reader (handles AVI batch, HDF5, Zarr)
         frame = self._viewer_read_raw_frame(frame_idx)
 
-        # Normalize to uint8 if needed
-        frame = np.array(frame)
+        # Normalize to uint8 if needed.
+        # Done with float32 + in-place arithmetic to minimise peak memory:
+        # the previous version `((f - f.min()) / (f.max() - f.min()) * 255)`
+        # produced three float64 temporaries (~30 MiB for a 1024x1224 frame),
+        # which triggered MemoryError on memory-fragmented worker processes.
+        # float32 halves the temporary, and `out=` removes the extra copies.
+        frame = np.asarray(frame)
         if frame.dtype != np.uint8:
-            if frame.max() > 0:
-                frame = ((frame - frame.min()) / (frame.max() - frame.min()) * 255).astype(np.uint8)
+            fmin = float(frame.min())
+            fmax = float(frame.max())
+            if fmax > fmin:
+                scale = 255.0 / (fmax - fmin)
+                buf = np.subtract(frame, fmin, dtype=np.float32)
+                np.multiply(buf, scale, out=buf)
+                np.clip(buf, 0.0, 255.0, out=buf)
+                frame = buf.astype(np.uint8)
+                del buf
             else:
-                frame = np.zeros_like(frame, dtype=np.uint8)
+                frame = np.zeros(frame.shape, dtype=np.uint8)
 
         return frame
 

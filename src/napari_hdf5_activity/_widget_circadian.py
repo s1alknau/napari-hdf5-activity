@@ -15,6 +15,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._batch import roi_label, roi_short_label
+
 
 def _fmt_p(p: float) -> str:
     """Format a p-value for display.
@@ -29,7 +31,7 @@ def _fmt_p(p: float) -> str:
     return f"{p:.4f}"
 
 import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer, Qt, QSettings
 from qtpy.QtWidgets import (
@@ -58,6 +60,9 @@ from qtpy.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QAbstractItemView,
+    QTableWidget,
+    QTableWidgetItem,
 )
 
 
@@ -134,7 +139,7 @@ class CircadianMixin:
         for layer in selected_roi_layers:
             layer.visible = True
             roi_id = layer.metadata.get("roi_id", "unknown")
-            self._log_message(f"Showing only ROI {roi_id}")
+            self._log_message(f"Showing only {roi_label(roi_id)}")
 
     def _reset_roi_visibility(self):
         """Reset ROI layer visibility to default state."""
@@ -523,22 +528,780 @@ class CircadianMixin:
         )
         return fraction, quiescence, sleep
 
-    def _load_results_from_hdf5(self):
+    # ===================================================================
+    # TEMPERATURE CONTROL
+    # ===================================================================
+
+    def _build_temperature_group(self) -> QGroupBox:
+        """Build the 'Temperature Control' group for the Extended Analysis tab."""
+        group = QGroupBox("Temperature Control (is the rhythm temperature-driven?)")
+        vbox = QVBoxLayout()
+        group.setLayout(vbox)
+        self.temperature_group = group
+
+        info = QLabel(
+            "Tests whether ambient temperature variation could account for the activity "
+            "rhythm. Correlation alone is weak evidence — the decisive test regresses the "
+            "temperature-explained variance out of each ROI and re-tests the rhythm on "
+            "what remains. Uses the period range and significance level set below."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #666; font-size: 10px;")
+        vbox.addWidget(info)
+
+        form = QFormLayout()
+
+        self.temp_method_combo = QComboBox()
+        self.temp_method_combo.addItems(["Chi² Periodogram", "FFT Power Spectrum"])
+        self.temp_method_combo.setToolTip(
+            "Periodogram used for the three rhythm tests (activity, temperature,\n"
+            "residual). Chi² is the robust default; FFT uses permutation testing."
+        )
+        form.addRow("Rhythm test:", self.temp_method_combo)
+
+        self.temp_max_lag = QDoubleSpinBox()
+        self.temp_max_lag.setRange(0.0, 72.0)
+        self.temp_max_lag.setValue(6.0)
+        self.temp_max_lag.setSingleStep(1.0)
+        self.temp_max_lag.setDecimals(1)
+        self.temp_max_lag.setSuffix(" h")
+        self.temp_max_lag.setToolTip(
+            "Upper end of the physiologically plausible response window.\n"
+            "Only lags from 0 to this value are searched, with temperature\n"
+            "LEADING activity — the sole direction in which temperature could\n"
+            "drive behaviour.\n\n"
+            "Deliberately not a full period: for two 24 h-periodic signals a\n"
+            "large |r| exists at some lag by construction, so searching a whole\n"
+            "cycle manufactures a dramatic but meaningless number.\n"
+            "The full r(lag) curve is still plotted for inspection."
+        )
+        form.addRow("Response window:", self.temp_max_lag)
+
+        self.temp_q10 = QDoubleSpinBox()
+        self.temp_q10.setRange(1.0, 6.0)
+        self.temp_q10.setValue(3.0)
+        self.temp_q10.setSingleStep(0.5)
+        self.temp_q10.setDecimals(1)
+        self.temp_q10.setToolTip(
+            "Temperature coefficient used for the amplitude ceiling.\n"
+            "Metabolic rate scales as Q10^(ΔT/10); 2–3 covers most ectotherm\n"
+            "metabolism. The figure reports 2.0, 2.5 and this value, and quotes\n"
+            "the most generous one — so a higher Q10 is the conservative choice.\n\n"
+            "This bound is the one argument that still works when temperature\n"
+            "shares the activity's period."
+        )
+        form.addRow("Q10 (max):", self.temp_q10)
+
+        vbox.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        self.btn_run_temperature = QPushButton("Run Temperature Control")
+        self.btn_run_temperature.setStyleSheet(
+            "QPushButton { background-color: #9C27B0; color: white; font-weight: bold; "
+            "padding: 8px; } QPushButton:hover { background-color: #7B1FA2; }"
+        )
+        self.btn_run_temperature.setToolTip(
+            "Run the temperature control analysis on the currently loaded data.\n"
+            "Produces its own figure and report without disturbing the main\n"
+            "rhythmic pattern analysis."
+        )
+        self.btn_run_temperature.clicked.connect(self.run_temperature_control)
+        btn_row.addWidget(self.btn_run_temperature)
+
+        self.btn_save_temperature_plot = QPushButton("Save Figure...")
+        self.btn_save_temperature_plot.setEnabled(False)
+        self.btn_save_temperature_plot.clicked.connect(self._save_temperature_plot)
+        btn_row.addWidget(self.btn_save_temperature_plot)
+
+        btn_row.addStretch()
+        vbox.addLayout(btn_row)
+
+        self.temperature_status_label = QLabel("Not run yet.")
+        self.temperature_status_label.setWordWrap(True)
+        self.temperature_status_label.setStyleSheet("font-size: 10px;")
+        vbox.addWidget(self.temperature_status_label)
+
+        return group
+
+    def run_temperature_control(self):
+        """Run the temperature control analysis and show its report and figure."""
+        from ._temperature import (
+            generate_temperature_summary,
+            temperature_control_analysis,
+            temperature_rhythmicity,
+        )
+
+        activity = getattr(self, "fraction_data", None)
+        if not activity:
+            msg = (
+                "ERROR: No activity data available.\n\n"
+                "Run the main analysis or load results first."
+            )
+            self.fisher_results_text.setPlainText(msg)
+            self.temperature_status_label.setText("No activity data loaded.")
+            self._log_message("⚠️ Temperature control needs activity data")
+            return
+
+        env_by_dataset = self._get_environment_by_dataset()
+        if not env_by_dataset:
+            msg = (
+                "No temperature record available.\n\n"
+                "Temperature is read from the raw recording's 'timeseries' group, "
+                "or from a results file saved after temperature storage was added.\n\n"
+                "To fix this:\n"
+                "  • Load the raw recording in the Input tab, then re-run, or\n"
+                "  • Re-save these results to HDF5 so the temperature is stored with them."
+            )
+            if self._batch_is_active():
+                msg += (
+                    "\n\nIn batch mode every pooled dataset needs its own temperature "
+                    "record, so each results file must be re-saved."
+                )
+            self.fisher_results_text.setPlainText(msg)
+            self.temperature_status_label.setText("No temperature record found.")
+            self._log_message("⚠️ Temperature control: no temperature record available")
+            return
+
+        try:
+            min_period = self.fisher_min_period.value()
+            max_period = self.fisher_max_period.value()
+            significance = self.fisher_significance.value()
+            max_lag = self.temp_max_lag.value()
+            method = "fft" if self.temp_method_combo.currentIndex() == 1 else "chi2"
+            # Same dedicated field the coherence and phase methods read.
+            # Deriving it from the spinbox midpoint made the target drift
+            # whenever the chi2 search range was widened.
+            target_period = (
+                self.target_period.value()
+                if hasattr(self, "target_period")
+                else 24.0
+            )
+
+            # Match the binning the main analysis uses, so the temperature test
+            # is run on the same signal the rhythm was detected in.
+            original_bin = self.bin_size_seconds.value()
+            analysis_bin = self.analysis_bin_size.value()
+            if analysis_bin > original_bin:
+                activity = self._rebin_timeseries_data(
+                    activity, analysis_bin, original_bin
+                )
+                bin_size = analysis_bin
+            else:
+                bin_size = original_bin
+
+            self._log_message(
+                f"Temperature control: {len(activity)} ROIs, "
+                f"{len(env_by_dataset)} temperature record(s), "
+                f"{method} periodogram, bin {bin_size}s"
+            )
+
+            q10_max = self.temp_q10.value() if hasattr(self, "temp_q10") else 3.0
+            q10_values = tuple(sorted({2.0, 2.5, float(q10_max)}))
+
+            results = temperature_control_analysis(
+                activity,
+                env_by_dataset,
+                sampling_interval=bin_size,
+                min_period_hours=min_period,
+                max_period_hours=max_period,
+                target_period_hours=target_period,
+                max_lag_hours=max_lag,
+                significance_level=significance,
+                method=method,
+                q10_values=q10_values,
+            )
+
+            # Rhythmicity of the temperature trace itself, per dataset. Reported
+            # separately because it is a property of the recording, not the ROIs.
+            temp_rhythms = {}
+            for ds_idx, env in sorted(env_by_dataset.items()):
+                values = np.asarray(env.get("temperature", []), dtype=float)
+                if values.size < 10:
+                    continue
+                times = np.asarray(env.get("times", []), dtype=float)
+                interval = (
+                    float(np.median(np.diff(times)))
+                    if times.size > 1
+                    else bin_size
+                )
+                temp_rhythms[ds_idx] = temperature_rhythmicity(
+                    values,
+                    sampling_interval=interval,
+                    min_period_hours=min_period,
+                    max_period_hours=max_period,
+                    significance_level=significance,
+                    method=method,
+                )
+            results["temperature_rhythm_by_dataset"] = temp_rhythms
+            # The main dataset's trace drives the headline statement
+            results["temperature_rhythm"] = temp_rhythms.get(
+                min(temp_rhythms) if temp_rhythms else 1, {}
+            )
+
+            self.temperature_results = results
+
+            summary = generate_temperature_summary(results)
+            batch_note = self._batch_pooling_note()
+            self.fisher_results_text.setPlainText(
+                "\n".join(batch_note) + summary if batch_note else summary
+            )
+
+            self._create_temperature_plot(results, env_by_dataset, bin_size)
+            self.btn_save_temperature_plot.setEnabled(True)
+
+            stats = results["summary"]
+            n_before = stats.get("n_rhythmic_before", 0)
+            n_after = stats.get("n_rhythm_survives", 0)
+            self.temperature_status_label.setText(
+                f"{n_after}/{n_before} rhythmic ROIs keep their rhythm after "
+                f"removing temperature."
+                + (
+                    f" Temperature explains "
+                    f"{100 * stats['mean_variance_explained']:.1f}% of activity "
+                    f"variance on average."
+                    if stats.get("mean_variance_explained") is not None
+                    else ""
+                )
+            )
+            self._log_message(
+                f"✓ Temperature control complete: {n_after}/{n_before} rhythms survive"
+            )
+
+        except Exception as e:
+            self.fisher_results_text.setPlainText(
+                f"ERROR in temperature control analysis:\n\n{e}"
+            )
+            self._log_message(f"⚠️ Temperature control failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    def _save_temperature_plot(self):
+        """Save the temperature control figure."""
+        figure = getattr(self, "temperature_figure", None)
+        if figure is None:
+            self._log_message("⚠️ No temperature figure — run the analysis first.")
+            return
+
+        try:
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+        except Exception:
+            base = "analysis"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Temperature Control Figure",
+            f"{base}_temperature_control.png",
+            "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            dpi = self.plot_dpi_spin.value() if hasattr(self, "plot_dpi_spin") else 300
+            figure.savefig(
+                file_path, dpi=dpi, bbox_inches="tight", facecolor="white"
+            )
+            self._log_message(f"✓ Figure saved: {os.path.basename(file_path)}")
+        except Exception as e:
+            self._log_message(f"⚠️ Could not save figure: {e}")
+
+    def _get_environment_data(self, quiet: bool = False):
+        """Return the temperature record, or None if there is none available.
+
+        Prefers what a results file carried; falls back to reading the raw
+        recording, which is the only source for results files saved before
+        temperature was stored. The result is cached so the raw file is not
+        re-read on every run.
+        """
+        env = getattr(self, "environment_data", None)
+        if env and env.get("temperature"):
+            return env
+
+        raw_path = getattr(self, "file_path", None)
+        if not raw_path:
+            return None
+
+        # Don't re-read a raw file that already turned out to have no record
+        if getattr(self, "_environment_raw_checked", None) == raw_path:
+            return None
+
+        from ._temperature import extract_environment_from_file
+
+        env = extract_environment_from_file(
+            raw_path,
+            frame_interval=(
+                self.frame_interval.value() if hasattr(self, "frame_interval") else None
+            ),
+            log=None if quiet else self._log_message,
+        )
+        self._environment_raw_checked = raw_path
+        if env:
+            self.environment_data = env
+            return env
+        return None
+
+    def _get_environment_by_dataset(self, quiet: bool = False):
+        """Temperature records keyed by dataset index, for pooled analysis.
+
+        In batch mode each dataset carries its own record on the pooled time
+        base. Outside batch mode there is a single dataset, numbered 1.
+        """
+        if self._batch_is_active():
+            env_by_ds = dict(self._batch_result.environment)
+            if env_by_ds:
+                return env_by_ds
+            # Batch loaded from files that predate temperature storage — the
+            # raw recording only covers the main dataset, so say so rather than
+            # silently testing every ROI against dataset 1's temperature.
+            return {}
+
+        env = self._get_environment_data(quiet=quiet)
+        return {1: env} if env else {}
+
+    # ===================================================================
+    # BATCH DATASETS — pool several saved analyses into one population
+    # ===================================================================
+
+    BATCH_COL_FILE = 0
+    BATCH_COL_MODE = 1
+    BATCH_COL_OFFSET = 2
+    BATCH_COL_ROIS = 3
+    BATCH_COL_DURATION = 4
+
+    def _build_batch_group(self) -> QGroupBox:
+        """Build the 'Batch Datasets' group for the Extended Analysis tab."""
+        # Deliberately not checkable: an unchecked QGroupBox disables everything
+        # inside it, which reads as "the buttons are broken". The group is inert
+        # until files are added anyway.
+        group = QGroupBox("Batch Datasets (pooled population)")
+        vbox = QVBoxLayout()
+        group.setLayout(vbox)
+        self.batch_group = group
+
+        info = QLabel(
+            "Pool the ROIs of several saved analysis HDF5 files into one population. "
+            "Row 1 is the main dataset — its parameters, ROI masks and time base are used "
+            "for the whole batch. Extra datasets are labelled ROI1_2, ROI2_2, … and keep "
+            "the colour of their ROI number."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #666; font-size: 10px;")
+        vbox.addWidget(info)
+
+        self.batch_table = QTableWidget(0, 5)
+        self.batch_table.setHorizontalHeaderLabels(
+            ["Dataset", "ZT reference", "Offset", "ROIs", "Duration"]
+        )
+        self.batch_table.verticalHeader().setVisible(True)
+        self.batch_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.batch_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.batch_table.setMaximumHeight(160)
+        header = self.batch_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(self.BATCH_COL_FILE, QHeaderView.Stretch)
+        for col in (self.BATCH_COL_MODE, self.BATCH_COL_OFFSET,
+                    self.BATCH_COL_ROIS, self.BATCH_COL_DURATION):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        vbox.addWidget(self.batch_table)
+
+        btn_row = QHBoxLayout()
+
+        self.btn_batch_add = QPushButton("Add Dataset...")
+        self.btn_batch_add.setToolTip(
+            "Add one or more saved analysis HDF5 files to the batch.\n"
+            "The first file added becomes the main dataset."
+        )
+        self.btn_batch_add.clicked.connect(self._batch_add_datasets)
+        btn_row.addWidget(self.btn_batch_add)
+
+        self.btn_batch_remove = QPushButton("Remove Selected")
+        self.btn_batch_remove.clicked.connect(self._batch_remove_selected)
+        btn_row.addWidget(self.btn_batch_remove)
+
+        self.btn_batch_clear = QPushButton("Clear")
+        self.btn_batch_clear.clicked.connect(self._batch_clear)
+        btn_row.addWidget(self.btn_batch_clear)
+
+        btn_row.addStretch()
+
+        self.btn_batch_apply = QPushButton("Load / Reload Pooled Data")
+        self.btn_batch_apply.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
+            "padding: 6px; } QPushButton:hover { background-color: #0b7dda; }"
+        )
+        self.btn_batch_apply.setToolTip(
+            "Re-read every file in the table and pool their ROIs.\n"
+            "Run this after adding, removing or re-aligning a dataset,\n"
+            "then run the rhythmic pattern analysis as usual."
+        )
+        self.btn_batch_apply.clicked.connect(self._batch_apply)
+        btn_row.addWidget(self.btn_batch_apply)
+
+        vbox.addLayout(btn_row)
+
+        self.batch_status_label = QLabel("No datasets loaded.")
+        self.batch_status_label.setWordWrap(True)
+        self.batch_status_label.setStyleSheet("font-size: 10px;")
+        vbox.addWidget(self.batch_status_label)
+
+        return group
+
+    def _batch_add_datasets(self):
+        """Append one or more result files to the batch table."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Analysis Results to Batch",
+            "",
+            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+        )
+        if not file_paths:
+            return
+        for path in file_paths:
+            self._batch_add_row(path)
+        self._log_message(
+            f"Added {len(file_paths)} dataset(s) to the batch — "
+            f"{self.batch_table.rowCount()} total. "
+            f"Click 'Load / Reload Pooled Data' to apply."
+        )
+
+    def _batch_add_row(self, file_path: str, zt_mode: str = None,
+                       zt_offset_hours: float = 0.0):
+        """Insert one dataset row; row 0 is the main dataset and is fixed at ZT0."""
+        from ._batch import ZT_MODE_OWN_START, ZT_MODE_RELATIVE
+
+        table = self.batch_table
+        row = table.rowCount()
+        table.insertRow(row)
+        is_main = row == 0
+
+        name_item = QTableWidgetItem(os.path.basename(file_path))
+        name_item.setToolTip(file_path)
+        name_item.setData(Qt.UserRole, file_path)
+        table.setItem(row, self.BATCH_COL_FILE, name_item)
+
+        mode_combo = QComboBox()
+        mode_combo.addItem("ZT0 = own recording start", ZT_MODE_OWN_START)
+        mode_combo.addItem("ZT relative to main dataset", ZT_MODE_RELATIVE)
+        mode_combo.setToolTip(
+            "ZT0 = own recording start:\n"
+            "  Each recording's own first sample is ZT0. Correct when every recording\n"
+            "  was started at the same point in the light cycle — this is what makes\n"
+            "  pooled cosinor acrophases comparable.\n\n"
+            "ZT relative to main dataset:\n"
+            "  Shift this recording by an explicit offset against dataset 1's ZT0.\n"
+            "  Use when it started at a different light-cycle phase."
+        )
+        if zt_mode == ZT_MODE_RELATIVE and not is_main:
+            mode_combo.setCurrentIndex(1)
+        mode_combo.setEnabled(not is_main)
+        mode_combo.currentIndexChanged.connect(
+            lambda _idx, r=row: self._batch_sync_offset_enabled(r)
+        )
+        table.setCellWidget(row, self.BATCH_COL_MODE, mode_combo)
+
+        offset_spin = QDoubleSpinBox()
+        offset_spin.setRange(-720.0, 720.0)
+        offset_spin.setDecimals(2)
+        offset_spin.setSingleStep(0.5)
+        offset_spin.setSuffix(" h")
+        offset_spin.setValue(0.0 if is_main else float(zt_offset_hours))
+        offset_spin.setToolTip(
+            "ZT of this recording's first sample, expressed on the main dataset's clock.\n"
+            "Only used in 'ZT relative to main dataset' mode."
+        )
+        table.setCellWidget(row, self.BATCH_COL_OFFSET, offset_spin)
+
+        for col in (self.BATCH_COL_ROIS, self.BATCH_COL_DURATION):
+            item = QTableWidgetItem("—")
+            item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, col, item)
+
+        table.setVerticalHeaderItem(
+            row, QTableWidgetItem(f"{row + 1}" + (" (main)" if is_main else ""))
+        )
+        self._batch_sync_offset_enabled(row)
+
+    def _batch_sync_offset_enabled(self, row: int):
+        """Offset is editable only in 'relative' mode, and never for the main dataset."""
+        from ._batch import ZT_MODE_RELATIVE
+
+        mode_combo = self.batch_table.cellWidget(row, self.BATCH_COL_MODE)
+        offset_spin = self.batch_table.cellWidget(row, self.BATCH_COL_OFFSET)
+        if mode_combo is None or offset_spin is None:
+            return
+        relative = mode_combo.currentData() == ZT_MODE_RELATIVE
+        offset_spin.setEnabled(bool(relative) and row > 0)
+        if not relative:
+            offset_spin.setValue(0.0)
+
+    def _batch_remove_selected(self):
+        """Remove the selected dataset rows and renumber what is left."""
+        rows = sorted(
+            {idx.row() for idx in self.batch_table.selectedIndexes()}, reverse=True
+        )
+        if not rows:
+            self._log_message("⚠️ Select a dataset row to remove.")
+            return
+        specs = self._batch_specs()
+        for row in rows:
+            if row < len(specs):
+                specs.pop(row)
+        self._batch_rebuild_table(specs)
+        self._log_message(
+            f"Removed {len(rows)} dataset(s) — {self.batch_table.rowCount()} remaining."
+        )
+
+    def _batch_clear(self):
+        """Empty the batch table. Already-loaded data stays until reloaded."""
+        self.batch_table.setRowCount(0)
+        self.batch_status_label.setText("No datasets loaded.")
+        self._batch_result = None
+        self._log_message("Batch table cleared.")
+
+    def _batch_rebuild_table(self, specs):
+        """Repopulate the table from *specs*, re-applying main-dataset rules to row 0."""
+        self.batch_table.setRowCount(0)
+        for spec in specs:
+            self._batch_add_row(spec.file_path, spec.zt_mode, spec.zt_offset_hours)
+
+    def _batch_specs(self):
+        """Read the batch table into a list of DatasetSpec."""
+        from ._batch import DatasetSpec, ZT_MODE_OWN_START
+
+        specs = []
+        for row in range(self.batch_table.rowCount()):
+            item = self.batch_table.item(row, self.BATCH_COL_FILE)
+            if item is None:
+                continue
+            mode_combo = self.batch_table.cellWidget(row, self.BATCH_COL_MODE)
+            offset_spin = self.batch_table.cellWidget(row, self.BATCH_COL_OFFSET)
+            specs.append(
+                DatasetSpec(
+                    file_path=item.data(Qt.UserRole),
+                    zt_mode=(
+                        mode_combo.currentData() if mode_combo else ZT_MODE_OWN_START
+                    ),
+                    zt_offset_hours=offset_spin.value() if offset_spin else 0.0,
+                )
+            )
+        return specs
+
+    def _batch_apply(self):
+        """Re-read every file in the batch table and pool their ROIs."""
+        from ._batch import load_batch_results
+        from ._reader import get_roi_colors
+
+        specs = self._batch_specs()
+        if not specs:
+            self._log_message("⚠️ No datasets in the batch — use 'Add Dataset...' first.")
+            return
+
+        # A single dataset is just a normal load: keep the full restore path
+        # (parameters, ROI masks, napari overlay, stored extended results).
+        if len(specs) == 1:
+            self._load_results_from_hdf5(specs[0].file_path)
+            self._batch_result = None
+            self._batch_update_row_info(None)
+            self.batch_status_label.setText(
+                f"1 dataset — {len(getattr(self, 'fraction_data', {}) or {})} ROIs "
+                f"(single-dataset mode, ROI labels unchanged)."
+            )
+            return
+
+        self._log_message(f"Pooling {len(specs)} datasets...")
+        try:
+            batch = load_batch_results(specs, log=self._log_message)
+        except Exception as e:
+            self._log_message(f"⚠️ Batch load failed: {e}")
+            QMessageBox.warning(self, "Batch load failed", str(e))
+            return
+
+        # The main dataset still supplies parameters, masks and the napari
+        # overlay — load it through the normal path first, then overwrite the
+        # ROI-keyed data with the pooled version.
+        self._load_results_from_hdf5(specs[0].file_path, quiet=True)
+
+        for key in (
+            "merged_results",
+            "merged_results_raw",
+            "movement_data",
+            "fraction_data",
+            "quiescence_data",
+            "sleep_data",
+            "roi_statistics",
+            "roi_summary",
+            "quiescence_bouts",
+        ):
+            if key in batch.core:
+                setattr(self, key, batch.core[key])
+
+        pooled_ids = sorted(batch.provenance.keys())
+        self.roi_colors = get_roi_colors(pooled_ids)
+
+        if "thresholds" in batch.core:
+            self.roi_baseline_means = {}
+            self.roi_upper_thresholds = {}
+            self.roi_lower_thresholds = {}
+            for cid, thresh in batch.core["thresholds"].items():
+                self.roi_baseline_means[cid] = thresh.get("baseline_mean", 0.0)
+                self.roi_upper_thresholds[cid] = thresh.get("upper_threshold", 0.0)
+                self.roi_lower_thresholds[cid] = thresh.get("lower_threshold", 0.0)
+
+        # Sleep quality is derived, so recompute it on the pooled data.
+        if getattr(self, "sleep_data", None):
+            try:
+                from ._calc import calculate_sleep_quality_hourly
+
+                self.sleep_quality_data = calculate_sleep_quality_hourly(self.sleep_data)
+            except Exception:
+                pass
+
+        # Stored per-file extended results refer to the old ROI ids and are
+        # meaningless for the pool — drop them so nothing stale is plotted.
+        self.fisher_analysis_results = {}
+        self._all_method_results = {}
+        self._pop_spectrum_data = None
+
+        self._batch_result = batch
+        self._batch_update_row_info(batch)
+
+        for line in batch.summary_lines():
+            self._log_message(line)
+        for warning in batch.warnings:
+            self._log_message(f"  ⚠️ {warning}")
+
+        status = f"{batch.n_datasets} datasets pooled — {batch.n_rois} ROIs."
+        if batch.warnings:
+            status += f" {len(batch.warnings)} compatibility warning(s), see log."
+        self.batch_status_label.setText(status)
+
+        self.fisher_results_text.setPlainText(
+            "\n".join(batch.summary_lines())
+            + "\n\nPooled data ready — run the rhythmic pattern analysis."
+        )
+        self._log_message(
+            f"✓ Batch ready: {batch.n_rois} ROIs from {batch.n_datasets} datasets"
+        )
+
+    def _batch_update_row_info(self, batch):
+        """Fill the ROIs / Duration columns from a completed batch load."""
+        if batch is None:
+            for row in range(self.batch_table.rowCount()):
+                for col in (self.BATCH_COL_ROIS, self.BATCH_COL_DURATION):
+                    item = self.batch_table.item(row, col)
+                    if item is not None:
+                        item.setText("—")
+            return
+        for info in batch.datasets:
+            row = info["dataset_idx"] - 1
+            if row >= self.batch_table.rowCount():
+                continue
+            rois_item = self.batch_table.item(row, self.BATCH_COL_ROIS)
+            dur_item = self.batch_table.item(row, self.BATCH_COL_DURATION)
+            if rois_item is not None:
+                rois_item.setText(str(info["n_rois"]))
+            if dur_item is not None:
+                dur_item.setText(f"{info['duration_hours']:.1f} h")
+
+    def _batch_is_active(self) -> bool:
+        """True when pooled multi-dataset data is currently loaded."""
+        batch = getattr(self, "_batch_result", None)
+        return batch is not None and batch.n_datasets > 1
+
+    def _batch_pooling_note(self) -> list:
+        """Lines describing the batch composition and its phase assumption.
+
+        Peak time / acrophase is measured from each series' time origin, so
+        pooling them across datasets is only meaningful when every recording
+        started at the same point in the light cycle.  State that in the output
+        instead of leaving it implicit.
+        """
+        from ._batch import ZT_MODE_OWN_START
+
+        if not self._batch_is_active():
+            return []
+
+        batch = self._batch_result
+        lines = [
+            "─── Pooled batch ────────────────────────────────────────",
+            f"{batch.n_datasets} datasets, {batch.n_rois} ROIs pooled.",
+        ]
+        for info in batch.datasets:
+            alignment = (
+                "ZT0 = own recording start"
+                if info["zt_mode"] == ZT_MODE_OWN_START
+                else f"ZT{info['zt_offset_hours']:+.2f} h rel. to dataset 1"
+            )
+            lines.append(
+                f"  [{info['dataset_idx']}] {info['name']}: "
+                f"{info['n_rois']} ROIs, {info['duration_hours']:.1f} h, {alignment}"
+            )
+
+        own_start = [
+            d for d in batch.datasets if d["zt_mode"] == ZT_MODE_OWN_START
+        ]
+        if own_start:
+            lines.append(
+                "Phase values are pooled relative to each recording's own start — "
+                "valid if all recordings began at the same light-cycle phase."
+            )
+        if len(own_start) != len(batch.datasets):
+            lines.append(
+                "Datasets with an explicit ZT offset are phase-aligned to dataset 1."
+            )
+        lines.extend(["─" * 57, ""])
+        return lines
+
+    def _register_main_batch_dataset(self, file_path: str):
+        """Make *file_path* row 1 of the batch table, keeping any extra rows.
+
+        Called when a results file is picked by hand, so the batch table always
+        reflects what is actually loaded.
+        """
+        if not hasattr(self, "batch_table"):
+            return
+        specs = self._batch_specs()
+        if specs:
+            specs[0].file_path = file_path
+        else:
+            from ._batch import DatasetSpec
+
+            specs = [DatasetSpec(file_path=file_path)]
+        self._batch_rebuild_table(specs)
+        self._batch_result = None
+        if len(specs) > 1:
+            self.batch_status_label.setText(
+                f"Main dataset changed — {len(specs)} datasets in table. "
+                f"Click 'Load / Reload Pooled Data' to re-pool."
+            )
+        else:
+            self.batch_status_label.setText("1 dataset (single-dataset mode).")
+
+    def _load_results_from_hdf5(self, file_path: str = None, quiet: bool = False):
         """Load ALL analysis results from HDF5 file (core + extended analysis)."""
         from qtpy.QtWidgets import QFileDialog
         from ._results_io import load_comprehensive_results
 
-        # Open file dialog to select results file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Results from HDF5",
-            "",
-            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
-        )
+        # Called both as a button slot (which passes the `checked` bool) and
+        # directly by the batch loader with an explicit path.
+        if not isinstance(file_path, str):
+            file_path = None
 
-        if not file_path:
-            self._log_message("Load cancelled by user")
-            return
+        if file_path is None:
+            # Open file dialog to select results file
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Results from HDF5",
+                "",
+                "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            )
+
+            if not file_path:
+                self._log_message("Load cancelled by user")
+                return
+
+            # Selecting a file by hand makes it the batch's main dataset.
+            self._register_main_batch_dataset(file_path)
 
         try:
             self._log_message(f"Loading comprehensive results from: {file_path}")
@@ -653,6 +1416,18 @@ class CircadianMixin:
                         f"  ✓ Loaded LED data ({len(self.led_data.get('times', []))} points)"
                     )
 
+                # Restore environment data (temperature / humidity)
+                if "environment_data" in core and core["environment_data"]:
+                    self.environment_data = core["environment_data"]
+                    n_temp = len(self.environment_data.get("temperature", []))
+                    self._log_message(
+                        f"  ✓ Loaded temperature record ({n_temp} samples)"
+                    )
+                else:
+                    # Older results files predate temperature storage; the raw
+                    # recording is the fallback, resolved lazily when needed.
+                    self.environment_data = None
+
                 # Restore ROI masks and circle parameters
                 if "masks" in core and core["masks"]:
                     self.masks = core["masks"]
@@ -762,7 +1537,9 @@ class CircadianMixin:
                         )
 
                     # Re-create plot for extended analysis
-                    if hasattr(self, "fisher_analysis_results"):
+                    # (skipped in batch mode — these results belong to the main
+                    #  dataset alone and are replaced by the pooled analysis)
+                    if not quiet and hasattr(self, "fisher_analysis_results"):
                         self._create_circadian_plot(
                             self.fisher_analysis_results, method_idx
                         )
@@ -800,7 +1577,8 @@ class CircadianMixin:
                     else:
                         summary = "Extended analysis results loaded successfully."
 
-                    self.fisher_results_text.setPlainText(summary)
+                    if not quiet:
+                        self.fisher_results_text.setPlainText(summary)
 
             # Restore analysis parameters
             if "analysis_parameters" in loaded_data:
@@ -1005,7 +1783,7 @@ class CircadianMixin:
 
             # Only show summary in text widget if no extended analysis was loaded
             # (if extended analysis was loaded, its summary is already shown above)
-            if not (
+            if not quiet and not (
                 "extended_analysis" in loaded_data and loaded_data["extended_analysis"]
             ):
                 self.fisher_results_text.setPlainText("\n".join(summary_lines))
@@ -1077,6 +1855,7 @@ class CircadianMixin:
                 "roi_summary": {},
                 "thresholds": {},
                 "led_data": getattr(self, "led_data", None) or {},
+                "environment_data": self._get_environment_data() or {},
                 "masks": getattr(self, "masks", []) or [],
                 "original_circles": getattr(self, "_original_circles", None),
             }
@@ -1320,6 +2099,26 @@ class CircadianMixin:
                     else None
                 ),
             }
+
+            # Record the batch composition so a pooled save stays traceable.
+            if self._batch_is_active():
+                batch = self._batch_result
+                metadata["batch_n_datasets"] = batch.n_datasets
+                metadata["batch_composition"] = json.dumps(
+                    [
+                        {
+                            "dataset_idx": info["dataset_idx"],
+                            "name": info["name"],
+                            "file_path": info["file_path"],
+                            "n_rois": info["n_rois"],
+                            "duration_hours": info["duration_hours"],
+                            "zt_mode": info["zt_mode"],
+                            "zt_offset_hours": info["zt_offset_hours"],
+                            "shift_seconds": info["shift_seconds"],
+                        }
+                        for info in batch.datasets
+                    ]
+                )
 
             # Save using comprehensive save function
             success = save_comprehensive_results(
@@ -1591,8 +2390,11 @@ class CircadianMixin:
                         )
                         break  # one warning is enough
 
-            # Display results
-            self.fisher_results_text.setPlainText(summary)
+            # Display results, prefixed with the batch composition when pooling
+            batch_note = self._batch_pooling_note()
+            self.fisher_results_text.setPlainText(
+                "\n".join(batch_note) + summary if batch_note else summary
+            )
 
             # Create and display plot
             self._create_circadian_plot(results, method_index)
@@ -1809,11 +2611,11 @@ class CircadianMixin:
                 ax.set_xticklabels([f"{v:.0f}" for v in x_ticks], fontsize=8)
                 ax.set_xlabel("ZT (h)" if zt_axis else "Time (h)", fontsize=9)
 
-                ax.set_title(f"ROI {roi_id}", fontsize=10, fontweight="bold")
+                ax.set_title(f"{roi_label(roi_id)}", fontsize=10, fontweight="bold")
                 ax.tick_params(axis="both", labelsize=8)
 
                 # Summary per ROI
-                summary_lines.append(f"ROI {roi_id}: {n_day_rows} row(s), {len(times_s)} data points")
+                summary_lines.append(f"{roi_label(roi_id)}: {n_day_rows} row(s), {len(times_s)} data points")
 
             # Hide unused axes
             for idx in range(n_rois, n_rows_fig * n_cols):
@@ -1877,7 +2679,7 @@ class CircadianMixin:
             from qtpy.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
             )
-            from matplotlib.backends.backend_qt5agg import (
+            from matplotlib.backends.backend_qtagg import (
                 FigureCanvasQTAgg as FigureCanvas,
                 NavigationToolbar2QT as NavigationToolbar,
             )
@@ -1932,7 +2734,7 @@ class CircadianMixin:
                     pass
 
             dialog.finished.connect(_cleanup_actogram)
-            dialog.exec_()
+            dialog.exec()
 
         except Exception as e:
             self._log_message(f"⚠️ Could not open actogram window: {e}")
@@ -2037,7 +2839,7 @@ class CircadianMixin:
             ax.set_xticks(x_ticks)
             ax.set_xticklabels([f"{v:.0f}" for v in x_ticks], fontsize=8)
             ax.set_xlabel("ZT (h)" if zt_axis else "Time (h)", fontsize=9)
-            ax.set_title(f"ROI {roi_id}", fontsize=10, fontweight="bold")
+            ax.set_title(f"{roi_label(roi_id)}", fontsize=10, fontweight="bold")
             ax.tick_params(axis="both", labelsize=8)
 
             out_path = os.path.join(out_dir, f"{base_name}_actogram_ROI{roi_id}.png")
@@ -2191,11 +2993,11 @@ class CircadianMixin:
 
                 if z_score is not None and isinstance(z_score, (int, float)):
                     combined.append(
-                        f"  ROI {roi_id}: Period={period_str}, Z={z_score:.1f} {sig_str}"
+                        f"  {roi_label(roi_id)}: Period={period_str}, Z={z_score:.1f} {sig_str}"
                     )
                 else:
                     combined.append(
-                        f"  ROI {roi_id}: Period={period_str}, Peak Time={peak_time_str} {sig_str}"
+                        f"  {roi_label(roi_id)}: Period={period_str}, Peak Time={peak_time_str} {sig_str}"
                     )
 
         combined.append("")
@@ -2260,7 +3062,7 @@ class CircadianMixin:
 
                 if z_score is not None and isinstance(z_score, (int, float)):
                     combined.append(
-                        f"  ROI {roi_id}: Period={period_str}, Z={z_score:.1f} {sig_str}"
+                        f"  {roi_label(roi_id)}: Period={period_str}, Z={z_score:.1f} {sig_str}"
                     )
                 else:
                     if isinstance(sleep_phase, (int, float)):
@@ -2268,7 +3070,7 @@ class CircadianMixin:
                     else:
                         sleep_str = str(sleep_phase)
                     combined.append(
-                        f"  ROI {roi_id}: Period={period_str}, Sleep Phase={sleep_str} {sig_str}"
+                        f"  {roi_label(roi_id)}: Period={period_str}, Sleep Phase={sleep_str} {sig_str}"
                     )
 
         combined.append("")
@@ -2315,13 +3117,13 @@ class CircadianMixin:
                         if diff > 12:
                             diff = 24 - diff
                         combined.append(
-                            f"  ROI {roi_id}: Act Peak={act_phase:.1f}h, "
+                            f"  {roi_label(roi_id)}: Act Peak={act_phase:.1f}h, "
                             f"Sleep Peak={slp_phase:.1f}h, Δ={diff:.1f}h"
                         )
                     else:
                         # Fisher/FFT: show period comparison
                         combined.append(
-                            f"  ROI {roi_id}: Act Period={act_period:.1f}h, "
+                            f"  {roi_label(roi_id)}: Act Period={act_period:.1f}h, "
                             f"Sleep Period={slp_period:.1f}h"
                         )
 
@@ -2601,7 +3403,7 @@ class CircadianMixin:
             best_result = roi_data.get("best_result", {})
 
             if "error" in best_result:
-                lines.extend([f"ROI {roi_id}:", f"  Error: {best_result['error']}", ""])
+                lines.extend([f"{roi_label(roi_id)}:", f"  Error: {best_result['error']}", ""])
                 continue
 
             # Check if period is at boundary
@@ -2617,7 +3419,7 @@ class CircadianMixin:
 
             lines.extend(
                 [
-                    f"ROI {roi_id}:",
+                    f"{roi_label(roi_id)}:",
                     f"  Best-fit period: {best_period:.2f} hours{boundary_marker}",
                     f"  MESOR (mean level): {best_result.get('mesor', 0):.4f}",
                     f"  Amplitude: {best_result.get('amplitude', 0):.4f}",
@@ -2852,7 +3654,7 @@ class CircadianMixin:
 
         for roi_id, phase_info in sorted(results["roi_phases"].items()):
             summary_lines.append(
-                f"  ROI {roi_id}: Peak activity at {phase_info['phase_hours']:.1f}h "
+                f"  {roi_label(roi_id)}: Peak activity at {phase_info['phase_hours']:.1f}h "
                 f"(amplitude: {phase_info['amplitude']:.2f})"
             )
 
@@ -2861,6 +3663,326 @@ class CircadianMixin:
 
         summary = "\n".join(summary_lines)
         return results, summary
+
+    def _create_temperature_plot(self, results: Dict, env_by_dataset: Dict,
+                                 bin_size: float):
+        """Four-panel temperature control figure.
+
+        Laid out to answer the question in reading order: what the temperature
+        did, whether it is rhythmic, how strongly it tracks activity, and
+        whether the rhythm survives having temperature removed.
+        """
+        try:
+            import io
+            from matplotlib.figure import Figure as _Figure
+            from qtpy.QtGui import QPixmap
+            from ._batch import roi_label
+
+            roi_results = results.get("roi_results", {})
+            valid = {k: v for k, v in roi_results.items() if "error" not in v}
+            if not valid:
+                self._log_message("⚠️ No valid ROIs for the temperature figure")
+                return
+
+            fig = _Figure(figsize=(17, 8.5))
+            axes = fig.subplots(2, 3)
+
+            # ── Panel 1: the temperature trace itself ────────────────────────
+            ax = axes[0, 0]
+            for ds_idx, env in sorted(env_by_dataset.items()):
+                times = np.asarray(env.get("times", []), dtype=float) / 3600.0
+                values = np.asarray(env.get("temperature", []), dtype=float)
+                if times.size and values.size:
+                    ax.plot(times[: values.size], values[: times.size],
+                            linewidth=0.8, label=f"Dataset {ds_idx}")
+                    stats = results["summary"]["temperature_by_dataset"].get(
+                        ds_idx, {}
+                    ).get("stats", {})
+                    if "mean" in stats:
+                        ax.axhline(stats["mean"], color="gray", linestyle=":",
+                                   linewidth=0.6)
+            ax.set_xlabel("Time (h)", fontsize=9)
+            ax.set_ylabel("Temperature (°C)", fontsize=9)
+            ax.set_title("1. Temperature record", fontsize=10, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+            if len(env_by_dataset) > 1:
+                ax.legend(fontsize=7)
+            stats_all = results["summary"]["temperature_by_dataset"]
+            if stats_all:
+                first = stats_all[min(stats_all)].get("stats", {})
+                if "range" in first:
+                    ax.text(
+                        0.97, 0.95,
+                        f"SD {first['sd']:.3f} °C\nrange {first['range']:.2f} °C",
+                        transform=ax.transAxes, fontsize=8, va="top", ha="right",
+                        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
+                    )
+
+            # ── Panel 2: is the temperature rhythmic? ────────────────────────
+            ax = axes[0, 1]
+            temp_rhythms = results.get("temperature_rhythm_by_dataset", {})
+            plotted = False
+            for ds_idx, rhythm in sorted(temp_rhythms.items()):
+                if not rhythm or "error" in rhythm:
+                    continue
+                periods = np.asarray(
+                    rhythm.get("periods", rhythm.get("relevant_periods", [])),
+                    dtype=float,
+                )
+                power = np.asarray(
+                    rhythm.get("z_scores", rhythm.get("relevant_power", [])),
+                    dtype=float,
+                )
+                if periods.size and periods.size == power.size:
+                    ax.plot(periods, power, linewidth=1.2,
+                            label=f"Dataset {ds_idx}")
+                    plotted = True
+                    if rhythm.get("critical_z") is not None:
+                        ax.axhline(rhythm["critical_z"], color="red",
+                                   linestyle="--", linewidth=1.0,
+                                   label="significance")
+            if plotted:
+                verdicts = [
+                    r.get("is_significant")
+                    for r in temp_rhythms.values()
+                    if r and "error" not in r
+                ]
+                any_sig = any(verdicts)
+                ax.text(
+                    0.5, 0.95,
+                    "Temperature IS rhythmic — see panel 4"
+                    if any_sig
+                    else "Temperature is NOT rhythmic",
+                    transform=ax.transAxes, fontsize=9, va="top", ha="center",
+                    fontweight="bold",
+                    color="#b00" if any_sig else "#070",
+                    bbox=dict(boxstyle="round",
+                              facecolor="#ffe0e0" if any_sig else "#e0f0e0",
+                              alpha=0.9),
+                )
+            else:
+                ax.text(0.5, 0.5, "Temperature periodogram unavailable",
+                        ha="center", va="center", transform=ax.transAxes)
+            ax.set_xlabel("Period (h)", fontsize=9)
+            ax.set_ylabel("Power / Z", fontsize=9)
+            ax.set_title("2. Rhythm in the temperature itself",
+                         fontsize=10, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+            if plotted:
+                ax.legend(fontsize=7, loc="upper right")
+
+            # ── Panel 3: r as a function of lag ──────────────────────────────
+            # Plotting the whole r(lag) curve — rather than one "strongest"
+            # number — is deliberate: for two periodic signals the curve
+            # oscillates, so a large |r| exists at *some* lag by construction.
+            # Seeing that oscillation is what stops it being read as a result.
+            ax = axes[0, 2]
+            ids = sorted(valid)
+            zero_lag_values = []
+            window = None
+            for roi_id in ids:
+                cc = valid[roi_id].get("crosscorrelation", {})
+                if "error" in cc or "lags_hours" not in cc:
+                    continue
+                colour = self.roi_colors.get(roi_id, "#1f77b4")
+                ax.plot(cc["lags_hours"], cc["correlations"], linewidth=1.0,
+                        color=colour, alpha=0.85, label=roi_label(roi_id))
+                ax.plot([0], [cc["zero_lag_r"]], "o", color=colour,
+                        markersize=6, markeredgecolor="black",
+                        markeredgewidth=0.5, zorder=5)
+                zero_lag_values.append(cc["zero_lag_r"])
+                window = cc.get("search_window_hours", window)
+
+            if window:
+                ax.axvspan(window[0], window[1], color="#4CAF50", alpha=0.12,
+                           zorder=0,
+                           label=f"plausible window 0–{window[1]:.0f} h")
+            ax.axvline(0, color="black", linewidth=0.8, linestyle="-")
+            ax.axhline(0, color="black", linewidth=0.8)
+            ax.set_ylim(-1, 1)
+            if zero_lag_values:
+                mean_zero = float(np.mean(zero_lag_values))
+                ax.text(
+                    0.02, 0.04,
+                    f"mean r at lag 0 = {mean_zero:+.3f}\n"
+                    f"(R² = {100 * mean_zero**2:.1f} %)",
+                    transform=ax.transAxes, fontsize=8, va="bottom", ha="left",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.7),
+                )
+            ax.set_xlabel("Lag (h)   positive = temperature leads", fontsize=9)
+            ax.set_ylabel("r (activity vs temperature)", fontsize=9)
+            ax.set_title("3. Correlation vs lag\n"
+                         "dots = concurrent (lag 0)",
+                         fontsize=10, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+            ax.legend(fontsize=6, loc="upper right", ncol=2)
+
+            # ── Panel 5: Q10 ceiling — immune to the collinearity ────────────
+            ax = axes[1, 1]
+            q10 = results["summary"].get("q10", {})
+            if q10 and "error" not in q10:
+                q_keys = sorted(q10["bounds"])
+                maxima = [100 * q10["bounds"][q]["max_modulation"] for q in q_keys]
+                observed = 100 * q10["observed_peak_to_trough"]
+                positions = np.arange(len(q_keys))
+                ax.bar(positions, maxima, color="#d62728", edgecolor="black",
+                       linewidth=0.5, label="max. temperature could cause")
+                ax.axhline(observed, color="#1f77b4", linewidth=2.0,
+                           label=f"observed rhythm ({observed:.0f} %)")
+                ax.set_xticks(positions)
+                ax.set_xticklabels([f"Q10 = {q:g}" for q in q_keys], fontsize=8)
+                ax.set_yscale("log")
+                ax.set_ylim(1, max(observed * 3, 200))
+                for pos, val in zip(positions, maxima):
+                    ax.text(pos, val * 1.15, f"{val:.1f} %", ha="center",
+                            fontsize=8)
+                ax.text(
+                    0.5, 0.93,
+                    f"observed rhythm is {q10['min_exceedance']:.0f}× larger\n"
+                    f"than temperature can explain",
+                    transform=ax.transAxes, fontsize=9, va="top", ha="center",
+                    fontweight="bold", color="#070",
+                    bbox=dict(boxstyle="round", facecolor="#e0f0e0", alpha=0.9),
+                )
+                ax.set_ylabel("Peak-to-trough modulation (%, log)", fontsize=9)
+            else:
+                ax.text(0.5, 0.5, "Q10 bound unavailable", ha="center",
+                        va="center", transform=ax.transAxes)
+            ax.set_title(
+                f"5. Q10 ceiling  (ΔT = "
+                f"{q10.get('temperature_peak_to_trough', float('nan')):.2f} °C)",
+                fontsize=10, fontweight="bold",
+            )
+            ax.grid(True, alpha=0.3, axis="y")
+            ax.tick_params(labelsize=8)
+            ax.legend(fontsize=7, loc="lower right")
+
+            # ── Panel 6: rhythm parameters across individuals ────────────────
+            # Every ROI saw the identical temperature, so a common driver
+            # predicts identical rhythms. Scatter here argues for independent
+            # internal clocks.
+            ax = axes[1, 2]
+            spread = results["summary"].get("interindividual_spread", {})
+            if spread and "error" not in spread:
+                phases = np.asarray(spread["peak_times"], dtype=float)
+                rel_amps = 100 * np.asarray(
+                    spread["relative_amplitudes"], dtype=float
+                )
+                # Ids come from the spread result itself, so a point can never
+                # be paired with the wrong ROI's colour if one dropped out.
+                spread_ids = spread.get("roi_ids", list(ids[: len(phases)]))
+                point_colours = [
+                    self.roi_colors.get(r, "#1f77b4") for r in spread_ids
+                ]
+                ax.scatter(phases, rel_amps, c=point_colours, s=70,
+                           edgecolors="black", linewidths=0.6, zorder=3)
+                for x, y, roi_id in zip(phases, rel_amps, spread_ids):
+                    ax.annotate(roi_label(roi_id), (x, y), fontsize=7,
+                                xytext=(4, 4), textcoords="offset points")
+                ax.margins(x=0.18, y=0.18)   # keep edge points off the frame
+                # The temperature's own acrophase — one value, no scatter
+                temp_amp = q10.get("temperature_amplitude") if q10 else None
+                ax.axvline(spread["mean_phase_hours"], color="gray",
+                           linestyle="--", linewidth=1.0,
+                           label=f"mean phase ZT {spread['mean_phase_hours']:.1f} h")
+                ax.text(
+                    0.02, 0.95,
+                    f"amplitude spread {spread['amplitude_ratio']:.1f}×\n"
+                    f"phase spread {spread['phase_range_hours']:.1f} h "
+                    f"(circ. SD {spread['phase_circular_sd_hours']:.1f} h)\n"
+                    f"n = {spread['n']}  —  temperature identical for all",
+                    transform=ax.transAxes, fontsize=8, va="top", ha="left",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.7),
+                )
+                ax.set_xlabel("Acrophase (ZT h)", fontsize=9)
+                ax.set_ylabel("Relative amplitude (% of MESOR)", fontsize=9)
+                ax.legend(fontsize=7, loc="lower right")
+            else:
+                ax.text(0.5, 0.5, "Needs ≥ 2 ROIs", ha="center", va="center",
+                        transform=ax.transAxes)
+            ax.set_title("6. Rhythms differ between individuals",
+                         fontsize=10, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+
+            # ── Panel 4: does the rhythm survive? ────────────────────────────
+            ax = axes[1, 0]
+            before, after, point_colors, surv_labels = [], [], [], []
+            for roi_id in ids:
+                verdict = valid[roi_id]["verdict"]
+                if verdict["period_before"] and verdict["period_after"]:
+                    before.append(verdict["period_before"])
+                    after.append(verdict["period_after"])
+                    point_colors.append(
+                        "#2ca02c" if verdict["rhythm_survives"] else "#d62728"
+                    )
+                    surv_labels.append(roi_label(roi_id))
+            if before:
+                ax.scatter(before, after, c=point_colors, s=40,
+                           edgecolors="black", linewidths=0.5, zorder=3)
+                lo = min(min(before), min(after)) - 1
+                hi = max(max(before), max(after)) + 1
+                ax.plot([lo, hi], [lo, hi], color="gray", linestyle="--",
+                        linewidth=1.0, zorder=1, label="unchanged")
+                ax.set_xlim(lo, hi)
+                ax.set_ylim(lo, hi)
+                n_surv = sum(1 for c in point_colors if c == "#2ca02c")
+                ax.text(
+                    0.03, 0.95,
+                    f"{n_surv}/{len(before)} rhythms survive\n"
+                    f"(green = survives)",
+                    transform=ax.transAxes, fontsize=8, va="top", ha="left",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
+                )
+                ax.legend(fontsize=7, loc="lower right")
+            else:
+                ax.text(0.5, 0.5, "No comparable periods", ha="center",
+                        va="center", transform=ax.transAxes)
+            ax.set_xlabel("Period before (h)", fontsize=9)
+            ax.set_ylabel("Period after removing temperature (h)", fontsize=9)
+
+            # When temperature shares the activity's period the two are
+            # collinear and this panel cannot discriminate — say so on the
+            # figure itself, so it can never be quoted as a clean negative.
+            if not results["summary"].get("residual_test_conclusive", True):
+                ax.set_title(
+                    "4. Rhythm after regressing out temperature\n"
+                    "NOT CONCLUSIVE — temperature shares this period",
+                    fontsize=10, fontweight="bold", color="#b00",
+                )
+                for spine in ax.spines.values():
+                    spine.set_edgecolor("#b00")
+                    spine.set_linewidth(1.5)
+            else:
+                ax.set_title("4. Rhythm after regressing out temperature",
+                             fontsize=10, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+
+            import warnings as _w
+
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", UserWarning)
+                fig.tight_layout()
+
+            self.temperature_figure = fig
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=200, bbox_inches="tight",
+                        facecolor="white", edgecolor="none")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            self.fisher_plot_canvas.setPixmap(pixmap)
+
+        except Exception as e:
+            self._log_message(f"⚠️ Could not create temperature figure: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     def _create_circadian_plot(self, results: Dict, method_index: int):
         """Create and display plot based on selected analysis method."""
@@ -2991,7 +4113,7 @@ class CircadianMixin:
                         ax.text(
                             0.5,
                             0.5,
-                            f"ROI {roi_id}\n{result['error']}",
+                            f"{roi_label(roi_id)}\n{result['error']}",
                             ha="center",
                             va="center",
                             transform=ax.transAxes,
@@ -3006,7 +4128,7 @@ class CircadianMixin:
                         ax.set_xlabel("Period (h)", fontsize=9)
                         ax.set_ylabel("Power (a.u.)", fontsize=9)
                         ax.set_title(
-                            f"ROI {roi_id} - {section_label}",
+                            f"{roi_label(roi_id)} - {section_label}",
                             fontsize=10,
                             color=roi_color,
                             fontweight="bold",
@@ -3139,6 +4261,24 @@ class CircadianMixin:
                             for res in roi_only_results.values()
                             if res.get("is_significant") and res.get("dominant_period") is not None
                         ]
+
+                        # Per-dataset hit rate, so one dataset carrying the
+                        # pooled result is visible rather than hidden in n.
+                        per_dataset = None
+                        if self._batch_is_active():
+                            from ._batch import dataset_index as _ds_idx
+
+                            counts = {}
+                            for cid, res in roi_only_results.items():
+                                if not isinstance(cid, int):
+                                    continue
+                                ds = _ds_idx(cid)
+                                total, sig = counts.get(ds, (0, 0))
+                                counts[ds] = (
+                                    total + 1,
+                                    sig + bool(res.get("is_significant")),
+                                )
+                            per_dataset = counts
                         use_mean_peak = (
                             hasattr(self, "population_peak_mode")
                             and self.population_peak_mode.currentText() == "Mean"
@@ -3161,6 +4301,7 @@ class CircadianMixin:
                             "period_std": period_std,
                             "period_min": period_min,
                             "period_max": period_max,
+                            "per_dataset": per_dataset,
                         }
 
                         self._draw_population_panel(
@@ -3373,7 +4514,7 @@ class CircadianMixin:
                         ax.text(
                             0.5,
                             0.5,
-                            f"ROI {roi_id}\n{best_result['error']}",
+                            f"{roi_label(roi_id)}\n{best_result['error']}",
                             ha="center",
                             va="center",
                             transform=ax.transAxes,
@@ -3498,7 +4639,7 @@ class CircadianMixin:
                     is_significant = best_result.get("significant", False)
                     title_weight = "bold" if is_significant else "normal"
                     ax.set_title(
-                        f"ROI {roi_id} - {section_label}",
+                        f"{roi_label(roi_id)} - {section_label}",
                         fontsize=10,
                         color=roi_color,
                         fontweight=title_weight,
@@ -3689,15 +4830,15 @@ class CircadianMixin:
             im = ax1.imshow(corr_matrix, cmap="rainbow", vmin=-1, vmax=1, aspect="equal")
             ax1.set_xticks(range(len(roi_ids)))
             ax1.set_yticks(range(len(roi_ids)))
-            ax1.set_xticklabels([f"ROI {r}" for r in roi_ids],
+            ax1.set_xticklabels([f"{roi_label(r)}" for r in roi_ids],
                                 rotation=45, ha="right", fontsize=8)
-            ax1.set_yticklabels([f"ROI {r}" for r in roi_ids], fontsize=8)
+            ax1.set_yticklabels([f"{roi_label(r)}" for r in roi_ids], fontsize=8)
             ax1.set_xlabel("ROI", fontsize=9, labelpad=2)
             ax1.set_ylabel("ROI", fontsize=9, labelpad=2)
             ax1.tick_params(axis="both", labelsize=8)
 
-            import matplotlib.cm as _cm
-            _cmap_sim = _cm.get_cmap("rainbow")
+            from matplotlib import colormaps as _cmaps
+            _cmap_sim = _cmaps["rainbow"]
             for i in range(len(roi_ids)):
                 for j in range(len(roi_ids)):
                     val = corr_matrix[i, j]
@@ -3804,11 +4945,11 @@ class CircadianMixin:
             im = ax.imshow(coherence_matrix, cmap="rainbow", vmin=0, vmax=1, aspect="auto")
             ax.set_xticks(range(len(roi_ids)))
             ax.set_yticks(range(len(roi_ids)))
-            ax.set_xticklabels([f"ROI {r}" for r in roi_ids], rotation=45)
-            ax.set_yticklabels([f"ROI {r}" for r in roi_ids])
+            ax.set_xticklabels([f"{roi_label(r)}" for r in roi_ids], rotation=45)
+            ax.set_yticklabels([f"{roi_label(r)}" for r in roi_ids])
 
-            import matplotlib.cm as _cm
-            _cmap_coh = _cm.get_cmap("rainbow")
+            from matplotlib import colormaps as _cmaps
+            _cmap_coh = _cmaps["rainbow"]
             for i in range(len(roi_ids)):
                 for j in range(len(roi_ids)):
                     val = coherence_matrix[i, j]
@@ -3897,7 +5038,7 @@ class CircadianMixin:
                     [0, r],
                     color=roi_color,
                     linewidth=2,
-                    label=f"ROI {roi_id}",
+                    label=f"{roi_label(roi_id)}",
                 )
                 ax.scatter(
                     [theta],
@@ -4368,7 +5509,7 @@ class CircadianMixin:
             z_scores = roi_data.get("z_scores", [])
             if periods and z_scores:
                 pd.DataFrame({"Period (h)": periods, "Z-Score": z_scores}).to_excel(
-                    writer, sheet_name=self._safe_sn(f"Chi2_ROI_{roi_id}", used_names), index=False
+                    writer, sheet_name=self._safe_sn(f"Chi2_ROI_{roi_short_label(roi_id)}", used_names), index=False
                 )
 
     def _write_fft_sheets_to_writer(self, writer, used_names: set):
@@ -4496,8 +5637,8 @@ class CircadianMixin:
             return
         import numpy as np
         roi_ids = sorted(results.get("roi_ids", []))
-        df = pd.DataFrame(corr_matrix, index=[f"ROI_{r}" for r in roi_ids],
-                          columns=[f"ROI_{r}" for r in roi_ids])
+        df = pd.DataFrame(corr_matrix, index=[f"ROI_{roi_short_label(r)}" for r in roi_ids],
+                          columns=[f"ROI_{roi_short_label(r)}" for r in roi_ids])
         df.to_excel(writer, sheet_name=self._safe_sn("Similarity_Matrix", used_names))
 
         pairwise = results.get("pairwise_correlations", [])
@@ -4514,8 +5655,8 @@ class CircadianMixin:
         if coh_matrix is None:
             return
         roi_ids = sorted(results.get("roi_ids", []))
-        df = pd.DataFrame(coh_matrix, index=[f"ROI_{r}" for r in roi_ids],
-                          columns=[f"ROI_{r}" for r in roi_ids])
+        df = pd.DataFrame(coh_matrix, index=[f"ROI_{roi_short_label(r)}" for r in roi_ids],
+                          columns=[f"ROI_{roi_short_label(r)}" for r in roi_ids])
         df.to_excel(writer, sheet_name=self._safe_sn("Coherence_Matrix", used_names))
 
         pairwise = results.get("pairwise_coherence", [])
@@ -4726,7 +5867,7 @@ class CircadianMixin:
             if sig_best_periods:
                 sp = _np.array(sig_best_periods, dtype=float)
                 pop_rows = [
-                    {"Metric": f"ROI_{roi_id} Best Period (h)",
+                    {"Metric": f"ROI_{roi_short_label(roi_id)} Best Period (h)",
                      "Activity": roi_data.get("best_period"),
                      "R²": roi_data.get("best_result", {}).get("r_squared"),
                      "Amplitude": roi_data.get("best_result", {}).get("amplitude"),
@@ -4972,9 +6113,9 @@ class CircadianMixin:
             roi_ids = results.get("roi_ids", [])
             if corr_matrix is not None and len(roi_ids) > 0:
                 writer.writerow(["Correlation Matrix"])
-                writer.writerow(["ROI"] + [f"ROI {r}" for r in roi_ids])
+                writer.writerow(["ROI"] + [f"{roi_label(r)}" for r in roi_ids])
                 for i, roi_id in enumerate(roi_ids):
-                    row = [f"ROI {roi_id}"]
+                    row = [f"{roi_label(roi_id)}"]
                     for j in range(len(roi_ids)):
                         row.append(f"{corr_matrix[i, j]:.4f}")
                     writer.writerow(row)
@@ -4986,9 +6127,9 @@ class CircadianMixin:
             if lag_matrix is not None and len(roi_ids) > 0:
                 writer.writerow([])
                 writer.writerow(["Lag Matrix (hours)"])
-                writer.writerow(["ROI"] + [f"ROI {r}" for r in roi_ids])
+                writer.writerow(["ROI"] + [f"{roi_label(r)}" for r in roi_ids])
                 for i, roi_id in enumerate(roi_ids):
-                    row = [f"ROI {roi_id}"]
+                    row = [f"{roi_label(roi_id)}"]
                     for j in range(len(roi_ids)):
                         row.append(f"{lag_matrix[i, j]:.2f}")
                     writer.writerow(row)
@@ -5299,7 +6440,7 @@ class CircadianMixin:
                         spectrum_data = spectrum_data.iloc[::step]
 
                     spectrum_data.to_excel(
-                        writer, sheet_name=f"ROI_{roi_id}_Spectrum", index=False
+                        writer, sheet_name=f"ROI_{roi_short_label(roi_id)}_Spectrum", index=False
                     )
 
             # Sheet 4: Sleep Phase Results (if available)
@@ -5343,7 +6484,7 @@ class CircadianMixin:
                 std_p  = float(_np.std(sp, ddof=1)) if len(sp) > 1 else 0.0
                 min_p  = float(_np.min(sp))
                 max_p  = float(_np.max(sp))
-                pop_rows = [{"ROI": f"ROI_{roi_id}", "Dominant Period (h)": v.get("dominant_period")}
+                pop_rows = [{"ROI": f"ROI_{roi_short_label(roi_id)}", "Dominant Period (h)": v.get("dominant_period")}
                             for roi_id, v in sorted(
                                 {k: v for k, v in self.fisher_analysis_results.items() if isinstance(k, int)}.items())
                             if v.get("is_significant") and v.get("dominant_period") is not None]
@@ -5581,7 +6722,7 @@ class CircadianMixin:
                         periodogram_data = periodogram_data.iloc[::step]
 
                     periodogram_data.to_excel(
-                        writer, sheet_name=f"ROI_{roi_id}_Periodogram", index=False
+                        writer, sheet_name=f"ROI_{roi_short_label(roi_id)}_Periodogram", index=False
                     )
 
             # Sheet 3: Sleep Phase Results (if available)
@@ -5632,7 +6773,7 @@ class CircadianMixin:
                 min_p  = float(_np.min(sp))
                 max_p  = float(_np.max(sp))
                 pop_rows = [
-                    {"ROI": f"ROI_{roi_id}",
+                    {"ROI": f"ROI_{roi_short_label(roi_id)}",
                      "Dominant Period (h)": v.get("periodogram", {}).get("dominant_period")}
                     for roi_id, v in sorted(
                         {k: v for k, v in self.fisher_analysis_results.items()
@@ -5686,8 +6827,8 @@ class CircadianMixin:
             if len(corr_matrix) > 0:
                 corr_df = pd.DataFrame(
                     corr_matrix,
-                    index=[f"ROI {r}" for r in roi_ids],
-                    columns=[f"ROI {r}" for r in roi_ids],
+                    index=[f"{roi_label(r)}" for r in roi_ids],
+                    columns=[f"{roi_label(r)}" for r in roi_ids],
                 )
                 corr_df.to_excel(writer, sheet_name="Correlation_Matrix")
 
@@ -5750,8 +6891,8 @@ class CircadianMixin:
             if len(coherence_matrix) > 0:
                 coherence_df = pd.DataFrame(
                     coherence_matrix,
-                    index=[f"ROI {r}" for r in roi_ids],
-                    columns=[f"ROI {r}" for r in roi_ids],
+                    index=[f"{roi_label(r)}" for r in roi_ids],
+                    columns=[f"{roi_label(r)}" for r in roi_ids],
                 )
                 coherence_df.to_excel(writer, sheet_name="Coherence_Matrix")
 
@@ -5929,7 +7070,7 @@ class CircadianMixin:
                         ax.text(
                             0.5,
                             0.5,
-                            f"ROI {roi_id}\nInsufficient data",
+                            f"{roi_label(roi_id)}\nInsufficient data",
                             ha="center",
                             va="center",
                             transform=ax.transAxes,
@@ -6021,7 +7162,7 @@ class CircadianMixin:
                         ax.tick_params(axis="both", labelsize=8)
                         title_weight = "bold" if is_significant else "normal"
                         ax.set_title(
-                            f"ROI {roi_id} - {section_label}",
+                            f"{roi_label(roi_id)} - {section_label}",
                             fontsize=10,
                             color=roi_color,
                             fontweight=title_weight,
@@ -6218,10 +7359,10 @@ class CircadianMixin:
                 QSizePolicy,
                 QScrollArea,
             )
-            from matplotlib.backends.backend_qt5agg import (
+            from matplotlib.backends.backend_qtagg import (
                 FigureCanvasQTAgg as FigureCanvas,
             )
-            from matplotlib.backends.backend_qt5agg import (
+            from matplotlib.backends.backend_qtagg import (
                 NavigationToolbar2QT as NavigationToolbar,
             )
 
@@ -6361,7 +7502,7 @@ class CircadianMixin:
 
             dialog.finished.connect(_cleanup_canvas)
 
-            dialog.exec_()
+            dialog.exec()
 
         except Exception as e:
             self._log_message(f"⚠️ Could not open plot window: {e}")
@@ -6374,7 +7515,7 @@ class CircadianMixin:
         import os
         from matplotlib.figure import Figure as _Figure
         from scipy.cluster import hierarchy
-        import matplotlib.cm as _cm
+        from matplotlib import colormaps as _cmaps
 
         results = self.fisher_analysis_results
         corr_matrix = results.get("correlation_matrix")
@@ -6392,12 +7533,12 @@ class CircadianMixin:
         fig1 = _Figure(figsize=(fig_h_size + 1.2, fig_h_size), layout="constrained")
         ax1 = fig1.add_subplot(111)
 
-        _cmap = _cm.get_cmap("rainbow")
+        _cmap = _cmaps["rainbow"]
         im = ax1.imshow(corr_matrix, cmap="rainbow", vmin=-1, vmax=1, aspect="equal")
         ax1.set_xticks(range(n))
         ax1.set_yticks(range(n))
-        ax1.set_xticklabels([f"ROI {r}" for r in roi_ids], rotation=45, ha="right", fontsize=8)
-        ax1.set_yticklabels([f"ROI {r}" for r in roi_ids], fontsize=8)
+        ax1.set_xticklabels([f"{roi_label(r)}" for r in roi_ids], rotation=45, ha="right", fontsize=8)
+        ax1.set_yticklabels([f"{roi_label(r)}" for r in roi_ids], fontsize=8)
         ax1.set_xlabel("ROI", fontsize=8)
         ax1.set_ylabel("ROI", fontsize=8)
         ax1.tick_params(axis="both", labelsize=8)
@@ -6651,6 +7792,11 @@ class CircadianMixin:
                        label=f"Median peak: {med_p:.1f}h")
         if sig_periods:
             stats_lines = [f"Significant: {len(sig_periods)}/{n_rois_total}"]
+            per_dataset = data.get("per_dataset")
+            if per_dataset:
+                for ds in sorted(per_dataset):
+                    total, sig = per_dataset[ds]
+                    stats_lines.append(f"  D{ds}: {sig}/{total}")
             if period_std is not None and len(sig_periods) >= 2:
                 stats_lines.append(f"Spread: ±{period_std:.1f}h (std)")
                 stats_lines.append(f"Range: {period_min:.1f}–{period_max:.1f}h")
@@ -6711,7 +7857,7 @@ class CircadianMixin:
             btns.accepted.connect(dlg.accept)
             btns.rejected.connect(dlg.reject)
             layout.addWidget(btns)
-            if dlg.exec_() != QDialog.Accepted:
+            if dlg.exec() != QDialog.Accepted:
                 return
             if rb_rois.isChecked():
                 save_mode = "roi_only"

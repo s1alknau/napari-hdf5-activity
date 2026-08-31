@@ -40,7 +40,13 @@ dependencies = [
 pyqt5 = ["napari[pyqt5]"]
 pyqt6 = ["napari[pyqt6]"]
 pyside6 = ["napari[pyside6]"]
-zarr = ["zarr>=2.12.0"]
+# Recordings from the current rig are Zarr *format v3*. zarr-python 2.x
+# reads v2 only; 3.x reads both. 3.x needs Python 3.11+, so older
+# interpreters stay on 2.x and can read v2 stores only.
+zarr = [
+    "zarr>=3; python_version >= '3.11'",
+    "zarr>=2.12.0; python_version < '3.11'",
+]
 testing = [
     "tox",
     "pytest",

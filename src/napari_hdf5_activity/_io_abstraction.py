@@ -80,6 +80,10 @@ def is_supported_file(path: str) -> bool:
 # Abstract base class
 # ---------------------------------------------------------------------------
 
+class ZarrVersionError(RuntimeError):
+    """The installed zarr-python cannot read this store's format version."""
+
+
 class FileReader(ABC):
     """Minimal common interface over HDF5 (h5py) and Zarr stores.
 
@@ -257,6 +261,40 @@ class HDF5FileReader(FileReader):
 # Zarr implementation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Zarr format versions
+# ---------------------------------------------------------------------------
+# Two things are versioned independently and are easy to confuse:
+#   * the *store format* — v2 uses .zgroup/.zarray, v3 uses zarr.json
+#   * the *library*      — zarr-python 2.x reads v2 only, 3.x reads both
+# A v3 store opened with zarr-python 2.x fails with a bare
+# "PathNotFoundError: nothing found at path ''", which says nothing useful.
+
+def detect_zarr_format_version(path: str) -> Optional[int]:
+    """Return 2 or 3 for a Zarr store on disk, or ``None`` if undetermined."""
+    if not os.path.isdir(path):
+        return None  # zip store or similar — let zarr decide
+    if os.path.exists(os.path.join(path, "zarr.json")):
+        return 3
+    if os.path.exists(os.path.join(path, ".zgroup")) or os.path.exists(
+        os.path.join(path, ".zarray")
+    ):
+        return 2
+    return None
+
+
+def zarr_library_major() -> Optional[int]:
+    """Major version of the installed zarr-python, or ``None`` if absent."""
+    try:
+        import zarr
+    except ImportError:
+        return None
+    try:
+        return int(str(zarr.__version__).split(".")[0])
+    except (ValueError, AttributeError):
+        return None
+
+
 class ZarrFileReader(FileReader):
     """
     :class:`FileReader` backed by zarr.
@@ -275,6 +313,18 @@ class ZarrFileReader(FileReader):
                 "Install it with:  pip install zarr"
             ) from exc
         self._zarr = zarr
+
+        # Fail with something actionable when the library cannot read the store
+        store_version = detect_zarr_format_version(self.path)
+        lib_major = zarr_library_major()
+        if store_version == 3 and lib_major is not None and lib_major < 3:
+            raise ZarrVersionError(
+                f"'{os.path.basename(self.path)}' is a Zarr v3 store "
+                f"(it has a zarr.json), but zarr-python {zarr.__version__} is "
+                f"installed and reads v2 only. Install zarr 3 to read both "
+                f"formats:  pip install \"zarr>=3\"  (needs Python 3.11+)."
+            )
+
         # A .zarr path that is a regular file is a zip store.
         # ZipStore location differs between zarr v2 (zarr.ZipStore) and
         # v3 (zarr.storage.ZipStore).  Try both, then fall back to a direct
