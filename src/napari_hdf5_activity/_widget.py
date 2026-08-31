@@ -1894,7 +1894,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "• 0.5-2h: Very fast ultradian rhythms\n"
             "• 2-8h: Standard ultradian rhythms\n"
             "• 8-12h: Extended ultradian/tidal rhythms\n"
-            "• 20-22h: Circadian rhythms (24h cycles)"
+            "• 16h: Circadian rhythms, wide enough for short tau"
         )
         fisher_params_layout.addRow("Minimum Period:", self.fisher_min_period)
 
@@ -1908,7 +1908,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "Maximum period to test:\n"
             "• 2-8h: Fast ultradian rhythms only\n"
             "• 8-20h: Include infradian/extended rhythms\n"
-            "• 20-28h: Include circadian (24h) rhythms\n"
+            "• 36h: Include circadian (24h) rhythms and lengthened tau\n"
             "• >28h: Longer multi-day cycles (requires 72h+ data)"
         )
         fisher_params_layout.addRow("Maximum Period:", self.fisher_max_period)
@@ -1975,14 +1975,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         btn_preset_medium.clicked.connect(lambda: self._set_period_preset(8.0, 20.0))
         preset_layout.addWidget(btn_preset_medium)
 
-        btn_preset_circadian = QPushButton("Circadian\n(20-28h)")
+        btn_preset_circadian = QPushButton("Circadian\n(16-36h)")
         btn_preset_circadian.setToolTip(
             "Circadian rhythms: ~24-hour day/night cycles\n"
             "Good for: Daily activity patterns, sleep/wake cycles\n"
-            "Requires: 48+ hour recordings for reliable detection"
+            "Requires: 48+ hour recordings for reliable detection\n"
+            "Range 16-36 h follows the entrainment protocol: it holds\n"
+            "short free-running periods (tau ~21 h in DD) as well as\n"
+            "lengthened ones, so a peak is not clipped at the boundary."
         )
         btn_preset_circadian.clicked.connect(
-            lambda: self._set_period_preset(20.0, 28.0)
+            lambda: self._set_period_preset(16.0, 36.0)
         )
         preset_layout.addWidget(btn_preset_circadian)
 
@@ -2082,14 +2085,13 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "  optimal time lag (≤ max_period / 2). Hierarchical clustering at r = 0.5.\n"
             "  Period range does not affect result. Use Fraction Movement.\n\n"
             "• Coherence Analysis: Welch magnitude-squared coherence between ROI pairs\n"
-            "  at one target period = midpoint of period range.\n"
-            "  ⚠ Set period range so that (min + max) / 2 = target period\n"
-            "  (e.g. 20–28 h for circadian → target = 24 h).\n"
+            "  at one target period, taken from the Target Period field below\n"
+            "  (default 24 h) — the chi² min/max range does not affect it.\n"
             "  Needs long recordings (≥ 3× target period) for good frequency resolution.\n"
             "  Recommended bin size: 30–60 min.\n\n"
             "• Phase Clustering: Hilbert-transform phase per ROI → peak activity time.\n"
             "  Bins ROIs into 4 groups: 0–6 h / 6–12 h / 12–18 h / 18–24 h.\n"
-            "  ⚠ Set period range so midpoint = target period (same as Coherence).\n"
+            "  Uses the same Target Period field as Coherence.\n"
             "  Reliable only when the target rhythm is strong and dominant in the signal.\n"
             "  Phase is relative to recording start (ZT 0 = start of recording)."
         )
