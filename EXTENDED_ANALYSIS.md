@@ -174,7 +174,7 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 4. **Z-Score Calculation**: Transform to a test statistic with known null distribution
 5. **Significance Testing**: Compare to chi-square distribution (df=2) for p-values
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
     **Step 1: Correlation with Reference Signals**
 
@@ -188,6 +188,28 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 
     These correlations measure how well the data aligns with cosine and sine waves at the test period. Both components are needed because a sinusoid of arbitrary phase can be expressed as a linear combination: A·cos(ωt + φ) = A·cos(φ)·cos(ωt) - A·sin(φ)·sin(ωt).
 
+    ```python
+    # fisher_z_periodogram(), _fisher_analysis.py
+    period_samples = period_hours / sampling_hours   # T in samples          (line 74)
+    omega = 2 * np.pi / period_samples               # ω = 2π/T (per sample) (line 75)
+
+    # Reference waves. Their amplitude is irrelevant — Pearson's r is
+    # invariant to scale and offset, so only the shape enters the result.
+    cos_component = np.cos(omega * t)                # cos(ωt)               (line 77)
+    sin_component = np.sin(omega * t)                # sin(ωt)               (line 78)
+
+    # np.corrcoef returns the 2x2 matrix; [0, 1] is r between the two inputs.
+    r_cos = np.corrcoef(time_series, cos_component)[0, 1]                  # (line 80)
+    r_sin = np.corrcoef(time_series, sin_component)[0, 1]                  # (line 81)
+
+    # A flat segment has zero variance → r is NaN. Treated as "no
+    # correlation" so one dead ROI cannot poison the periodogram.
+    if np.isnan(r_cos):
+        r_cos = 0.0                                                        # (line 84)
+    if np.isnan(r_sin):
+        r_sin = 0.0                                                        # (line 86)
+    ```
+
     **Step 2: Squared Coherence (R²)**
 
     The squared coherence represents the proportion of variance explained by a sinusoid at period T:
@@ -198,6 +220,9 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 
     This ranges from 0 (no periodic component) to ~1 (perfect sinusoidal fit). The sum of squared correlations arises because cosine and sine are orthogonal basis functions—their independent contributions to explained variance are additive.
 
+    In the code this intermediate quantity is never stored on its own — it is
+    computed inside the expression of step 3, `(r_cos**2 + r_sin**2)`.
+
     **Step 3: Chi-Squared Test Statistic**
 
     Convert R² to a test statistic with known null distribution:
@@ -207,6 +232,13 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
     ```
 
     where n is the number of observations. **Note:** The y-axis in the plot is labeled "Z-score" but the quantity plotted is actually the chi-squared statistic Z(T), which directly follows χ²(df=2) under the null hypothesis.
+
+    ```python
+    # Squaring drops the sign, summing both components removes the phase
+    # dependence: the rhythm is found whether it aligns with cos, sin or
+    # anything between. The factor n is why Z grows with recording length.
+    z_scores[idx] = n * (r_cos**2 + r_sin**2)        # Z(T)                  (line 92)
+    ```
 
     **Step 4: Statistical Significance**
 
@@ -224,6 +256,16 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
 
     `is_significant` is set to True when Z(T) > 15.2 — **not** when a raw per-test p-value < 0.05.
 
+    ```python
+    m = len(periods)                                       # m = 100         (line 95)
+    corrected_alpha = significance_level / m               # α/m             (line 96)
+    # ppf is the inverse CDF (quantile): the Z value that χ²(2) exceeds only
+    # with probability α/m.
+    chi2_crit = stats.chi2.ppf(1 - corrected_alpha, df=2)  # ≈ 15.2          (line 97)
+
+    significant_mask = z_scores > critical_z               # per-period flag (line 100)
+    ```
+
     The "mean threshold" line on the population plot also shows this Bonferroni-corrected value.
 
     **p-value calculation (closed form for χ²₂):**
@@ -232,6 +274,16 @@ The Fisher/Chi² periodogram (Sokolove & Bushell 1978) is a statistical method f
     ```
 
     The second equality uses the closed-form CDF of chi-square with 2 degrees of freedom. Reported p-values are per-test (not corrected); significance decisions use the Bonferroni threshold on Z(T).
+
+    ```python
+    max_z_idx = np.argmax(z_scores)                  # tallest peak          (line 103)
+    dominant_period = periods[max_z_idx]             # T_dom                 (line 104)
+    p_value = 1 - stats.chi2.cdf(max_z_score, df=2)  # p, per-test           (line 107)
+    ```
+
+    The module name still refers to Fisher's Z-transformation for historical
+    reasons; what it computes is the classical Sokolove & Bushell chi-squared
+    periodogram (see the comment at line 89).
 
 ### Parameters
 
@@ -391,76 +443,201 @@ Fast Fourier Transform (FFT) converts time-series data into the frequency domain
 5. **Permutation Test**: Assesses statistical significance
 6. **Peak Detection**: Identifies significant frequency peaks
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
-    **Discrete Fourier Transform (DFT)**
+    All fragments are from `fft_periodogram()` in
+    [`_circadian_fft.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_circadian_fft.py);
+    the permutation test lives in `_permutation_test_fft()` in the same file.
 
-    The DFT decomposes a time series x[n] of N samples into complex-valued frequency components:
+    **Symbols**
+
+    | Symbol | Meaning | Unit |
+    |:------:|---------|------|
+    | *x*[*n*] | binned activity signal, sample *n* = 0 … *N*−1 | signal units |
+    | *N* | number of samples | — |
+    | Δ*t* | sampling interval | s |
+    | *w*[*n*] | window function | — |
+    | *N*<sub>FFT</sub> | transform length after zero-padding | — |
+    | *X*[*k*] | complex DFT coefficient of bin *k* | signal units |
+    | *P*[*k*] | power, \|*X*[*k*]\|² | signal units² |
+    | *f*<sub>k</sub> | frequency of bin *k*, *k*/(*N*<sub>FFT</sub>·Δ*t*) | Hz |
+    | *T*<sub>k</sub> | period of bin *k*, 1/*f*<sub>k</sub> | s → h |
+    | φ | phase of the dominant coefficient | rad |
+    | *N*<sub>perm</sub> | number of surrogates (1000) | — |
+
+    ---
+
+    **Step 1 — linear detrending**
+
+    A linear trend produces a large DC component and leaks into the low
+    frequencies, where it can bury the circadian peak.
 
     ```
-    X[k] = Σₙ₌₀^(N-1) x[n] × e^(-i2πkn/N),    k = 0, 1, ..., N-1
+    x_detrended[n] = x[n] − (â·n + b̂)
     ```
 
-    Each coefficient X[k] corresponds to frequency f_k = k/(N×Δt) Hz, where Δt is the sampling interval.
+    with â, b̂ the least-squares estimates of the trend.
 
-    **Power Spectral Density (PSD)**
+    ```python
+    detrended = signal.detrend(time_series)      # subtracts the LS straight line  (line 140)
+    ```
 
-    The PSD quantifies signal energy at each frequency:
+    ---
+
+    **Step 2 — Hann window**
+
+    The DFT assumes the signal repeats with period *N*. A non-integer number of
+    cycles therefore creates a discontinuity at the wrap-around, and its energy
+    smears across neighbouring bins (spectral leakage). Tapering both ends to
+    zero suppresses that:
 
     ```
+    w[n] = 0.5 · (1 − cos(2πn/(N−1))),   n = 0 … N−1
+    x_windowed[n] = x_detrended[n] · w[n]
+    ```
+
+    ```python
+    if window == "hann":
+        win = np.hanning(len(detrended))         # w[n], the raised cosine        (line 145)
+    detrended = detrended * win                  # element-wise taper             (line 152)
+    ```
+
+    The Hann window buys ~32 dB sidelobe suppression at the cost of a slightly
+    wider main lobe — the usual trade-off between leakage and resolution.
+
+    ---
+
+    **Step 3 — zero-padding**
+
+    Native resolution is Δ*f* = 1/(*N*·Δ*t*). Appending zeros interpolates
+    intermediate bins, which makes the peak easier to locate without adding
+    information:
+
+    ```
+    N_FFT = max( 2^⌈log₂(4N)⌉ , 4N )
+    ```
+
+    ```python
+    # 4x the length, rounded up to a power of two — FFT is fastest there.
+    n_fft = max(2 ** int(np.ceil(np.log2(len(detrended) * 4))), len(detrended) * 4)  # (line 156)
+    ```
+
+    ---
+
+    **Step 4 — the transform and the power spectrum**
+
+    ```
+    X[k] = Σₙ₌₀^(N−1) x[n] · e^(−i2πkn/N_FFT)
     P[k] = |X[k]|² = Re(X[k])² + Im(X[k])²
     ```
 
-    For real-valued signals, the spectrum is symmetric, so only frequencies up to the Nyquist frequency f_Nyq = 1/(2Δt) contain unique information.
-
-    **Preprocessing Steps**
-
-    **Linear Detrending**
-
-    Biological time series often exhibit slow baseline drift. A linear trend produces a large DC component and spectral leakage into low frequencies, potentially masking circadian signals:
-
-    ```
-    x_detrended[n] = x[n] - (â×n + b̂)
+    ```python
+    # rfft, not fft: for a real signal the spectrum is symmetric, so only the
+    # bins up to Nyquist (1/2Δt) carry unique information.
+    fft_values = np.fft.rfft(detrended, n=n_fft)     # X[k] (complex)            (line 157)
+    power_spectrum = np.abs(fft_values) ** 2         # P[k]                      (line 158)
     ```
 
-    where â and b̂ are least-squares estimates of the linear trend.
+    ---
 
-    **Hann Windowing**
-
-    The DFT assumes the signal is periodic with period N. Non-integer cycles cause spectral leakage—energy spreads into adjacent frequency bins. The Hann (raised cosine) window tapers the signal to reduce this:
+    **Step 5 — from frequency bins to periods**
 
     ```
-    w[n] = 0.5 × (1 - cos(2πn/(N-1))),    n = 0, ..., N-1
+    f_k = k / (N_FFT · Δt)          T_k = 1/f_k  (s)  → /3600  (h)
     ```
 
-    The Hann window provides ~32 dB sidelobe suppression with a good trade-off between frequency resolution and leakage reduction.
+    ```python
+    frequencies = np.fft.rfftfreq(n_fft, d=sampling_interval)   # f_k in Hz      (line 161)
 
-    **Zero-Padding**
+    # Bin 0 is the DC component: f = 0 would divide by zero, so it is masked
+    # out and left at period 0 instead of ∞.
+    periods = np.zeros_like(frequencies)                                       # (line 164)
+    nonzero_mask = frequencies > 0
+    periods[nonzero_mask] = (1.0 / frequencies[nonzero_mask]) / 3600.0         # (line 167)
 
-    Native frequency resolution is Δf = 1/(N×Δt). Zero-padding—appending zeros before FFT—interpolates additional frequency bins, providing a smoother spectral estimate:
-
-    ```
-    N_FFT = 4 × N    (rounded to next power of 2 for computational efficiency)
-    ```
-
-    This improves apparent resolution by 4× without adding new information.
-
-    **Statistical Significance (Permutation Test)**
-
-    Unlike Fisher's Z, FFT power has no simple analytic null distribution. We use a non-parametric permutation test with 1000 shuffles:
-
-    1. Compute observed **maximum** power P_obs over the full tested period range
-    2. Generate N_perm = 1000 surrogate time series by randomly shuffling sample order (destroys temporal structure, preserves amplitude distribution)
-    3. For each surrogate, apply same preprocessing and compute the **maximum** FFT power over the same period range
-    4. Calculate the p-value with the Phipson & Smyth (2010) add-one correction:
-
-    ```
-    p = (b + 1) / (N_perm + 1),    where b = Σᵢ 𝟙[P_perm,i ≥ P_obs]
+    # Keep only what the user asked for (e.g. the circadian 20–28 h window).
+    period_mask = (periods >= min_period_hours) & (periods <= max_period_hours)  # (line 170)
+    relevant_periods = periods[period_mask]
+    relevant_power = power_spectrum[period_mask]
     ```
 
-    Here 𝟙[·] is the indicator function and `b` counts the surrogates whose max-power matched or exceeded the observed max-power. The **+1** add-on treats the observed statistic as one draw from the discrete permutation null distribution and prevents the impossible-as-a-probability value p = 0 when no surrogate is more extreme (Phipson & Smyth, *SAGMB* 2010).
+    ---
 
-    Using the **maximum** power over the full period range (rather than power at a single frequency) correctly handles the multiple-comparisons problem inherent in scanning many frequencies. The p-value represents the probability that a shuffled (non-periodic) signal would produce as strong a spectral peak anywhere in the tested range. With 1000 permutations, the smallest achievable p-value is 1/(1000 + 1) ≈ 0.001.
+    **Step 6 — dominant period**
+
+    ```
+    k_dom = argmax_k P[k]   over the selected period range
+    ```
+
+    ```python
+    max_power_idx = np.argmax(relevant_power)          # k_dom                  (line 186)
+    dominant_period = relevant_periods[max_power_idx]  # T_dom                  (line 187)
+    dominant_frequency = relevant_freqs[max_power_idx] # f_dom                  (line 188)
+    dominant_power = relevant_power[max_power_idx]     # P_obs                  (line 189)
+    ```
+
+    ---
+
+    **Step 7 — phase and peak time of the dominant component**
+
+    For a cosine *A*·cos(2π*ft* + φ) the rfft coefficient at *f* is
+    approximately (*N*/2)·*A*·e^(iφ), so the complex angle *is* the phase:
+
+    ```
+    φ      = arg X[k_dom]
+    t_peak = (−φ / (2πf_dom)) mod T_dom
+    ```
+
+    ```python
+    relevant_indices = np.where(period_mask)[0]
+    dominant_fft_idx = relevant_indices[max_power_idx]   # index in the full spectrum
+    dominant_phase_rad = float(np.angle(fft_values[dominant_fft_idx]))   # φ     (line 199)
+
+    # Same maximum condition as in the Cosinor: the cosine peaks where its
+    # argument is zero, so t_peak = −φ/(2πf), folded into one cycle.
+    peak_time_seconds = -dominant_phase_rad / (2.0 * np.pi * dominant_frequency)  # (line 202)
+    dominant_peak_time_hours = float(peak_time_seconds / 3600.0) % float(dominant_period)
+    ```
+
+    Hann windowing preserves phase for frequencies that fall exactly on a bin;
+    off-bin frequencies pick up a small error, which the 4× zero-padding keeps
+    small.
+
+    ---
+
+    **Step 8 — significance by permutation**
+
+    FFT power has no simple analytic null distribution, so the null is built by
+    shuffling. Shuffling destroys the temporal order while keeping the amplitude
+    distribution, and the statistic is the **maximum** power over the whole
+    tested range — which is what accounts for scanning many frequencies at once:
+
+    ```
+    b = Σᵢ 𝟙[ P_perm,i ≥ P_obs ]
+    p = (b + 1) / (N_perm + 1)
+    ```
+
+    ```python
+    for _ in range(n_permutations):                    # N_perm = 1000          (line 50)
+        # Break the temporal structure, keep the value distribution.
+        permuted = np.random.permutation(time_series)                          # (line 52)
+
+        # Exactly the same preprocessing as the observed signal — otherwise the
+        # null distribution would not be comparable.
+        detrended = signal.detrend(permuted)                                   # (line 55)
+        ...
+        power_spectrum = np.abs(np.fft.rfft(detrended, n=n_fft)) ** 2
+        period_mask = (periods >= min_period_hours) & (periods <= max_period_hours)
+        permuted_powers.append(power_spectrum[period_mask].max())   # max, not one bin (line 83)
+
+    # Phipson & Smyth (2010) add-one correction: the observed statistic counts
+    # as one draw from the discrete null, which also prevents p = 0.
+    b = int(np.sum(np.array(permuted_powers) >= observed_power))               # (line 93)
+    p_value = (b + 1.0) / (n_permutations + 1.0)                               # (line 94)
+    ```
+
+    With 1000 surrogates the smallest reachable p-value is 1/1001 ≈ 0.001 — a
+    floor, not a measure of how strong the rhythm is.
 
 ### Parameters
 
@@ -622,7 +799,7 @@ Differences < 1 hour indicate excellent agreement.
 
 Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activity data and extracting key rhythmic parameters: MESOR (mean level), Amplitude (rhythm strength), and Acrophase (peak timing). This is the gold standard method in chronobiology for rhythm characterization.
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
     **The Cosinor Model**
 
@@ -652,6 +829,12 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
     - β₁ = A×cos(φ)
     - β₂ = -A×sin(φ)
 
+    ```python
+    # cosinor_analysis(), _cosinor_analysis.py
+    # T is fixed (from the periodogram or the period field), not fitted.
+    omega = 2 * np.pi / period_hours          # ω = 2π/T, rad per hour     (line 107)
+    ```
+
     **Ordinary Least Squares (OLS) Estimation**
 
     Construct the n×3 design matrix:
@@ -671,6 +854,22 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
 
     where x = [x(t₁), ..., x(tₙ)]' is the observation vector.
 
+    ```python
+    # One row per timepoint, three columns — one per unknown. The all-ones
+    # column is why β₀ comes out as the intercept, i.e. the MESOR.
+    X = np.column_stack(                                                  # (line 114)
+        [
+            np.ones(len(time_clean)),      # → β₀ (MESOR)                 (line 116)
+            np.cos(omega * time_clean),    # → β₁                         (line 117)
+            np.sin(omega * time_clean),    # → β₂                         (line 118)
+        ]
+    )
+
+    # lstsq solves the normal equations for us — because the model is linear
+    # in β this is the exact optimum, with no iteration and no starting guess.
+    beta, residuals, rank, s = np.linalg.lstsq(X, data_clean, rcond=None) # (line 124)
+    ```
+
     **Parameter Recovery:**
 
     ```
@@ -680,6 +879,22 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
     ```
 
     The four-quadrant arctangent (atan2) correctly resolves phase to (-π, π] regardless of coefficient signs. Convert to clock time: t_acro = (φ/ω) mod T.
+
+    ```python
+    mesor = beta[0]      # β₀ = M                                         (line 127)
+    beta_cos = beta[1]   # β₁                                             (line 128)
+    beta_sin = beta[2]   # β₂                                             (line 129)
+
+    # β₁ = A·cosφ and β₂ = −A·sinφ: the two coefficients are the Cartesian
+    # form of one vector — length = amplitude, angle = phase.
+    amplitude = np.sqrt(beta_cos**2 + beta_sin**2)                        # (line 135)
+    # The minus sign on β₂ undoes the sign in β₂ = −A·sinφ.
+    phase_angle_rad = np.arctan2(-beta_sin, beta_cos)                     # (line 136)
+
+    # cos(ωt + φ) peaks where its argument is zero → t = −φ/ω. The modulo
+    # folds it into the first cycle, so this is the *first* fitted peak.
+    peak_time = (-phase_angle_rad / omega) % period_hours                 # (line 140)
+    ```
 
     **Significance Testing (F-test)**
 
@@ -698,6 +913,22 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
 
     Under H₀, F follows an F-distribution with (2, n-3) degrees of freedom.
 
+    ```python
+    n = len(data_clean)
+    k = 2                                    # cos + sin                  (line 166)
+    df_model = k                             # dfn = 2                    (line 167)
+    df_residual = n - k - 1                  # dfd = n − 3 (β₀ costs one)  (line 168)
+
+    mse_residual = ss_res / df_residual      # SS_res/(n−3)               (line 171)
+    mse_model = (ss_tot - ss_res) / df_model # SS_model/2                 (line 172)
+    f_statistic = mse_model / mse_residual   # F                          (line 173)
+    p_value = 1 - stats.f.cdf(f_statistic, df_model, df_residual)         # (line 174)
+    ```
+
+    With thousands of frames `df_residual` is huge and *p* becomes tiny even
+    for weak rhythms — which is why R² and Amplitude carry the biological
+    statement, not *p*.
+
     **Goodness of Fit:**
 
     ```
@@ -705,6 +936,19 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
     ```
 
     R² represents the proportion of variance explained by the fitted sinusoid.
+
+    ```python
+    # SS_res: what the fitted cosine failed to explain ...
+    ss_res = np.sum((data_clean - (mesor                                  # (line 150)
+                                   + beta_cos * np.cos(omega * time_clean)
+                                   + beta_sin * np.sin(omega * time_clean))) ** 2)
+    # ... SS_tot: what a flat line at the mean would leave unexplained.
+    ss_tot = np.sum((data_clean - np.mean(data_clean)) ** 2)              # (line 161)
+    r_squared = 1 - (ss_res / ss_tot)                                     # (line 162)
+    ```
+
+    The denominator is the same for every tested period, which is what makes
+    R² comparable across the multi-period scan.
 
     **Confidence Intervals**
 
@@ -715,6 +959,16 @@ Cosinor analysis quantifies circadian rhythms by fitting a cosine curve to activ
     ```
 
     For MESOR: SE(M) = √Var(β̂₀)
+
+    ```python
+    mse = ss_res / df_residual                     # σ̂²                    (line 183)
+    XtX_inv = np.linalg.inv(X.T @ X)               # (X'X)⁻¹               (line 185)
+    var_beta = mse * np.diag(XtX_inv)              # Var(β̂), diagonal only (line 186)
+    se_beta = np.sqrt(var_beta)                    # SE(β̂)                 (line 187)
+
+    t_crit = stats.t.ppf(1 - alpha / 2, df_residual)                      # (line 190)
+    ci_mesor = (mesor - t_crit * se_beta[0], mesor + t_crit * se_beta[0]) # (line 191)
+    ```
 
     For Amplitude (nonlinear function), use the **delta method**:
 
@@ -962,88 +1216,175 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
 4. **Significance Testing**: t-test for correlation significance
 5. **Clustering**: Groups ROIs by similarity using hierarchical clustering
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
-    **Signal Normalization**
+    All fragments are from
+    [`_circadian_similarity.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_circadian_similarity.py):
+    steps 1–4 from `calculate_cross_correlation()`, step 5 from
+    `correlation_significance_test()`, step 7 from `hierarchical_clustering()`.
 
-    For each time series, normalize to zero mean and unit variance:
+    **Symbols**
 
-    ```
-    x̃(t) = (x(t) - x̄) / σₓ,    ỹ(t) = (y(t) - ȳ) / σᵧ
-    ```
+    | Symbol | Meaning | Unit |
+    |:------:|---------|------|
+    | *x*(*t*), *y*(*t*) | activity traces of two ROIs | signal units |
+    | *x̃*, *ỹ* | z-standardised traces (mean 0, sd 1) | — |
+    | *n* | number of samples per trace | — |
+    | τ | lag between the two traces | samples → h |
+    | *r*<sub>xy</sub>(τ) | cross-correlation at lag τ | — |
+    | *r*<sub>max</sub>, τ<sub>opt</sub> | peak correlation and the lag where it occurs | —, h |
+    | *t* | t-statistic of the correlation | — |
+    | ν | degrees of freedom, *n*−2 | — |
+    | *N* | number of ROIs | — |
+    | *d*<sub>ij</sub> | distance between ROI *i* and *j*, 1 − *r*<sub>ij</sub> | — |
 
-    **Cross-Correlation Function**
+    ---
 
-    The normalized cross-correlation at lag τ is computed with **unbiased** normalisation — each lag is divided by the number of overlapping samples (n − |τ|), not by the full n, so the result is always a valid Pearson-r equivalent in [−1, 1]:
-
-    ```
-    r_xy(τ) = (1/(n − |τ|)) × Σₜ x̃(t) × ỹ(t+τ)
-    ```
-
-    This yields values in [-1, 1]:
-    - r_xy(τ) = 1: Perfect positive correlation at lag τ
-    - r_xy(τ) = -1: Perfect negative correlation (anti-phase)
-    - r_xy(τ) = 0: No linear relationship
-
-    The lag range is limited to ±12 hours (half the circadian period).
-
-    **Peak Correlation and Optimal Lag**
-
-    ```
-    r_max = max_τ |r_xy(τ)|
-    τ_opt = argmax_τ |r_xy(τ)|
-    ```
-
-    ROIs with |τ_opt| < 1h are considered in-phase (synchronized).
-
-    **Statistical Significance Testing**
-
-    To determine if correlation differs significantly from zero, use the **t-test for Pearson correlation**:
-
-    Under H₀: ρ = 0 (true population correlation is zero):
+    **Step 1 — standardise both traces**
 
     ```
-    t = r × √[(n-2)/(1-r²)]
+    x̃(t) = (x(t) − x̄) / σₓ          ỹ(t) = (y(t) − ȳ) / σᵧ
     ```
 
-    This follows a Student's t-distribution with ν = n-2 degrees of freedom.
-
-    **Two-tailed p-value:**
-    ```
-    p = 2 × (1 - F_{t,ν}(|t|))
-    ```
-
-    **Critical correlation threshold** for significance at level α:
-
-    ```
-    r_crit = √[t²_crit / (n-2 + t²_crit)]
+    ```python
+    # +1e-10 guards against a flat trace (σ = 0) turning the result into NaN.
+    s1 = (signal1 - np.mean(signal1)) / (np.std(signal1) + 1e-10)              # (line 130)
+    s2 = (signal2 - np.mean(signal2)) / (np.std(signal2) + 1e-10)              # (line 131)
     ```
 
-    where t_crit = F⁻¹_{t,ν}(1-α/2). This shows r_crit decreases as sample size increases.
+    Standardising is what makes the result a correlation rather than a
+    covariance: absolute activity level and scale drop out, only the shape of
+    the time course is compared.
 
-    **Bonferroni correction for multiple pairs:**
+    ---
 
-    With N ROIs, there are N(N−1)/2 simultaneous pair tests. The corrected significance level is:
-
-    ```
-    corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
-    ```
-
-    `is_significant` is only set to True when the per-pair p-value < corrected_alpha.
-
-    **Hierarchical Clustering**
-
-    To identify groups with similar activity patterns, correlations are converted to distances:
+    **Step 2 — raw cross-correlation over all lags**
 
     ```
-    d_ij = 1 - r_ij
+    c(τ) = Σₜ x̃(t) · ỹ(t+τ)
     ```
 
-    Perfectly correlated ROIs have distance 0; uncorrelated have distance 1.
+    ```python
+    n = len(s1)
+    # scipy returns the raw dot-product sum per lag, not yet normalised.
+    correlation = signal.correlate(s1, s2, mode="same", method="auto")         # (line 135)
+    ```
 
-    **Average Linkage (UPGMA)**: At each step, merge the two clusters with smallest average inter-cluster distance. The clustering threshold is controlled by the GUI slider (`Similarity threshold (r)`); the code fallback when no slider is set is r = 0.5 (so the dendrogram is cut at distance d = 1 − r = 0.5).
+    ---
 
-    **Important:** Hierarchical clustering is **exploratory and descriptive only**. Cluster assignments are not statistically tested and should not be used as primary statistical evidence. Use the Bonferroni-corrected pairwise correlations for significance claims.
+    **Step 3 — restrict to ±12 h of lag**
+
+    A circadian pair can be at most half a period apart before "late" becomes
+    "early", so the search window is capped:
+
+    ```
+    τ_max = min( 12 h / Δt , (len(c) − 1) / 2 )      in samples
+    ```
+
+    ```python
+    max_lag_samples = int((max_lag_hours * 3600) / sampling_interval)          # (line 143)
+    # Clamp so the window stays inside the array on both sides.
+    max_lag_samples = min(max_lag_samples, (len(correlation) - 1) // 2)        # (line 144)
+
+    center = len(correlation) // 2                    # zero lag sits here     (line 146)
+    lag_range = slice(center - max_lag_samples, center + max_lag_samples + 1)
+    correlation_window = correlation[lag_range].copy()
+    lag_hours = lag_samples * sampling_interval / 3600.0   # τ in hours        (line 151)
+    ```
+
+    ---
+
+    **Step 4 — unbiased normalisation per lag**
+
+    At lag τ only *n* − \|τ\| sample pairs actually overlap. Dividing by the full
+    *n* would shrink the large-lag values artificially, so each lag is divided by
+    its own overlap count:
+
+    ```
+    r_xy(τ) = c(τ) / (n − |τ|)
+    ```
+
+    ```python
+    for idx, k in enumerate(lag_samples):                                     # (line 156)
+        n_overlap = n - abs(int(k))          # overlapping pairs at this lag   (line 157)
+        if n_overlap > 0:
+            correlation_window[idx] /= n_overlap
+        else:
+            correlation_window[idx] = 0.0
+    ```
+
+    This is what keeps *r* inside [−1, 1] and comparable across lags.
+
+    ---
+
+    **Step 5 — peak correlation and optimal lag**
+
+    ```
+    r_max = max_τ r_xy(τ)          τ_opt = argmax_τ r_xy(τ)
+    ```
+
+    ```python
+    max_corr_idx = np.argmax(correlation_window)                              # (line 164)
+    max_correlation = correlation_window[max_corr_idx]     # r_max            (line 165)
+    optimal_lag = lag_hours[max_corr_idx]                  # τ_opt in hours    (line 166)
+    ```
+
+    Pairs with \|τ<sub>opt</sub>\| < 1 h count as in-phase. Note that the code takes
+    `argmax`, not `argmax` of the absolute value: an anti-phase pair shows up as
+    a negative *r* near lag 0 rather than as a positive peak half a period away.
+
+    ---
+
+    **Step 6 — significance of one pair**
+
+    Under H₀: ρ = 0,
+
+    ```
+    t = r · √[(n−2) / (1−r²)]        ν = n − 2
+    p = 2 · (1 − F_t,ν(|t|))                       (two-tailed)
+    r_crit = √[ t²_crit / (n − 2 + t²_crit) ]      with t_crit = F⁻¹_t,ν(1 − α/2)
+    ```
+
+    ```python
+    t_stat = r * np.sqrt((n - 2) / (1 - r**2))          # t                    (line 72)
+    # Two-tailed: a strong anti-correlation is just as much a finding.
+    p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df=n - 2))                     # (line 75)
+    ```
+
+    *r*<sub>crit</sub> falls as *n* grows — with tens of thousands of frames even a
+    tiny correlation clears the threshold, which is why the matrix should be read
+    by effect size, not by significance stars alone.
+
+    ---
+
+    **Step 7 — Bonferroni across all pairs, then clustering**
+
+    With *N* ROIs there are *N*(*N*−1)/2 simultaneous tests:
+
+    ```
+    α_corr = α / n_pairs,     n_pairs = N(N−1)/2
+    d_ij   = 1 − r_ij                    correlation → distance
+    ```
+
+    ```python
+    # 1 - r: perfectly correlated ROIs get distance 0, uncorrelated ones 1.
+    distance_matrix = 1 - correlation_matrix                                   # (line 377)
+    np.fill_diagonal(distance_matrix, 0)
+
+    # scipy wants the condensed (upper-triangle) form.
+    condensed_dist = squareform(distance_matrix, checks=False)                 # (line 381)
+
+    # Average linkage = UPGMA: merge the two clusters with the smallest mean
+    # inter-cluster distance.
+    linkage_matrix = hierarchy.linkage(condensed_dist, method=method)          # (line 384)
+
+    # Cut at d = 1 - r; the GUI slider sets r, the code default is r = 0.5.
+    cluster_labels = hierarchy.fcluster(linkage_matrix, t=threshold, criterion="distance")  # (line 387)
+    ```
+
+    **Important:** the clustering is exploratory and descriptive. Cluster
+    assignments are not tested; significance claims belong to the
+    Bonferroni-corrected pairwise correlations.
 
 ### Parameters
 
@@ -1220,71 +1561,159 @@ Measures frequency-specific synchronization between ROI pairs using Welch's meth
 3. **Coherence Calculation**: Normalizes to 0-1 scale at each frequency
 4. **Significance Testing**: Compares to threshold based on number of segments
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
-    **Welch's Method for Spectral Estimation**
+    All fragments are from `calculate_coherence()` in
+    [`_circadian_coherence.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_circadian_coherence.py);
+    the threshold lives in `coherence_significance_threshold()` in the same file.
 
-    Rather than computing a single periodogram (high variance), Welch's method averages across K overlapping segments:
+    **Symbols**
 
-    1. Divide each signal into segments of length L with 50% overlap
-    2. Apply Hann window w[n] to each segment
-    3. Compute DFT of each windowed segment: X_k[f], Y_k[f]
-    4. Estimate spectral densities by averaging:
+    | Symbol | Meaning | Unit |
+    |:------:|---------|------|
+    | *L* | segment length (`nperseg`) | samples |
+    | *K* | number of averaged Welch segments | — |
+    | *X*<sub>k</sub>[*f*], *Y*<sub>k</sub>[*f*] | DFT of segment *k* of either signal | signal units |
+    | *P̂*<sub>11</sub>, *P̂*<sub>22</sub> | auto-spectral densities | signal units² |
+    | *P̂*<sub>12</sub> | cross-spectral density | signal units² |
+    | γ²(*f*) | magnitude-squared coherence at *f* | — (0…1) |
+    | γ²<sub>crit</sub> | significance threshold | — |
+    | *f*<sub>s</sub> | sampling frequency, 1/Δ*t* | Hz |
 
-    ```
-    P̂₁₁(f) = (1/K) × Σₖ |Xₖ[f]|²
-    P̂₂₂(f) = (1/K) × Σₖ |Yₖ[f]|²
-    P̂₁₂(f) = (1/K) × Σₖ Xₖ*[f] × Yₖ[f]
-    ```
+    ---
 
-    where Xₖ* denotes complex conjugate.
+    **Step 1 — choose the segment length**
 
-    **Magnitude-Squared Coherence**
-
-    ```
-    γ²(f) = |P̂₁₂(f)|² / [P̂₁₁(f) × P̂₂₂(f)]
-    ```
-
-    This is analogous to squared correlation but computed at each frequency:
-    - γ²(f) = 1: Perfect linear relationship at frequency f
-    - γ²(f) = 0: No linear relationship at frequency f
-
-    **Significance Threshold**
-
-    Under H₀ (two signals are independent), the coherence estimator follows a distribution that depends on K segments. The significance threshold for detecting non-zero coherence at level α is:
+    Welch's method trades frequency resolution for variance: the signal is cut
+    into *K* overlapping segments and their periodograms averaged. Each segment
+    must cover at least one full target cycle, and at least two segments must
+    fit into the recording:
 
     ```
-    γ²_crit = 1 - α^(1/(K-1))
+    L = clamp( T_target / Δt ,  16 ,  n/2 )
     ```
 
-    This derives from the beta distribution of coherence under the null hypothesis.
-
-    **Example:** K = 8 segments, α = 0.05:
-    ```
-    γ²_crit = 1 - 0.05^(1/7) ≈ 0.37
-    ```
-
-    More segments → lower threshold → more statistical power, but reduced frequency resolution.
-
-    > **In practice (this implementation):** `nperseg` is set to one full target period and capped at `n // 2`, so a typical circadian recording yields only **~2–3 Welch segments**. With so few segments the threshold is *high* — e.g. K = 3 gives γ²_crit = 1 − 0.05^(1/2) ≈ 0.78 — so only very strong frequency-specific synchronization is flagged significant. The K = 8 example above is illustrative, not typical.
-
-    For circadian analysis, extract coherence within ±20% of the target period (e.g., 24h) and compare to γ²_crit.
-
-    **Bonferroni Correction for Multiple Pairs**
-
-    With N ROIs, coherence is computed for all N(N−1)/2 pairs simultaneously. The per-pair significance level is Bonferroni-corrected:
-
-    ```
-    corrected_alpha = α / n_pairs    where n_pairs = N(N−1)/2
+    ```python
+    samples_per_period = int(target_period_hours * 3600.0 / sampling_interval)   # (line 141)
+    nperseg = max(samples_per_period, 16)      # one full cycle per segment      (line 142)
+    nperseg = min(nperseg, len(signal1) // 2)  # ... but ≥ 2 segments must fit    (line 143)
+    nperseg = max(nperseg, 16)                 # re-apply the floor              (line 144)
     ```
 
-    The per-pair threshold then becomes:
+    ---
+
+    **Step 2 — spectral densities and coherence**
 
     ```
-    γ²_crit = 1 − corrected_alpha^(1/(K−1))
+    P̂₁₁(f) = (1/K) Σₖ |Xₖ[f]|²
+    P̂₂₂(f) = (1/K) Σₖ |Yₖ[f]|²
+    P̂₁₂(f) = (1/K) Σₖ Xₖ*[f]·Yₖ[f]        (* = complex conjugate)
+
+    γ²(f) = |P̂₁₂(f)|² / [ P̂₁₁(f) · P̂₂₂(f) ]
     ```
 
-    where K is the number of Welch segments. This prevents inflation of false-positive pair detections.
+    ```python
+    sampling_freq = 1.0 / sampling_interval        # f_s in Hz                   (line 147)
+    # scipy does all three densities and the ratio in one call. 50 % overlap
+    # (noverlap = nperseg // 2) is the standard choice for Hann windows: it
+    # compensates the taper without correlating the segments too strongly.
+    freqs, coherence = signal.coherence(                                         # (line 148)
+        signal1, signal2, fs=sampling_freq, nperseg=nperseg, noverlap=nperseg // 2
+    )
+    ```
+
+    The normalisation by both auto-spectra is what makes γ² dimensionless and
+    bounded by 1 — it is the frequency-wise analogue of a squared correlation,
+    and it is insensitive to a constant phase shift between the two ROIs.
+
+    ---
+
+    **Step 3 — frequencies to periods, and the target window**
+
+    ```
+    T = 1/f  (s) → /3600 (h)
+    target window: T_target · (1 ∓ 0.2)
+    ```
+
+    ```python
+    periods = np.zeros_like(freqs)                                               # (line 153)
+    nonzero_mask = freqs > 0                    # bin 0 is DC — no period
+    periods[nonzero_mask] = (1.0 / freqs[nonzero_mask]) / 3600.0                 # (line 155)
+
+    period_tolerance = 0.2                      # ±20 % around the target        (line 159)
+    min_period = target_period_hours * (1 - period_tolerance)
+    max_period = target_period_hours * (1 + period_tolerance)
+    target_mask = (periods >= min_period) & (periods <= max_period)              # (line 162)
+    ```
+
+    The tolerance exists because with only a handful of segments the frequency
+    grid is coarse — an exact 24 h bin usually does not exist.
+
+    ---
+
+    **Step 4 — coherence at the target period**
+
+    ```
+    γ²_circ = max{ γ²(f) : T(f) ∈ target window }
+    ```
+
+    ```python
+    if np.any(target_mask):
+        circadian_coherence = np.max(coherence[target_mask])   # γ²_circ          (line 165)
+        circadian_period_idx = np.where(target_mask)[0][np.argmax(coherence[target_mask])]
+        circadian_period = periods[circadian_period_idx]       # where it peaked
+    else:
+        # No bin inside the window (very short recording) — fall back to the
+        # global maximum so the pair still gets a number, but the reported
+        # period then tells you it is not the target one.
+        circadian_coherence = np.max(coherence)                                  # (line 173)
+    ```
+
+    ---
+
+    **Step 5 — how many segments were really averaged**
+
+    With 50 % overlap the step between segment starts is *L*/2, so
+
+    ```
+    step = L − ⌊L/2⌋
+    K    = ⌊(n − L)/step⌋ + 1
+    ```
+
+    ```python
+    # The naive formula len // nperseg ignores the overlap and underestimates K
+    # by about 2x, which would inflate the threshold and make the test overly
+    # conservative.
+    step = nperseg - nperseg // 2                                                # (line 187)
+    n_segments = max(1, (len(signal1) - nperseg) // step + 1)      # K            (line 188)
+    ```
+
+    ---
+
+    **Step 6 — significance threshold**
+
+    Under H₀ (independent signals) the coherence estimator is beta-distributed,
+    which gives a closed-form threshold that depends only on *K*:
+
+    ```
+    γ²_crit = 1 − α^(1/(K−1))
+    ```
+
+    ```python
+    if n_segments <= 1:
+        return 1.0                      # a single segment cannot be tested      (line 96)
+    return 1.0 - alpha ** (1.0 / (n_segments - 1))          # γ²_crit             (line 97)
+    ```
+
+    **Example:** *K* = 8, α = 0.05 → γ²<sub>crit</sub> = 1 − 0.05^(1/7) ≈ 0.37.
+
+    > **In practice (this implementation):** `nperseg` is one full target period
+    > and capped at `n // 2`, so a typical circadian recording yields only
+    > **~2–3 segments**. With *K* = 3 the threshold is 1 − 0.05^(1/2) ≈ 0.78, so
+    > only very strong frequency-specific synchronization is flagged. The *K* = 8
+    > example is illustrative, not typical. More segments mean more power but
+    > coarser frequency resolution — with 3-day recordings that trade-off is
+    > unavoidable.
 
 ### Parameters
 
@@ -1464,94 +1893,172 @@ Computes each ROI's mean activity phase as the **activity-weighted circular mean
 
 **Note:** The per-ROI mean phase is a quantitative *peak-activity time* with a per-ROI rhythm-concentration index (R_roi ∈ [0, 1]). The pairwise PLV is descriptive (no formal significance test). For statistical confirmation of rhythmicity, use Chi² periodogram or Cosinor.
 
-??? note "Mathematical details"
+??? note "Mathematical details, with the code for each step"
 
-    **Activity-weighted resultant vector (per-ROI phase)**
+    All fragments are from
+    [`_circadian_coherence.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_circadian_coherence.py):
+    steps 1–4 from `calculate_phase_clustering()`, steps 5–6 from
+    `calculate_phase_synchronization()`.
 
-    Let x(tᵢ) be the activity at timepoint tᵢ. Let T be the dominant period and ω = 2π/T. Define:
+    **Symbols**
+
+    | Symbol | Meaning | Unit |
+    |:------:|---------|------|
+    | *x*(*t*<sub>i</sub>) | activity at timepoint *i* | signal units |
+    | *T* | dominant period (from the periodogram) | h |
+    | ω | 2π/*T* | rad/h |
+    | *w*<sub>i</sub> | weight of timepoint *i*, *x*(*t*<sub>i</sub>) − min *x* | signal units |
+    | θ<sub>i</sub> | phase angle of timepoint *i* within the cycle | rad |
+    | *V* | resultant vector, Σ *w*<sub>i</sub>·e^(iθ<sub>i</sub>) | signal units |
+    | *R*<sub>roi</sub> | \|*V*\| / Σ *w*<sub>i</sub> — rhythm concentration | — (0…1) |
+    | *z*(*t*) | analytic signal, *x* + i·H{*x*} | signal units |
+    | φ(*t*) | instantaneous phase, arg *z*(*t*) | rad |
+    | Δφ(*t*) | phase difference between two ROIs | rad |
+    | PLV | \|⟨e^(iΔφ)⟩⟩\| | — (0…1) |
+
+    ---
+
+    **Step 1 — map every timepoint onto the cycle**
+
+    ```
+    θᵢ = 2π · ((tᵢ mod T) / T)
+    ```
+
+    ```python
+    # Bin centres, not edges: +0.5 avoids a systematic half-bin phase offset.
+    t_rel = (np.arange(len(values)) + 0.5) * bin_size_seconds                 # (line 455)
+    theta = (                                                                 # (line 458)
+        2 * np.pi * ((t_rel / 3600.0) % dominant_period_hours)
+        / dominant_period_hours
+    )
+    ```
+
+    Folding by the dominant period is what turns a multi-day trace into one
+    cycle: every timepoint becomes an angle on the clock face.
+
+    ---
+
+    **Step 2 — weight each timepoint by activity**
 
     ```
     wᵢ = x(tᵢ) − min(x)
-    θᵢ = ω · (tᵢ mod T)
-    V  = Σᵢ wᵢ · e^(iθᵢ)
     ```
 
-    Then:
+    ```python
+    # Quiescent timepoints get weight ~0 and contribute nothing, so the
+    # resultant points to when the animal is actually active.
+    weights = values - np.min(values)                                         # (line 465)
+    weight_sum = np.sum(weights)                                              # (line 466)
+    if weight_sum <= 0:
+        continue                        # a completely flat ROI has no phase
+    ```
+
+    Subtracting the minimum (not the mean) keeps all weights non-negative — a
+    negative weight would rotate a vector by 180° and place an inactive
+    timepoint on the opposite side of the clock.
+
+    ---
+
+    **Step 3 — the resultant vector and the ROI's mean phase**
 
     ```
-    phase_radians = arg(V)
+    V = Σᵢ wᵢ · e^(iθᵢ)      →     Vx = Σ wᵢcos θᵢ ,  Vy = Σ wᵢsin θᵢ
+    phase_radians = arg(V) = arctan2(Vy, Vx)
     phase_hours   = (phase_radians / 2π) · T   (mod T)
-    R_roi         = |V| / Σᵢ wᵢ                (rhythm concentration ∈ [0, 1])
     ```
 
-    Quiescent timepoints (wᵢ ≈ 0) contribute nothing, so the resultant vector points to *when* the animal is actually active. The method makes no waveform assumption (sinusoidal or otherwise) and is independent of the cosinor fit, which makes it a genuine cross-validation of the cosinor acrophase rather than a circular restatement.
+    ```python
+    # Cartesian form of the complex sum — same thing, no complex dtype needed.
+    vx = np.sum(weights * np.cos(theta))                                      # (line 469)
+    vy = np.sum(weights * np.sin(theta))                                      # (line 470)
+    mean_phase = np.arctan2(vy, vx)          # arg(V), quadrant-safe          # (line 471)
 
-    **Why not the Hilbert circular mean of instantaneous phase?**
-
-    For a single oscillating signal, the circular mean of arg(hilbert(x − x̄)) is biased toward the *trough* of the signal because activity data dwell near their minimum (long quiescence + brief bouts of movement). The estimator therefore returns ~12 h regardless of true peak timing for a 24-h rhythm, producing a spurious ~12 h offset against the cosinor acrophase and an artefactually inflated population resultant length (~0.98). The activity-weighted method above avoids this bias by construction. The Hilbert circular mean is still used correctly for pairwise *phase differences* (PLV, below) because the difference is stable even when each individual phase sweeps uniformly.
-
-    **Hilbert Transform and Analytic Signal (used by PLV only)**
-
-    For a real-valued signal x(t), the analytic signal is:
-
-    ```
-    z(t) = x(t) + i × H{x(t)}
+    phase_hours = (                                                           # (line 473)
+        (mean_phase / (2 * np.pi)) * dominant_period_hours
+    ) % dominant_period_hours
     ```
 
-    where H{x(t)} is the Hilbert transform — a 90° phase shift of all frequency components:
+    ---
+
+    **Step 4 — how concentrated is that phase?**
 
     ```
-    H{x(t)} = (1/π) × P.V. ∫ x(τ)/(t-τ) dτ
+    R_roi = |V| / Σᵢ wᵢ        ∈ [0, 1]
     ```
 
-    The analytic signal in polar form:
-
-    ```
-    z(t) = a(t) × e^(iφ(t))
-    ```
-
-    where:
-    - a(t) = |z(t)| is the **instantaneous amplitude** (envelope)
-    - φ(t) = arg(z(t)) is the **instantaneous phase**
-
-    **Phase Locking Value (PLV)**
-
-    For two signals with instantaneous phases φ₁(t) and φ₂(t), the phase difference is Δφ(t) = φ₂(t) - φ₁(t). The PLV measures consistency of this phase difference:
-
-    ```
-    PLV = |(1/N) × Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
+    ```python
+    # hypot(vx, vy) = |V|. Dividing by the total weight normalises: all
+    # activity in one narrow window → R ≈ 1; activity spread evenly around
+    # the cycle → the vectors cancel → R ≈ 0.
+    "amplitude": float(np.hypot(vx, vy) / weight_sum),                        # (line 480)
     ```
 
-    **Geometric interpretation:** Each term e^(iΔφ(t)) is a unit vector at angle Δφ(t) on the complex plane:
-    - Constant phase difference → all vectors point same direction → PLV = 1
-    - Uniformly varying phase → vectors cancel → PLV ≈ 0
+    This method makes **no waveform assumption** and does not use the Cosinor
+    fit, which is what makes it an independent cross-check of the Cosinor
+    acrophase rather than a restatement of it.
 
-    **Interpretation guidelines (heuristic thresholds — not statistically derived):**
-    - PLV > 0.8: Strong phase synchronization
-    - PLV ∈ [0.5, 0.8]: Moderate synchronization
-    - PLV ∈ [0.3, 0.5]: Weak synchronization
-    - PLV < 0.3: No meaningful synchronization
+    ??? warning "Why not the Hilbert circular mean for the per-ROI phase?"
 
-    These thresholds are conventional heuristics. No formal significance test is applied to PLV values.
+        For a single oscillating signal, the circular mean of
+        arg(hilbert(*x* − *x̄*)) is biased toward the **trough**, because activity
+        data dwell near their minimum (long quiescence, brief bouts of movement).
+        The estimator then returns ~12 h regardless of the true peak timing of a
+        24 h rhythm — a spurious 12 h offset against the Cosinor acrophase, plus
+        an artefactually inflated population resultant length (~0.98). The
+        activity-weighted vector above avoids that by construction. The Hilbert
+        phase is still used correctly for pairwise phase *differences* (step 5),
+        where the difference stays stable even if each individual phase sweeps
+        uniformly.
 
-    **Mean Phase Difference (circular mean):**
+    ---
+
+    **Step 5 — instantaneous phase via the Hilbert transform (PLV only)**
 
     ```
-    Δφ̄ = arg(Σₜ e^(iΔφ(t)))
+    z(t) = x(t) + i·H{x(t)}          H{x}(t) = (1/π) P.V. ∫ x(τ)/(t−τ) dτ
+    φ(t) = arg z(t)
+    Δφ(t) = φ₂(t) − φ₁(t)
     ```
 
-    Convert to hours: Δt = (Δφ̄/2π) × T gives the average time by which signal 2 leads/lags signal 1.
+    ```python
+    # Mean subtraction first: a DC offset would dominate the analytic signal
+    # and pin the phase near 0.
+    analytic1 = signal.hilbert(signal1 - np.mean(signal1))      # z₁(t)       # (line 373)
+    analytic2 = signal.hilbert(signal2 - np.mean(signal2))      # z₂(t)       # (line 374)
 
-    **Phase Clustering for Chronotype Identification**
+    phase1 = np.angle(analytic1)                                # φ₁(t)       # (line 376)
+    phase2 = np.angle(analytic2)                                # φ₂(t)       # (line 377)
 
-    Each ROI's per-ROI mean phase (in clock hours, mod T) is assigned to one of four equal chronotype quadrants of width T/4 (for T = 24 h, each quadrant spans 6 h):
+    phase_diff = phase2 - phase1                                # Δφ(t)       # (line 380)
+    # Wrap into (−π, π] so that e.g. +179° and −181° are the same difference.
+    phase_diff = np.arctan2(np.sin(phase_diff), np.cos(phase_diff))           # (line 383)
+    ```
 
-    - **Early-active** (0–T/4): ZT 0–6 h
-    - **Mid-active** (T/4–T/2): ZT 6–12 h
-    - **Late-active** (T/2–3T/4): ZT 12–18 h
-    - **Night-active** (3T/4–T): ZT 18–24 h
+    The Hilbert transform shifts every frequency component by 90°, which is what
+    turns the real signal into an analytic one whose angle is a meaningful
+    instantaneous phase.
 
-    The polar plot additionally shades a **Light sector** (yellow) and **Dark sector** (gray) derived from the recording's LED telemetry: the light fraction is computed as the proportion of telemetry samples with `white_power > 0.5`, times T. If no LED data is available the plot falls back to a 12 h light / 12 h dark default.
+    ---
+
+    **Step 6 — Phase Locking Value**
+
+    ```
+    PLV = |(1/N) Σₜ e^(iΔφ(t))| = |⟨e^(iΔφ(t))⟩|
+    ```
+
+    ```python
+    # Each e^(iΔφ) is a unit vector at angle Δφ. A constant phase difference
+    # makes them all point the same way (PLV → 1); a drifting difference makes
+    # them cancel (PLV → 0). The magnitude of the mean is therefore a measure
+    # of how *consistent* the offset is, not how large it is.
+    plv = np.abs(np.mean(np.exp(1j * phase_diff)))                            # (line 387)
+    ```
+
+    **Interpretation (heuristic thresholds — not statistically derived):**
+    PLV > 0.8 strong · 0.5–0.8 moderate · 0.3–0.5 weak · < 0.3 none. These are
+    conventional cut-offs; no significance test is applied to PLV. For
+    statistical confirmation of rhythmicity use the Chi² periodogram or the
+    Cosinor.
 
 ### Parameters
 
