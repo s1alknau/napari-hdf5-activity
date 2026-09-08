@@ -57,85 +57,138 @@ Note that ω is expressed **per sample**, not per hour: the period is divided by
 sampling interval first (`period_samples`), so *t* can stay a plain sample counter.
 The Cosinor does it the other way round — there ω is per hour.
 
-#### Where this lives in the code
+#### Step by step, with the code for each step
 
-`_fisher_analysis.py`, function `fisher_z_periodogram()`:
+Every step below shows the calculation first and the lines that perform it
+directly underneath. All fragments are from `fisher_z_periodogram()` in
+[`_fisher_analysis.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py).
 
-```python
-# --- Setup ---------------------------------------------------------------
-sampling_hours = sampling_interval / 3600.0        # Δt: seconds → hours
-periods = np.linspace(min_period, max_period, 100) # the m = 100 candidate periods T
-n = len(time_series)                               # n: sample count of the segment
-t = np.arange(n)                                   # t: 0, 1, 2, … n−1 (sample index)
+**Step 1 — the sampling interval in hours, and the grid of candidate periods**
 
-for idx, period_hours in enumerate(periods):
-    # --- One candidate period T ------------------------------------------
-    period_samples = period_hours / sampling_hours # T expressed in samples
-    omega = 2 * np.pi / period_samples             # ω = 2π/T, in rad per sample
-
-    # Reference waves at exactly this period. Amplitude is irrelevant —
-    # Pearson's r is scale-invariant, so only the shape matters.
-    cos_component = np.cos(omega * t)              # cos(ωt)
-    sin_component = np.sin(omega * t)              # sin(ωt)
-
-    # --- The two correlation coefficients --------------------------------
-    # np.corrcoef returns the 2×2 correlation matrix; [0, 1] is the
-    # off-diagonal element, i.e. r between signal and reference wave.
-    r_cos = np.corrcoef(time_series, cos_component)[0, 1]   # r_cos
-    r_sin = np.corrcoef(time_series, sin_component)[0, 1]   # r_sin
-
-    # A constant segment has zero variance → r is NaN. Treat that as
-    # "no correlation" so one flat ROI cannot poison the whole periodogram.
-    if np.isnan(r_cos):
-        r_cos = 0.0
-    if np.isnan(r_sin):
-        r_sin = 0.0
-
-    # --- The statistic itself --------------------------------------------
-    # Z(T) = n × (r²_cos + r²_sin). Squaring drops the sign, and summing
-    # both components makes the result independent of the phase: a rhythm
-    # is found whether it happens to align with cos, sin, or anything
-    # in between. The factor n is why Z grows with recording length.
-    z_scores[idx] = n * (r_cos**2 + r_sin**2)
-
-# --- Threshold and peak --------------------------------------------------
-m = len(periods)                                   # m = 100 tests
-corrected_alpha = significance_level / m           # α/m — Bonferroni
-chi2_crit = stats.chi2.ppf(1 - corrected_alpha, df=2)  # χ²(1−α/m, df=2) ≈ 15.2
-
-significant_mask = z_scores > chi2_crit            # every period above threshold
-max_z_idx = np.argmax(z_scores)                    # the tallest peak …
-dominant_period = periods[max_z_idx]               # … is the dominant period
-p_value = 1 - stats.chi2.cdf(z_scores[max_z_idx], df=2)
+```
+Δt = sampling_interval / 3600            (s → h)
+T_i = min_period + i·(max_period − min_period)/(m−1),   i = 0 … m−1,   m = 100
 ```
 
-#### Formula ↔ code
+```python
+sampling_hours = sampling_interval / 3600.0            # Δt in hours          (line 53)
+periods = np.linspace(min_period, max_period, 100)     # the m = 100 T values (line 65)
+n = len(time_series)                                   # n                    (line 67)
+t = np.arange(n)                                       # t = 0, 1, … n−1      (line 71)
+```
 
-| Math | Code | Line |
-|------|------|------|
-| Δ*t* | `sampling_hours` | [53](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L53) |
-| *T* (grid of candidates) | `periods` | [65](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L65) |
-| *n* | `n` | [67](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L67) |
-| *t* | `t` | [71](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L71) |
-| ω = 2π/*T* | `omega` | [75](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L75) |
-| cos(ω*t*), sin(ω*t*) | `cos_component`, `sin_component` | [77–78](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L77-L78) |
-| *r*<sub>cos</sub>, *r*<sub>sin</sub> | `r_cos`, `r_sin` | [80–81](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L80-L81) |
-| *Z*(*T*) = *n*(*r*²<sub>cos</sub> + *r*²<sub>sin</sub>) | `z_scores[idx]` | [92](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L92) |
-| α/*m* | `corrected_alpha` | [96](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L96) |
-| χ²(1−α/*m*, df=2) | `chi2_crit` | [97](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L97) |
-| argmax *Z*(*T*) | `dominant_period` | [104](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_fisher_analysis.py#L104) |
+`t` is a plain sample counter, not a time in hours — that choice is what makes
+step 2 divide by Δ*t*.
+
+---
+
+**Step 2 — angular frequency of the test wave, for one candidate period**
+
+```
+T_samples = T / Δt                       period expressed in samples
+ω = 2π / T_samples                       rad per sample
+```
+
+```python
+for idx, period_hours in enumerate(periods):
+    period_samples = period_hours / sampling_hours     # T in samples         (line 74)
+    omega = 2 * np.pi / period_samples                 # ω = 2π/T             (line 75)
+```
+
+---
+
+**Step 3 — build the two reference waves at exactly that period**
+
+```
+c(t) = cos(ωt)          s(t) = sin(ωt)
+```
+
+```python
+    cos_component = np.cos(omega * t)                  # cos(ωt)              (line 77)
+    sin_component = np.sin(omega * t)                  # sin(ωt)              (line 78)
+```
+
+Their amplitude is irrelevant: step 4 uses Pearson's *r*, which is invariant to
+scale and offset, so only the shape of the wave enters the result.
+
+---
+
+**Step 4 — correlate the signal with both waves**
+
+```
+r_cos = corr(y, cos(ωt))               r_sin = corr(y, sin(ωt))
+```
+
+```python
+    # np.corrcoef returns the 2×2 correlation matrix; [0, 1] is the
+    # off-diagonal element — r between signal and reference wave.
+    r_cos = np.corrcoef(time_series, cos_component)[0, 1]                    # (line 80)
+    r_sin = np.corrcoef(time_series, sin_component)[0, 1]                    # (line 81)
+
+    # A constant segment has zero variance → r is NaN. Treated as "no
+    # correlation" so one flat ROI cannot poison the whole periodogram.
+    if np.isnan(r_cos):
+        r_cos = 0.0                                                          # (line 84)
+    if np.isnan(r_sin):
+        r_sin = 0.0                                                          # (line 86)
+```
+
+Two coefficients are needed because a single one would depend on where the
+rhythm happens to sit in its cycle. Step 5 combines them into a phase-independent
+quantity.
+
+---
+
+**Step 5 — the chi-squared statistic**
+
+```
+Z(T) = n · (r²_cos + r²_sin)
+```
+
+```python
+    # Squaring drops the sign, summing both components removes the phase
+    # dependence: the rhythm is found whether it aligns with cos, sin, or
+    # anything in between. The factor n is why Z grows with recording length.
+    z_scores[idx] = n * (r_cos**2 + r_sin**2)                                # (line 92)
+```
+
+---
+
+**Step 6 — significance threshold, Bonferroni-corrected**
+
+```
+α_corr = α / m                           m = 100 tested periods
+Z_crit = χ²(1 − α_corr, df = 2)          ≈ 15.2 for α = 0.05, m = 100
+```
+
+```python
+m = len(periods)                                       # m                    (line 95)
+corrected_alpha = significance_level / m               # α/m                  (line 96)
+chi2_crit = stats.chi2.ppf(1 - corrected_alpha, df=2)  # Z_crit               (line 97)
+```
+
+`ppf` is the inverse CDF (percent point function), i.e. the quantile — the Z
+value that the χ²(2) distribution exceeds only with probability α/m.
+
+---
+
+**Step 7 — dominant period and its p-value**
+
+```
+T_dom = argmax_T Z(T)
+p     = 1 − F_χ²(Z(T_dom); df = 2)
+```
+
+```python
+significant_mask = z_scores > critical_z               # all periods above it (line 100)
+max_z_idx = np.argmax(z_scores)                        # tallest peak         (line 103)
+dominant_period = periods[max_z_idx]                   # T_dom                (line 104)
+p_value = 1 - stats.chi2.cdf(max_z_score, df=2)        # p                    (line 107)
+```
 
 The module is named after Fisher's Z-transformation for historical reasons; the
 statistic it computes today is the classical Sokolove & Bushell chi-squared
 periodogram, as the comment at line 89 states.
-
-**Important:** Z(T) is NOT a pure measure of rhythm strength. It depends on
-both rhythm quality AND sample size:
-
-- Longer recording → more data points (n↑) → higher Z-score for the same rhythm
-- Z-scores from different time ranges or different recording durations are **not
-  directly comparable**
-- Use **Amplitude** (Cosinor) for comparing rhythm strength between experiments
 
 ### Significance threshold
 
@@ -234,89 +287,163 @@ first cycle, which is why Peak Time is the peak of the **first** oscillation.
 | *k* | number of rhythm predictors (2: cos and sin) | — |
 | *F* | test statistic, MS<sub>model</sub>/MS<sub>res</sub>, df = (2, *n*−3) | — |
 
-#### Where this lives in the code
+#### Step by step, with the code for each step
 
-`_cosinor_analysis.py`, function `cosinor_analysis()`:
+All fragments are from `cosinor_analysis()` in
+[`_cosinor_analysis.py`](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py).
+
+**Step 1 — angular frequency at the fitted period**
+
+```
+ω = 2π / τ                               rad per hour
+```
 
 ```python
-# --- The linearised model ------------------------------------------------
-omega = 2 * np.pi / period_hours     # ω = 2π/τ, in rad per hour
+omega = 2 * np.pi / period_hours                        # ω = 2π/τ            (line 107)
+```
 
-# Design matrix X: one row per time point, three columns — one per unknown.
-# Column 0 is all ones, so its coefficient is the intercept β₀ = MESOR.
-X = np.column_stack(
+τ is *fixed*, not fitted: it comes from the periodogram or the period field.
+Unlike the Chi² periodogram, the time axis here is in hours, so ω is per hour
+and every time that follows is a real duration.
+
+---
+
+**Step 2 — the design matrix of the linearised model**
+
+```
+y(t) = β₀·1 + β₁·cos(ωt) + β₂·sin(ωt)
+
+X = [ 1   cos(ωt₁)   sin(ωt₁) ]
+    [ 1   cos(ωt₂)   sin(ωt₂) ]
+    [ ⋮      ⋮          ⋮     ]
+```
+
+```python
+# One row per time point, three columns — one per unknown. Column 0 is all
+# ones, so its coefficient is the intercept β₀ = MESOR.
+X = np.column_stack(                                                       # (line 114)
     [
-        np.ones(len(time_clean)),      # → β₀ (MESOR)
-        np.cos(omega * time_clean),    # → β₁ (cosine coefficient)
-        np.sin(omega * time_clean),    # → β₂ (sine coefficient)
+        np.ones(len(time_clean)),      # → β₀ (MESOR)                      (line 116)
+        np.cos(omega * time_clean),    # → β₁ (cosine coefficient)         (line 117)
+        np.sin(omega * time_clean),    # → β₂ (sine coefficient)           (line 118)
     ]
 )
+```
 
-# Ordinary least squares: minimises ||Xβ − y||² in one step. Because the
-# model is linear in β, this is the exact optimum — no iteration, no
-# starting guess, no convergence to worry about.
-beta, residuals, rank, s = np.linalg.lstsq(X, data_clean, rcond=None)
+---
 
-mesor = beta[0]      # β₀ — the MESOR, read straight off the intercept
-beta_cos = beta[1]   # β₁
-beta_sin = beta[2]   # β₂
+**Step 3 — solve for the coefficients**
 
-# --- Back-transform to the biological parameters -------------------------
+```
+β̂ = argmin_β ‖Xβ − y‖²                 →   β̂ = (XᵀX)⁻¹Xᵀy
+M = β₀
+```
+
+```python
+# Ordinary least squares in one step. Because the model is linear in β, this
+# is the exact optimum — no iteration, no starting guess, no convergence.
+beta, residuals, rank, s = np.linalg.lstsq(X, data_clean, rcond=None)      # (line 124)
+
+mesor = beta[0]      # β₀ — the MESOR, read straight off the intercept     (line 127)
+beta_cos = beta[1]   # β₁                                                  (line 128)
+beta_sin = beta[2]   # β₂                                                  (line 129)
+```
+
+---
+
+**Step 4 — amplitude**
+
+```
+A = √(β₁² + β₂²)
+```
+
+```python
 # β₁ = A·cosφ and β₂ = −A·sinφ, so the two coefficients are the Cartesian
 # form of one vector: its length is the amplitude, its angle the phase.
-amplitude = np.sqrt(beta_cos**2 + beta_sin**2)            # A = √(β₁² + β₂²)
+amplitude = np.sqrt(beta_cos**2 + beta_sin**2)                             # (line 135)
+```
 
+---
+
+**Step 5 — phase angle**
+
+```
+φ = arctan2(−β₂, β₁)                     range (−π, π]
+```
+
+```python
 # arctan2 (not arctan) keeps the quadrant, so φ is unambiguous over (−π, π].
 # The minus sign on β₂ undoes the sign in β₂ = −A·sinφ.
-phase_angle_rad = np.arctan2(-beta_sin, beta_cos)         # φ
+phase_angle_rad = np.arctan2(-beta_sin, beta_cos)                          # (line 136)
+```
 
-# cos(ωt + φ) is maximal at ωt + φ = 0 → t = −φ/ω. The modulo folds the
-# result into the first cycle: Peak Time is the first fitted peak.
-peak_time = (-phase_angle_rad / omega) % period_hours     # t_peak
+---
 
-# --- Goodness of fit -----------------------------------------------------
+**Step 6 — Peak Time**
+
+```
+cos(ωt + φ) is maximal at  ωt + φ = 0   →   t_peak = (−φ/ω) mod τ
+```
+
+```python
+# The modulo folds the result into the first cycle: Peak Time is the peak of
+# the first fitted oscillation, in hours after recording start.
+peak_time = (-phase_angle_rad / omega) % period_hours                      # (line 140)
+```
+
+---
+
+**Step 7 — goodness of fit**
+
+```
+SS_res = Σ (yᵢ − ŷᵢ)²        with ŷ = M + β₁cos(ωt) + β₂sin(ωt)
+SS_tot = Σ (yᵢ − ȳ)²
+R²     = 1 − SS_res / SS_tot
+```
+
+```python
 # SS_res: what the fitted cosine failed to explain ...
-ss_res = np.sum((data_clean - (mesor
+ss_res = np.sum((data_clean - (mesor                                       # (line 150)
                                + beta_cos * np.cos(omega * time_clean)
                                + beta_sin * np.sin(omega * time_clean))) ** 2)
 # ... SS_tot: what a flat line at the mean would leave unexplained.
-ss_tot = np.sum((data_clean - np.mean(data_clean)) ** 2)
-r_squared = 1 - (ss_res / ss_tot)          # R² = 1 − SS_res/SS_tot
-
-# --- Significance: does the rhythm beat a flat line? ---------------------
-n = len(data_clean)
-k = 2                                       # cos + sin — the rhythm parameters
-df_model = k                                # dfn = 2
-df_residual = n - k - 1                     # dfd = n − 3 (β₀ costs one too)
-
-mse_residual = ss_res / df_residual         # MS_res
-mse_model = (ss_tot - ss_res) / df_model    # MS_model — variance the cosine caught
-f_statistic = mse_model / mse_residual      # F(2, n−3)
-p_value = 1 - stats.f.cdf(f_statistic, df_model, df_residual)
+ss_tot = np.sum((data_clean - np.mean(data_clean)) ** 2)                   # (line 161)
+r_squared = 1 - (ss_res / ss_tot)                                          # (line 162)
 ```
 
-#### Formula ↔ code
+R² is therefore the share of variance the cosine captures *relative to the
+flat-line model* — the same denominator for every tested period, which is what
+makes R² comparable across the multi-period scan.
 
-| Math | Code | Line |
-|------|------|------|
-| ω = 2π/τ | `omega` | [107](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L107) |
-| design matrix [1, cos ω*t*, sin ω*t*] | `X` | [114–120](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L114-L120) |
-| β̂ = argmin ‖Xβ − y‖² | `np.linalg.lstsq(...)` | [124](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L124) |
-| *M* = β₀ | `mesor` | [127](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L127) |
-| β₁, β₂ | `beta_cos`, `beta_sin` | [128–129](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L128-L129) |
-| *A* = √(β₁² + β₂²) | `amplitude` | [135](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L135) |
-| φ = arctan2(−β₂, β₁) | `phase_angle_rad` | [136](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L136) |
-| *t*<sub>peak</sub> = (−φ/ω) mod τ | `peak_time` | [140](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L140) |
-| SS<sub>res</sub>, SS<sub>tot</sub> | `ss_res`, `ss_tot` | [150–161](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L150-L161) |
-| *R*² = 1 − SS<sub>res</sub>/SS<sub>tot</sub> | `r_squared` | [162](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L162) |
-| *F* = MS<sub>model</sub>/MS<sub>res</sub> | `f_statistic` | [173](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L173) |
-| *p* = 1 − *F*<sub>cdf</sub>(*F*; 2, *n*−3) | `p_value` | [174](https://github.com/s1alknau/napari-hdf5-activity/blob/main/src/napari_hdf5_activity/_cosinor_analysis.py#L174) |
+---
 
-> **ω is per hour here, per sample in the periodogram.** The Cosinor gets a real
-> time axis in hours (`time_clean`), so ω = 2π/τ is in rad/h and *t*<sub>peak</sub>
-> comes out in hours directly. The Chi² periodogram counts samples instead and
-> converts the period into samples first. Same formula, different unit on the
-> time axis.
+**Step 8 — is the rhythm significant?**
+
+```
+df_model = k = 2                         cos and sin
+df_res   = n − k − 1 = n − 3             β₀ costs one degree of freedom too
+MS_model = (SS_tot − SS_res) / df_model
+MS_res   = SS_res / df_res
+F        = MS_model / MS_res             ~ F(2, n−3) under H₀
+p        = 1 − F_cdf(F; 2, n−3)
+```
+
+```python
+n = len(data_clean)
+k = 2                                       # cos + sin — the rhythm terms  (line 166)
+df_model = k                                # dfn = 2                       (line 167)
+df_residual = n - k - 1                     # dfd = n − 3                   (line 168)
+
+mse_residual = ss_res / df_residual         # MS_res                        (line 171)
+mse_model = (ss_tot - ss_res) / df_model    # MS_model                      (line 172)
+f_statistic = mse_model / mse_residual      # F                             (line 173)
+p_value = 1 - stats.f.cdf(f_statistic, df_model, df_residual)              # (line 174)
+```
+
+H₀ is "β₁ = β₂ = 0", i.e. a flat line explains the data as well as the cosine.
+With thousands of frames *n* is large, `df_residual` follows, and *p* becomes
+tiny even for weak rhythms — which is why R² and Amplitude carry the biological
+statement, not *p*.
 
 ### R² interpretation
 
