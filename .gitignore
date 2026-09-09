@@ -100,6 +100,7 @@ docs/*.pptx
 docs/make_pptx.py
 docs/make_results_pptx.py
 nematostella_*
+docs/methoden/
 
 # Local test data and scripts
 tests/inspect_hdf5.py
@@ -109,3 +110,4 @@ tests/test_zarr_pipeline.py
 tests/test_data_6rois.zarr
 tests/test_data_6rois_dir.zarr/
 tests/test_nematostella_6rois_dir.zarr/
+shear_test.py
