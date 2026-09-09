@@ -896,6 +896,41 @@ class ExportMixin:
                         "(equivalent to MATLAB diffs.sum()). Time column in minutes."
                     )
 
+                # === SHEET 8b: SENSOR-SPECIFIC REAL AMPLITUDE (% FULL SCALE) ===
+                # The storage container (uint8/uint16) says nothing about how many of
+                # its bits the sensor actually fills. Expressing the change as a
+                # percentage of the SENSOR full scale (2**bits - 1) removes both the
+                # container scaling and the ROI size, so values stay comparable across
+                # cameras, bit depths and AVI/HDF5 recordings.
+                if hasattr(self, "merged_results_raw") and self.merged_results_raw:
+                    from ._reader import percent_full_scale_factor, sensor_full_scale
+
+                    _bits = (
+                        self.sensor_bit_depth_value()
+                        if hasattr(self, "sensor_bit_depth_value") else 8
+                    )
+                    _norm_factor = getattr(self, "frame_norm_factor", 1.0)
+                    _fs = sensor_full_scale(_bits)
+                    _pct = percent_full_scale_factor(_norm_factor, _bits)
+                    sensor_data = {
+                        roi: [(t, v * _pct) for t, v in data]
+                        for roi, data in self.merged_results_raw.items()
+                    }
+                    sensor_df = self._create_time_series_dataframe(
+                        sensor_data, sorted_rois, "Amplitude_pctFS", convert_to_minutes=True
+                    )
+                    sensor_df.to_excel(
+                        writer, sheet_name="Real_Amplitude_Sensor", index=False, startrow=1
+                    )
+                    writer.sheets["Real_Amplitude_Sensor"].cell(row=1, column=1).value = (
+                        f"Sensor-specific real amplitude: mean absolute pixel change as "
+                        f"% of sensor full scale = per-pixel-mean x {_norm_factor:.0f} / {_fs:.0f} x 100 "
+                        f"(sensor bit depth {_bits} bit, full scale {_fs:.0f}; "
+                        f"storage container max {_norm_factor:.0f}). "
+                        "Independent of ROI size and of the storage format, therefore "
+                        "comparable across cameras and bit depths. Time column in minutes."
+                    )
+
                 # === SHEET 9: PARAMETERS ===
                 # Determine source type (HDF5 or AVI)
                 is_avi = hasattr(self, "avi_batch_paths") and self.avi_batch_paths
@@ -1026,17 +1061,45 @@ class ExportMixin:
                     "; ".join(f"{roi}: {px}" for roi, px in sorted(_p_pixels.items()))
                     if _p_pixels else "N/A"
                 )
+                from ._reader import sensor_full_scale as _sensor_fs
+                _p_bits = (
+                    self.sensor_bit_depth_value()
+                    if hasattr(self, "sensor_bit_depth_value") else 8
+                )
+                _p_fs = _sensor_fs(_p_bits)
                 params_data["Parameter"].extend(
-                    ["Frame Norm Factor", "ROI Pixel Counts"]
+                    [
+                        "Frame Norm Factor",
+                        "ROI Pixel Counts",
+                        "Valid Bits In Stored Values",
+                        "Sensor Full Scale",
+                        "Container / Sensor Ratio",
+                    ]
                 )
                 params_data["Value"].extend(
-                    [f"{_p_norm:.0f}", _p_pixel_str]
+                    [
+                        f"{_p_norm:.0f}",
+                        _p_pixel_str,
+                        f"{_p_bits} bit",
+                        f"{_p_fs:.0f}",
+                        f"{(_p_norm / _p_fs if _p_fs else 1.0):.4g}",
+                    ]
                 )
                 params_data["Description"].extend(
                     [
-                        "Pixel intensity normalization factor (255 for uint8 / 65535 for uint16). "
-                        "Used to compute MATLAB-equivalent pixel sum in 'Real_Amplitude_MATLAB' sheet.",
+                        "Normalization factor of the STORAGE CONTAINER (255 for uint8 / "
+                        "65535 for uint16), taken from the dtype byte width — not from the "
+                        "sensor. Used to compute the MATLAB-equivalent pixel sum in the "
+                        "'Real_Amplitude_MATLAB' sheet, where it cancels out exactly.",
                         "Number of pixels per ROI used for MATLAB-equivalent pixel sum scaling.",
+                        "Number of valid bits in the stored values, as selected in the GUI. A 12-bit sensor "
+                        "written to uint16 leaves 4 bits unused, which the container cannot "
+                        "signal — hence the manual setting.",
+                        "Highest code value the sensor can produce (2^bits - 1). Reference for "
+                        "the 'Real_Amplitude_Sensor' sheet.",
+                        "Container max divided by sensor full scale. 1 means container and "
+                        "sensor agree; 16 means a 12-bit sensor stored in uint16, i.e. the "
+                        "per-pixel-mean values only reach 1/16 of the nominal [0,1] range.",
                     ]
                 )
 

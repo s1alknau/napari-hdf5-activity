@@ -1837,6 +1837,58 @@ def get_frame_norm_factor(file_path: str) -> float:
         return 1.0
 
 
+def sensor_full_scale(bit_depth: int) -> float:
+    """Highest code value a sensor of the given bit depth can produce: 2**bits - 1.
+
+    8 bit -> 255, 10 bit -> 1023, 12 bit -> 4095, 14 bit -> 16383, 16 bit -> 65535.
+    """
+    try:
+        bits = int(bit_depth)
+    except (TypeError, ValueError):
+        return 255.0
+    if not 1 <= bits <= 32:
+        return 255.0
+    return float((1 << bits) - 1)
+
+
+def default_sensor_bit_depth(norm_factor: float) -> int:
+    """Bit depth implied by the storage container — NOT by the sensor.
+
+    The container carries no information about how many of its bits are actually
+    valid, so uint8 maps to 8 and uint16 to 16.  A 12-bit sensor stored in uint16
+    therefore also lands on 16 here and has to be corrected by the user; this
+    function only supplies the GUI starting value.
+    """
+    try:
+        nf = float(norm_factor)
+    except (TypeError, ValueError):
+        return 8
+    return 16 if nf >= 65535.0 else 8
+
+
+def percent_full_scale_factor(norm_factor: float, bit_depth: int) -> float:
+    """Factor converting a stored per-pixel mean into % of sensor full scale.
+
+    ``process_chunk`` stores ``sum(|dI|) / (n_pixels * norm_factor)``, so the mean
+    absolute change per pixel in raw code values is ``stored * norm_factor`` and
+
+        % FS = stored * norm_factor / (2**bit_depth - 1) * 100
+
+    For uint8 data declared as 8 bit this collapses to ``stored * 100``.  For a
+    12-bit sensor stored right-aligned in uint16 it is ``stored * 65535/4095 * 100``,
+    i.e. the factor ~16 that the container normalization would otherwise hide.
+    Because the ROI pixel count cancels, the result is independent of ROI size.
+    """
+    fs = sensor_full_scale(bit_depth)
+    if fs <= 0:
+        return 100.0
+    try:
+        nf = float(norm_factor)
+    except (TypeError, ValueError):
+        nf = 255.0
+    return nf / fs * 100.0
+
+
 # =============================================================================
 # PARALLEL PROCESSING FUNCTIONS WITH DUAL STRUCTURE SUPPORT
 # =============================================================================

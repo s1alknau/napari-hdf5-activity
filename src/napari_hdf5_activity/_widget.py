@@ -1577,6 +1577,50 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.show_real_amplitude.toggled.connect(self.chk_divide_by_pixels.setEnabled)
         plot_config_layout.addWidget(self.chk_divide_by_pixels)
 
+        # Sensor-specific amplitude: express the change as a percentage of what the
+        # SENSOR can deliver (2**bits - 1) instead of the storage container maximum.
+        # The container says nothing about how many of its bits are valid — a 12-bit
+        # sensor written to uint16 would otherwise appear 16x too small.
+        self.chk_sensor_percent = QCheckBox("% of sensor full scale (sensor-specific)")
+        self.chk_sensor_percent.setChecked(False)
+        self.chk_sensor_percent.setEnabled(False)  # only with Real Amplitude on
+        self.chk_sensor_percent.setToolTip(
+            "Express the mean absolute pixel change as a percentage of the sensor's\n"
+            "full scale: stored x norm_factor / (2^bits - 1) x 100.\n\n"
+            "Independent of ROI size and of the storage container, therefore\n"
+            "comparable across cameras, bit depths and AVI/HDF5 recordings.\n"
+            "Takes precedence over the pixel-sum / per-pixel-mean choice above."
+        )
+        self.chk_sensor_percent.toggled.connect(self.generate_plot)
+        self.show_real_amplitude.toggled.connect(self.chk_sensor_percent.setEnabled)
+        plot_config_layout.addWidget(self.chk_sensor_percent)
+
+        bits_row = QHBoxLayout()
+        self.sensor_bit_depth = QComboBox()
+        self.sensor_bit_depth.addItems(["8", "10", "12", "14", "16"])
+        self.sensor_bit_depth.setCurrentText("8")
+        self.sensor_bit_depth.setToolTip(
+            "How many bits of the stored values are actually valid — the sensor bit\n"
+            "depth AS IT ARRIVES IN THE FILE.\n\n"
+            "  uint16 file, 12-bit sensor stored right-aligned (0-4095)  -> 12\n"
+            "  uint16 file, values left-shifted or true 16 bit           -> 16\n"
+            "  uint8 file (SDK already rescaled 12 bit down to 0-255)    -> 8\n\n"
+            "Do NOT enter the sensor's nominal bit depth when the acquisition rescaled\n"
+            "the values: rescaling preserves the fraction of full scale, so an 8-bit\n"
+            "file stays 8 bit. Pre-set from the container after each analysis; the\n"
+            "value is written to the Parameters sheet on export."
+        )
+        # 'activated' fires on user interaction only, so a manual choice is not
+        # silently overwritten by the next analysis run.
+        self.sensor_bit_depth.activated.connect(self._on_sensor_bit_depth_changed)
+        bits_row.addWidget(QLabel("Valid bits in stored values:"))
+        bits_row.addWidget(self.sensor_bit_depth)
+        self.lbl_sensor_scale_hint = QLabel("")
+        self.lbl_sensor_scale_hint.setStyleSheet("color: #888; font-size: 10px;")
+        bits_row.addWidget(self.lbl_sensor_scale_hint)
+        bits_row.addStretch()
+        plot_config_layout.addLayout(bits_row)
+
         # Y-Axis scaling controls
         y_axis_group = QGroupBox("Y-Axis Scaling (Per ROI Optimization)")
         y_axis_layout = QVBoxLayout()
@@ -5589,7 +5633,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 self.frame_norm_factor = get_frame_norm_factor(self.file_path)
             else:
                 self.frame_norm_factor = 1.0
-            self._log_message(f"  Frame normalization factor: {self.frame_norm_factor:.0f} (bit depth)")
+            self._log_message(
+                f"  Frame normalization factor: {self.frame_norm_factor:.0f} "
+                f"(storage container, not sensor bit depth)"
+            )
+            self._sync_sensor_bit_depth_default()
             self._update_fixed_signal_stats()
             if hasattr(self, "btn_apply_fixed_threshold"):
                 self.btn_apply_fixed_threshold.setEnabled(bool(self.merged_results_raw))
@@ -5965,24 +6013,12 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         use_real = (
             hasattr(self, "show_real_amplitude") and self.show_real_amplitude.isChecked()
         )
-        divide = (
-            hasattr(self, "chk_divide_by_pixels") and self.chk_divide_by_pixels.isChecked()
-        )
 
-        if use_real and getattr(self, "merged_results_raw", {}):
-            raw_data = self.merged_results_raw
-            pixel_counts = getattr(self, "roi_pixel_counts", {})
-            norm_factor = getattr(self, "frame_norm_factor", 1.0)
-            if not divide and pixel_counts:
-                scale = {roi: pixel_counts.get(roi, 1) * norm_factor for roi in raw_data}
-                all_vals = [v * scale.get(roi, 1.0) for roi, pts in raw_data.items() for _, v in pts]
-                unit = "pixel sum (MATLAB)"
-            else:
-                all_vals = [v for pts in raw_data.values() for _, v in pts]
-                unit = "per-pixel mean"
-        elif getattr(self, "merged_results", {}):
-            all_vals = [v for pts in self.merged_results.values() for _, v in pts]
-            unit = "normalized [0-1]"
+        if (use_real and getattr(self, "merged_results_raw", {})) or getattr(
+            self, "merged_results", {}
+        ):
+            data_dict, unit, _ = self.amplitude_display_data()
+            all_vals = [v for pts in data_dict.values() for _, v in pts]
         else:
             self.fixed_signal_stats_label.setText("Signal range: run analysis first")
             return
@@ -6013,6 +6049,134 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             f"→ Upper: {fmt(upper_v)}   Lower: {fmt(lower_v)}"
         )
 
+    # ------------------------------------------------------------------
+    # Amplitude units — one place that owns the scaling for plots and export
+    # ------------------------------------------------------------------
+
+    def sensor_bit_depth_value(self) -> int:
+        """Sensor bit depth currently selected in the GUI."""
+        from ._reader import default_sensor_bit_depth
+
+        if hasattr(self, "sensor_bit_depth"):
+            try:
+                return int(self.sensor_bit_depth.currentText())
+            except (TypeError, ValueError):
+                pass
+        return default_sensor_bit_depth(getattr(self, "frame_norm_factor", 255.0))
+
+    def sensor_percent_factor(self) -> float:
+        """Factor turning a stored per-pixel mean into % of sensor full scale."""
+        from ._reader import percent_full_scale_factor
+
+        return percent_full_scale_factor(
+            getattr(self, "frame_norm_factor", 255.0), self.sensor_bit_depth_value()
+        )
+
+    def amplitude_display_data(self):
+        """Amplitude time-series in the unit the user selected.
+
+        Returns ``(data_dict, unit_label, scales)``.  ``scales`` maps ROI to the
+        factor that was applied, so hysteresis threshold lines — which come from
+        the same raw units — can be scaled identically; it is empty when the data
+        is returned unscaled.
+
+        Precedence with Real Amplitude on: '% of sensor full scale' wins over the
+        pixel-sum / per-pixel-mean choice, because it is already independent of
+        ROI size.
+        """
+        raw = getattr(self, "merged_results_raw", {})
+        use_real = bool(
+            getattr(self, "show_real_amplitude", None)
+            and self.show_real_amplitude.isChecked()
+        )
+        if not (use_real and raw):
+            return getattr(self, "merged_results", {}), "normalized [0-1]", {}
+
+        norm_factor = getattr(self, "frame_norm_factor", 1.0)
+
+        if getattr(self, "chk_sensor_percent", None) and self.chk_sensor_percent.isChecked():
+            bits = self.sensor_bit_depth_value()
+            factor = self.sensor_percent_factor()
+            return (
+                {roi: [(t, v * factor) for t, v in pts] for roi, pts in raw.items()},
+                f"% of full scale ({bits} bit)",
+                {roi: factor for roi in raw},
+            )
+
+        divide = bool(
+            getattr(self, "chk_divide_by_pixels", None)
+            and self.chk_divide_by_pixels.isChecked()
+        )
+        pixel_counts = getattr(self, "roi_pixel_counts", {})
+        if not divide and pixel_counts:
+            scales = {roi: pixel_counts.get(roi, 1) * norm_factor for roi in raw}
+            return (
+                {
+                    roi: [(t, v * scales[roi]) for t, v in pts]
+                    for roi, pts in raw.items()
+                },
+                "pixel sum (MATLAB)",
+                scales,
+            )
+        return raw, "per-pixel mean", {}
+
+    def _on_sensor_bit_depth_changed(self, *_):
+        """User picked a sensor bit depth: remember it and refresh dependent views."""
+        self._sensor_bits_user_set = True
+        self._update_sensor_scale_hint()
+        self._update_fixed_signal_stats()
+        if getattr(self, "chk_sensor_percent", None) and self.chk_sensor_percent.isChecked():
+            self.generate_plot()
+
+    def _update_sensor_scale_hint(self):
+        """Show the resulting conversion next to the bit-depth selector."""
+        import math
+
+        from ._reader import sensor_full_scale
+
+        if not hasattr(self, "lbl_sensor_scale_hint"):
+            return
+        norm_factor = getattr(self, "frame_norm_factor", None)
+        if not norm_factor:
+            self.lbl_sensor_scale_hint.setText("")
+            return
+        bits = self.sensor_bit_depth_value()
+        fs = sensor_full_scale(bits)
+        ratio = float(norm_factor) / fs if fs > 0 else 1.0
+        text = f"full scale {fs:.0f}, container {norm_factor:.0f}"
+        if abs(ratio - 1.0) > 1e-9:
+            text += f"  (x{ratio:.4g})"
+        if fs > float(norm_factor) + 1e-9:
+            # The container cannot even represent the declared range. Happens when
+            # the sensor's nominal bit depth is entered for a file whose values were
+            # already rescaled — e.g. 12 bit for a uint8 recording, which would
+            # report the amplitude 16x too small.
+            container_bits = int(round(math.log2(float(norm_factor) + 1.0)))
+            text += (
+                f"  ⚠ exceeds container — values were rescaled, use {container_bits} bit"
+            )
+            self.lbl_sensor_scale_hint.setStyleSheet("color: #d98c00; font-size: 10px;")
+        else:
+            self.lbl_sensor_scale_hint.setStyleSheet("color: #888; font-size: 10px;")
+        self.lbl_sensor_scale_hint.setText(text)
+
+    def _sync_sensor_bit_depth_default(self):
+        """Pre-set the selector from the container unless the user chose a value."""
+        from ._reader import default_sensor_bit_depth
+
+        if not hasattr(self, "sensor_bit_depth"):
+            return
+        if getattr(self, "_sensor_bits_user_set", False):
+            self._update_sensor_scale_hint()
+            return
+        bits = default_sensor_bit_depth(getattr(self, "frame_norm_factor", 255.0))
+        self.sensor_bit_depth.setCurrentText(str(bits))
+        self._update_sensor_scale_hint()
+        self._log_message(
+            f"  Valid-bits setting pre-set to {bits} from the storage container "
+            f"— set 12 only if the file holds unscaled 12-bit codes (0-4095)"
+        )
+
     def _update_real_amplitude_controls(self):
         """Enable/disable Real Amplitude checkboxes based on plot type and data availability."""
         if not hasattr(self, "show_real_amplitude"):
@@ -6029,6 +6193,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             )
             if hasattr(self, "chk_divide_by_pixels"):
                 self.chk_divide_by_pixels.setEnabled(False)
+            if hasattr(self, "chk_sensor_percent"):
+                self.chk_sensor_percent.setEnabled(False)
         else:
             self.show_real_amplitude.setToolTip(
                 "Toggle between MinMax-normalized [0,1] view and real amplitude values.\n"
@@ -6036,6 +6202,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             )
             if hasattr(self, "chk_divide_by_pixels"):
                 self.chk_divide_by_pixels.setEnabled(self.show_real_amplitude.isChecked())
+            if hasattr(self, "chk_sensor_percent"):
+                self.chk_sensor_percent.setEnabled(self.show_real_amplitude.isChecked())
 
     # ------------------------------------------------------------------
     # Per-ROI Y-axis limit helpers
@@ -6216,38 +6384,17 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
             # Get data based on plot type
             if plot_type == "Raw Intensity Changes":
-                pixel_sum_scales = {}  # {roi: scale_factor} — used to scale thresholds too
                 if use_real_amplitude and not getattr(self, "merged_results_raw", {}):
                     self._log_message(
                         "⚠️ Real Amplitude: no raw data available (not saved in HDF5 results). "
                         "Run a fresh analysis to use this mode."
                     )
-                if use_real_amplitude and getattr(self, "merged_results_raw", {}):
-                    divide_by_pixels = (
-                        hasattr(self, "chk_divide_by_pixels")
-                        and self.chk_divide_by_pixels.isChecked()
-                    )
-                    pixel_counts = getattr(self, "roi_pixel_counts", {})
-                    norm_factor = getattr(self, "frame_norm_factor", 1.0)
-                    if not divide_by_pixels and pixel_counts:
-                        # MATLAB-equivalent pixel sum:
-                        # mean × n_pixels × norm_factor = Σ|ΔPixel_raw| per ROI
-                        pixel_sum_scales = {
-                            roi: pixel_counts.get(roi, 1) * norm_factor
-                            for roi in self.merged_results_raw
-                        }
-                        data_dict = {
-                            roi: [(t, v * pixel_sum_scales[roi]) for t, v in data]
-                            for roi, data in self.merged_results_raw.items()
-                        }
-                        self._log_message(f"Plot mode: Pixel Sum MATLAB (×{norm_factor:.0f})")
-                    else:
-                        # Per-pixel mean mode: sum(|Δpixel|) ÷ n_pixels
-                        data_dict = self.merged_results_raw
-                        self._log_message("Plot mode: Per-pixel mean")
-                else:
-                    data_dict = self.merged_results
-                    self._log_message("Plot mode: Normalized [0-1]")
+                # Single source of truth for the amplitude unit (pixel sum,
+                # per-pixel mean, % of sensor full scale or normalized).
+                # pixel_sum_scales carries the applied factor per ROI so the
+                # hysteresis threshold lines below are scaled the same way.
+                data_dict, amplitude_unit, pixel_sum_scales = self.amplitude_display_data()
+                self._log_message(f"Plot mode: {amplitude_unit}")
 
                 from ._plot import create_hysteresis_kwargs
 
@@ -6757,7 +6904,18 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             pixel_counts = getattr(self, "roi_pixel_counts", {})
             norm_factor = getattr(self, "frame_norm_factor", 1.0)
             raw_results = getattr(self, "merged_results_raw", {})
-            if not divide_by_pixels and pixel_counts and raw_results:
+            sensor_percent = bool(
+                getattr(self, "chk_sensor_percent", None)
+                and self.chk_sensor_percent.isChecked()
+            )
+            if sensor_percent and raw_results:
+                # Sensor-specific: % of sensor full scale, ROI-size independent
+                _factor = self.sensor_percent_factor()
+                merged_for_plot = {
+                    roi: [(t, v * _factor) for t, v in data]
+                    for roi, data in raw_results.items()
+                }
+            elif not divide_by_pixels and pixel_counts and raw_results:
                 merged_for_plot = {
                     roi: [(t, v * pixel_counts.get(roi, 1) * norm_factor) for t, v in data]
                     for roi, data in raw_results.items()
