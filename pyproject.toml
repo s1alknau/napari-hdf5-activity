@@ -15,10 +15,10 @@ license = {text = "MIT"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: napari",
+    # Must stay in sync with requires-python above. 3.9-3.11 were listed here
+    # while requires-python already demanded >= 3.12, which made pip resolve
+    # against a version range the package cannot actually be installed into.
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: MIT License",
@@ -41,11 +41,11 @@ pyqt5 = ["napari[pyqt5]"]
 pyqt6 = ["napari[pyqt6]"]
 pyside6 = ["napari[pyside6]"]
 # Recordings from the current rig are Zarr *format v3*. zarr-python 2.x
-# reads v2 only; 3.x reads both. 3.x needs Python 3.11+, so older
-# interpreters stay on 2.x and can read v2 stores only.
+# reads v2 only; 3.x reads both. Since requires-python is >= 3.12 the old
+# marker for interpreters below 3.11 could never apply, so 3.x is simply
+# required. Verified against zarr 3.3.0.
 zarr = [
-    "zarr>=3; python_version >= '3.11'",
-    "zarr>=2.12.0; python_version < '3.11'",
+    "zarr>=3",
 ]
 testing = [
     "tox",
