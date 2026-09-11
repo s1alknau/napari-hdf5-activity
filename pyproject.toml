@@ -47,13 +47,17 @@ pyside6 = ["napari[pyside6]"]
 zarr = [
     "zarr>=3",
 ]
+# The rig runs PySide6; PyQt5 was removed there on purpose and reinstalling it
+# alongside PySide6 breaks napari. The testing extra therefore pulls the same
+# backend the plugin is actually developed and run against. Use the pyqt5 /
+# pyqt6 extras above to test a different binding deliberately.
 testing = [
     "tox",
     "pytest",
     "pytest-cov",
     "pytest-qt",
-    "napari[pyqt5]",
-    "zarr>=2.12.0",
+    "napari[pyside6]",
+    "zarr>=3",
 ]
 
 [project.entry-points."napari.manifest"]
