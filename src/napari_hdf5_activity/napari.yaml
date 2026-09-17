@@ -1,29 +1,22 @@
-# name: napari-hdf5-activity
-# display_name: HDF5 Activity Analysis
-# version: "0.1.0"
-# contributions:
-#   commands:
-#     - id: napari-hdf5-activity.get_reader
-#       python_name: napari_hdf5_activity._reader:napari_get_reader
-#       title: HDF5 Reader
-#     - id: napari-hdf5-activity.analysis_widget
-#       python_name: napari_hdf5_activity._widget:napari_provide_dock_widget
-#       title: HDF5 Activity Analysis Widget
-#   readers:
-#     - command: napari-hdf5-activity.get_reader
-#       accepts_directories: true
-#       filename_patterns: ["*.h5", "*.hdf5"]
-#   widgets:
-#     - command: napari-hdf5-activity.analysis_widget
-#       display_name: HDF5 Activity Analysis
 name: napari-hdf5-activity
 display_name: HDF5 Activity Analysis
 version: "0.2.0"
 contributions:
   commands:
+    - id: napari-hdf5-activity.get_reader
+      python_name: napari_hdf5_activity._reader:napari_get_reader
+      title: HDF5 / Zarr / AVI Reader
     - id: napari-hdf5-activity.analysis_widget
       python_name: napari_hdf5_activity._widget:HDF5AnalysisWidget
       title: HDF5 Activity Analysis Widget
+  readers:
+    # accepts_directories deckt zwei Faelle ab: einen Ordner voller .h5-Dateien
+    # und einen Zarr-Directory-Store, der selbst ein Ordner ist. Ein solcher
+    # Store heisst zwar meist ".zarr", muss es aber nicht -- napari_get_reader
+    # prueft daher inhaltlich auf die Zarr-Marker und nicht auf die Endung.
+    - command: napari-hdf5-activity.get_reader
+      accepts_directories: true
+      filename_patterns: ["*.h5", "*.hdf5", "*.zarr", "*.avi"]
   widgets:
     - command: napari-hdf5-activity.analysis_widget
       display_name: HDF5 Activity Analysis
