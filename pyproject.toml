@@ -34,6 +34,11 @@ dependencies = [
     "numpy>=1.22.0",
     "scipy>=1.9.0",
     "pandas>=1.5.0",
+    # Every Excel export names openpyxl as the pandas engine explicitly
+    # (pd.ExcelWriter(..., engine="openpyxl")), so it is a hard requirement,
+    # not an optional extra. It was missing here, which left every .xlsx
+    # export failing with "No module named 'openpyxl'" in a clean install.
+    "openpyxl>=3.0",
 ]
 
 [project.optional-dependencies]

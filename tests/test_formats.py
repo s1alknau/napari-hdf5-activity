@@ -173,27 +173,33 @@ def test_no_temperature_from_video(tmp_path):
 
 # ------------------------------------------------------- metadata is HDF5-only
 
-@pytest.mark.parametrize(
-    "func",
-    [
-        extract_hdf5_metadata,
-        get_nematostella_timeseries_summary,
-    ],
-)
-def test_metadata_rejects_zarr_loudly(func, zarr_recording):
+def test_metadata_rejects_zarr_loudly(zarr_recording):
     """The failure must be visible, not an empty-but-plausible result.
 
-    These two functions read HDF5 storage internals (libver, chunks,
-    compression, fletcher32) and are HDF5-specific by design. Before the guard
-    they returned zero datasets and zero groups with the real error buried in
-    extraction_info["error"] — which nothing outside _metadata.py reads.
+    extract_hdf5_metadata reports HDF5 storage internals — libver, chunks,
+    compression, fletcher32 — which have no Zarr counterpart, so rejecting a
+    Zarr store is the honest answer. Before the guard it returned zero datasets
+    and zero groups with the real error buried in extraction_info["error"],
+    which nothing outside _metadata.py reads.
 
-    extract_hdf5_metadata_timeseries is deliberately NOT in this list: it reads
-    the timeseries group, which a Zarr store has just as much as an HDF5 file,
-    and it carries a Zarr branch for exactly that. See the test below.
+    The timeseries-facing functions are deliberately not covered here: they
+    read the timeseries group, which a Zarr store has just as much as an HDF5
+    file, and they go through the IO abstraction. See the two tests below.
     """
     with pytest.raises(UnsupportedFormatError, match="not an HDF5 file"):
-        func(zarr_recording)
+        extract_hdf5_metadata(zarr_recording)
+
+
+def test_timeseries_summary_reads_zarr(zarr_recording):
+    """Listing the timeseries group must work for Zarr, not raise.
+
+    This function backs the Nematostella export. While it was guarded as
+    HDF5-only, that export was unusable for every Zarr recording.
+    """
+    summary = get_nematostella_timeseries_summary(zarr_recording)
+
+    assert "temperature_celsius" in summary
+    assert "Error reading timeseries summary" not in summary
 
 
 def test_timeseries_metadata_reads_zarr(zarr_recording):

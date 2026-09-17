@@ -8,6 +8,7 @@ Enhanced with specialized Nematostella timeseries analysis capabilities and comp
 import h5py
 import os
 import json
+import time
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
@@ -633,34 +634,33 @@ class NematostellaTimeseriesAnalyzer:
 
         timeseries_dict = {}
 
-        with h5py.File(self.file_path, "r") as h5_file:
+        # Format-agnostic: the timeseries group exists in HDF5 recordings and
+        # in Zarr stores alike, so this reads both instead of .h5 only.
+        from ._io_abstraction import open_file_reader
+
+        with open_file_reader(self.file_path) as reader:
             # Extract root metadata
-            self.metadata = dict(h5_file.attrs)
+            self.metadata = reader.get_attrs("/")
 
             # Extract timeseries group metadata if exists
-            if "timeseries" in h5_file:
-                ts_group = h5_file["timeseries"]
-                self.timeseries_metadata = dict(ts_group.attrs)
+            if "timeseries" in reader.keys("/"):
+                self.timeseries_metadata = reader.get_attrs("timeseries")
 
                 # Extract all timeseries datasets
-                for key in ts_group.keys():
-                    dataset = ts_group[key]
+                for key in reader.keys("timeseries"):
+                    path = f"timeseries/{key}"
 
                     try:
-                        if dataset.shape == ():
-                            # Scalar dataset
-                            data = dataset[()]
-                            timeseries_dict[key] = [
-                                data
-                            ]  # Make it a list for DataFrame
+                        data = reader.read_all(path)
+                        if reader.shape(path) == ():
+                            # Scalar dataset — wrap it so the DataFrame takes it
+                            timeseries_dict[key] = [data]
                         else:
-                            # Array dataset
-                            data = dataset[:]
                             timeseries_dict[key] = data
 
                         # Store dataset attributes
-                        if dataset.attrs:
-                            attrs = dict(dataset.attrs)
+                        attrs = reader.get_attrs(path)
+                        if attrs:
                             print(f"Nematostella analyzer: {key} attributes: {attrs}")
 
                     except Exception as e:
@@ -1162,7 +1162,8 @@ def analyze_nematostella_hdf5_file(file_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing analysis results and export paths
     """
-    _require_hdf5(file_path)
+    # No HDF5 guard here: the analyzer reads the timeseries group through the
+    # IO abstraction and therefore handles Zarr recordings as well.
     try:
         # Initialize analyzer
         analyzer = NematostellaTimeseriesAnalyzer(file_path)
@@ -1204,25 +1205,31 @@ def get_nematostella_timeseries_summary(file_path: str) -> str:
     Returns:
         String summary of available timeseries data
     """
-    _require_hdf5(file_path)
+    # Listing the timeseries group needs no HDF5 storage internals, so this
+    # reads Zarr stores just as well — the HDF5 guard rejected them for no
+    # reason and took the whole Nematostella export down with it.
+    from ._io_abstraction import open_file_reader
+
     try:
-        with h5py.File(file_path, "r") as h5_file:
-            if "timeseries" not in h5_file:
-                return "No 'timeseries' group found in HDF5 file."
+        with open_file_reader(file_path) as reader:
+            if "timeseries" not in reader.keys("/"):
+                return "No 'timeseries' group found in recording."
 
-            ts_group = h5_file["timeseries"]
-            summary = f"Found {len(ts_group.keys())} timeseries datasets:\n"
+            keys = reader.keys("timeseries")
+            summary = f"Found {len(keys)} timeseries datasets:\n"
 
-            for key in ts_group.keys():
-                dataset = ts_group[key]
-                summary += f"- {key}: shape {dataset.shape}, dtype {dataset.dtype}\n"
+            for key in keys:
+                path = f"timeseries/{key}"
+                summary += (
+                    f"- {key}: shape {reader.shape(path)}, "
+                    f"dtype {reader.dtype(path)}\n"
+                )
 
-                if dataset.attrs:
-                    attrs = dict(dataset.attrs)
-                    if "description" in attrs:
-                        summary += f"  Description: {attrs['description']}\n"
-                    if "units" in attrs:
-                        summary += f"  Units: {attrs['units']}\n"
+                attrs = reader.get_attrs(path)
+                if "description" in attrs:
+                    summary += f"  Description: {attrs['description']}\n"
+                if "units" in attrs:
+                    summary += f"  Units: {attrs['units']}\n"
 
             return summary
 

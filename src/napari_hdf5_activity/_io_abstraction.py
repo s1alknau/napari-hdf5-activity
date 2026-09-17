@@ -242,7 +242,10 @@ class HDF5FileReader(FileReader):
         return self._handle[path][index]
 
     def read_all(self, path: str) -> np.ndarray:
-        return self._handle[path][:]
+        node = self._handle[path]
+        # Scalar datasets have shape () and reject [:]. Recordings store
+        # single-value settings that way, so reading them must not blow up.
+        return node[()] if node.shape == () else node[:]
 
     # -- metadata ------------------------------------------------------------
 
@@ -382,7 +385,9 @@ class ZarrFileReader(FileReader):
         return np.asarray(self._node(path)[index])
 
     def read_all(self, path: str) -> np.ndarray:
-        return np.asarray(self._node(path)[:])
+        node = self._node(path)
+        # Same scalar case as in the HDF5 reader above.
+        return np.asarray(node[()] if node.shape == () else node[:])
 
     # -- metadata ------------------------------------------------------------
 
