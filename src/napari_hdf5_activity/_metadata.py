@@ -276,10 +276,16 @@ def extract_hdf5_metadata_timeseries(file_path: str) -> Dict[str, Any]:
     Supports both HDF5 files and Zarr stores via the IO abstraction layer.
     """
     # --- Zarr path: use format-agnostic reader ---
+    # Only a genuinely undeterminable format may fall back to HDF5. An import
+    # or programming error must not silently route a Zarr store into the HDF5
+    # branch, where it dies with "is not an HDF5 file" -- that is what a typo
+    # here (detect_format instead of detect_file_format) used to do, and it
+    # made this whole Zarr branch unreachable.
+    from ._io_abstraction import detect_file_format, open_file_reader
+
     try:
-        from ._io_abstraction import detect_format, open_file_reader
-        _fmt = detect_format(file_path)
-    except Exception:
+        _fmt = detect_file_format(file_path)
+    except ValueError:
         _fmt = "hdf5"
 
     if _fmt == "zarr":

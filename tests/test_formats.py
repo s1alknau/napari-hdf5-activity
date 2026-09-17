@@ -177,20 +177,39 @@ def test_no_temperature_from_video(tmp_path):
     "func",
     [
         extract_hdf5_metadata,
-        extract_hdf5_metadata_timeseries,
         get_nematostella_timeseries_summary,
     ],
 )
 def test_metadata_rejects_zarr_loudly(func, zarr_recording):
     """The failure must be visible, not an empty-but-plausible result.
 
-    These functions read HDF5 storage internals (libver, chunks, compression,
-    fletcher32) and are HDF5-specific by design. Before the guard they returned
-    zero datasets and zero groups with the real error buried in
+    These two functions read HDF5 storage internals (libver, chunks,
+    compression, fletcher32) and are HDF5-specific by design. Before the guard
+    they returned zero datasets and zero groups with the real error buried in
     extraction_info["error"] — which nothing outside _metadata.py reads.
+
+    extract_hdf5_metadata_timeseries is deliberately NOT in this list: it reads
+    the timeseries group, which a Zarr store has just as much as an HDF5 file,
+    and it carries a Zarr branch for exactly that. See the test below.
     """
     with pytest.raises(UnsupportedFormatError, match="not an HDF5 file"):
         func(zarr_recording)
+
+
+def test_timeseries_metadata_reads_zarr(zarr_recording):
+    """Zarr recordings must yield real timeseries metadata, not an exception.
+
+    The Zarr branch was unreachable for a while: the import inside it asked for
+    detect_format instead of detect_file_format, a bare except swallowed the
+    ImportError, and the store fell through to the HDF5 branch, which rejects
+    it. Exports that need timeseries metadata died with "is not an HDF5 file".
+    """
+    metadata = extract_hdf5_metadata_timeseries(zarr_recording)
+
+    assert metadata["file_format"] == "zarr"
+    assert "temperature_celsius" in metadata["timeseries_data"]
+    assert metadata["timeseries_data"]["temperature_celsius"][0] == 20.0
+    assert "zarr_read_error" not in metadata["extraction_info"]
 
 
 def test_metadata_still_works_for_hdf5(hdf5_recording):
