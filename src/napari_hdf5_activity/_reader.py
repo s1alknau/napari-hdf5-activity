@@ -970,6 +970,16 @@ def validate_data_ranges(data: np.ndarray, stage: str, roi_idx: Optional[int] = 
 # =============================================================================
 
 
+def _is_zarr_path(path: str) -> bool:
+    """Return ``True`` if *path* is a Zarr store (directory, zip or ``.zarr``)."""
+    from ._io_abstraction import detect_file_format
+
+    try:
+        return detect_file_format(path) == "zarr"
+    except (ValueError, OSError):
+        return False
+
+
 def napari_get_reader(path: Union[str, List[str]]) -> Optional[Callable]:
     """
     Returns a reader function if `path` is a valid HDF5 or AVI file,
@@ -982,12 +992,19 @@ def napari_get_reader(path: Union[str, List[str]]) -> Optional[Callable]:
     ):
         return reader_function_avi
 
+    # Check for Zarr stores before the directory branch below: a directory
+    # store is a directory, and reader_directory_function only ever looks for
+    # .h5/.hdf5 files inside one, so a .zarr folder dropped onto napari would
+    # silently yield no layers.
+    if isinstance(path, str) and _is_zarr_path(path):
+        return reader_function_dual_structure
+
     # Check for HDF5 files
     if not H5PY_AVAILABLE:
         logger.error("h5py not available. Cannot read HDF5 files.")
         return None
 
-    if os.path.isdir(path):
+    if isinstance(path, str) and os.path.isdir(path):
         return reader_directory_function
     elif (isinstance(path, str) and path.lower().endswith((".h5", ".hdf5"))) or (
         isinstance(path, list)
