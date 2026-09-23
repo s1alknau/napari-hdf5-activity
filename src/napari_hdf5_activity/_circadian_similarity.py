@@ -46,6 +46,27 @@ from scipy.spatial.distance import squareform
 from ._batch import roi_label
 
 
+def correlation_to_distance(r):
+    """Map a signed correlation to a clustering distance.
+
+    +1 (in phase)   -> 0.0
+     0 (unrelated)  -> 0.5
+    -1 (anti-phase) -> 1.0
+
+    The older mapping was 1 - r, which put an anti-phase pair at distance 2 -
+    outside the range squareform/linkage expect - and, together with the
+    lag-scanned maximum, let anti-phase pairs enter the tree as if they were
+    synchronous. Keeping the mapping in one place makes the dendrogram cut
+    line and the clustering agree by construction.
+    """
+    return (1.0 - np.asarray(r, dtype=float)) / 2.0
+
+
+def correlation_for_distance(d):
+    """Inverse of :func:`correlation_to_distance` (distance -> correlation)."""
+    return 1.0 - 2.0 * np.asarray(d, dtype=float)
+
+
 def correlation_significance_test(
     r: float, n: int, alpha: float = 0.05
 ) -> Dict[str, Any]:
@@ -96,6 +117,7 @@ def calculate_cross_correlation(
     max_lag_hours: float = 12.0,
     sampling_interval: float = 60.0,
     significance_level: float = 0.05,
+    similarity_lag_hours: float = 3.0,
 ) -> Dict[str, Any]:
     """
     Calculate cross-correlation between two activity signals.
@@ -105,18 +127,29 @@ def calculate_cross_correlation(
     Args:
         signal1: First activity time series
         signal2: Second activity time series
-        max_lag_hours: Maximum time lag to consider (hours)
+        max_lag_hours: Maximum time lag for the reported optimal lag (hours)
         sampling_interval: Time between samples (seconds)
         significance_level: Alpha level for significance testing (default 0.05)
+        similarity_lag_hours: Half-width of the window the *similarity* value is
+            taken from (hours, default 3.0). Must stay well below half a period,
+            otherwise an anti-phase pair is indistinguishable from a
+            synchronous one - see `similarity_correlation` below.
 
     Returns:
         Dictionary containing:
         - correlation: Cross-correlation values
         - lags: Time lags (hours)
-        - max_correlation: Maximum correlation coefficient
-        - optimal_lag_hours: Time shift at maximum correlation
+        - similarity_correlation: SIGNED correlation at the lag with the largest
+          |r| inside +/- similarity_lag_hours. This is the value the correlation
+          matrix and the clustering use.
+        - similarity_lag_hours: lag at which that value was taken
+        - max_correlation: largest correlation over the full +/- max_lag_hours
+          scan. Descriptive only: over a window of half a period every phase
+          relationship becomes reachable, so this value cannot separate
+          "synchronous" from "anti-phase, shifted by T/2".
+        - optimal_lag_hours: Time shift at that full-scan maximum
         - is_similar: Whether signals are significantly similar (p < alpha)
-        - p_value: P-value for the correlation
+        - p_value: P-value for `similarity_correlation`
     """
     if len(signal1) != len(signal2):
         min_len = min(len(signal1), len(signal2))
@@ -160,20 +193,41 @@ def calculate_cross_correlation(
         else:
             correlation_window[idx] = 0.0
 
-    # Find maximum correlation
+    # Full-scan maximum. Reported for information only: with a window of half
+    # a period, an anti-phase pair peaks at +/- T/2 and looks exactly like a
+    # synchronous pair with a lag - which is why this value must not drive the
+    # matrix or the clustering.
     max_corr_idx = np.argmax(correlation_window)
     max_correlation = correlation_window[max_corr_idx]
     optimal_lag = lag_hours[max_corr_idx]
 
-    # Statistical significance test for correlation
+    # Similarity value: the signed correlation inside a narrow window around
+    # lag 0. Narrow enough that anti-phase cannot fold into it, wide enough to
+    # tolerate the phase spread between animals of the same chronotype.
+    similarity_mask = np.abs(lag_hours) <= float(similarity_lag_hours)
+    if not similarity_mask.any():
+        similarity_mask = np.zeros_like(lag_hours, dtype=bool)
+        similarity_mask[max_lag_samples] = True          # fall back to lag 0
+    similarity_idx_local = np.argmax(np.abs(correlation_window[similarity_mask]))
+    similarity_idx = np.where(similarity_mask)[0][similarity_idx_local]
+    # The per-lag normalisation by (n - |k|) is only approximately a Pearson
+    # r; at large lags with few overlapping samples it can overshoot slightly.
+    # Clipping keeps the value a valid correlation, which in turn keeps the
+    # clustering distance inside [0, 1] - scipy rejects negative distances.
+    similarity_correlation = float(np.clip(correlation_window[similarity_idx], -1.0, 1.0))
+    similarity_lag = lag_hours[similarity_idx]
+
+    # The significance test belongs to the value that is actually shown.
     n_samples = len(signal1)
     sig_test = correlation_significance_test(
-        max_correlation, n_samples, significance_level
+        similarity_correlation, n_samples, significance_level
     )
 
     return {
         "correlation": correlation_window,
         "lags": lag_hours,
+        "similarity_correlation": float(similarity_correlation),
+        "similarity_lag_hours": float(similarity_lag),
         "max_correlation": max_correlation,
         "optimal_lag_hours": optimal_lag,
         "is_similar": sig_test["is_significant"],
@@ -189,6 +243,7 @@ def calculate_roi_correlation_matrix(
     bin_size_seconds: int = 60,
     max_lag_hours: float = 12.0,
     significance_level: float = 0.05,
+    similarity_lag_hours: float = 3.0,
 ) -> Dict[str, Any]:
     """
     Calculate pairwise correlations between all ROIs.
@@ -197,8 +252,10 @@ def calculate_roi_correlation_matrix(
         movement_data: Dictionary mapping ROI ID to (time, value) tuples
         sampling_interval: Time interval between samples (seconds)
         bin_size_seconds: Bin size for data averaging
-        max_lag_hours: Maximum lag for cross-correlation
+        max_lag_hours: Maximum lag for the reported optimal lag
         significance_level: Alpha level for significance testing (default 0.05)
+        similarity_lag_hours: Half-width of the window the matrix value is taken
+            from (hours, default 3.0)
 
     Returns:
         Dictionary containing correlation matrix, ROI pairs, and significance matrix
@@ -242,6 +299,9 @@ def calculate_roi_correlation_matrix(
     roi_list = sorted(roi_signals.keys())
     correlation_matrix = np.zeros((n_rois, n_rois))
     lag_matrix = np.zeros((n_rois, n_rois))
+    # Kept for reference/plots: the old lag-scanned maximum and its lag.
+    full_scan_matrix = np.zeros((n_rois, n_rois))
+    full_scan_lag_matrix = np.zeros((n_rois, n_rois))
     p_value_matrix = np.ones((n_rois, n_rois))
     significance_matrix = np.zeros((n_rois, n_rois), dtype=bool)
     pairwise_results = {}
@@ -263,6 +323,8 @@ def calculate_roi_correlation_matrix(
             if i == j:
                 correlation_matrix[i, j] = 1.0
                 lag_matrix[i, j] = 0.0
+                full_scan_matrix[i, j] = 1.0
+                full_scan_lag_matrix[i, j] = 0.0
                 p_value_matrix[i, j] = 0.0
                 significance_matrix[i, j] = True
                 continue
@@ -271,6 +333,8 @@ def calculate_roi_correlation_matrix(
             if j < i:
                 correlation_matrix[i, j] = correlation_matrix[j, i]
                 lag_matrix[i, j] = -lag_matrix[j, i]  # Reverse lag
+                full_scan_matrix[i, j] = full_scan_matrix[j, i]
+                full_scan_lag_matrix[i, j] = -full_scan_lag_matrix[j, i]
                 p_value_matrix[i, j] = p_value_matrix[j, i]
                 significance_matrix[i, j] = significance_matrix[j, i]
                 continue
@@ -297,11 +361,17 @@ def calculate_roi_correlation_matrix(
                     bin_size_seconds if bin_size_seconds else sampling_interval
                 ),
                 significance_level=corrected_alpha,
+                similarity_lag_hours=similarity_lag_hours,
             )
 
             if "error" not in result:
-                correlation_matrix[i, j] = result["max_correlation"]
-                lag_matrix[i, j] = result["optimal_lag_hours"]
+                # Signed value from the narrow window: an anti-phase pair
+                # stays negative instead of reappearing as a positive peak
+                # half a period away.
+                correlation_matrix[i, j] = result["similarity_correlation"]
+                lag_matrix[i, j] = result["similarity_lag_hours"]
+                full_scan_matrix[i, j] = result["max_correlation"]
+                full_scan_lag_matrix[i, j] = result["optimal_lag_hours"]
                 p_value_matrix[i, j] = result.get("p_value", 1.0)
                 significance_matrix[i, j] = result.get("is_similar", False)
                 pairwise_results[(roi1, roi2)] = result
@@ -310,6 +380,9 @@ def calculate_roi_correlation_matrix(
         "roi_ids": roi_list,
         "correlation_matrix": correlation_matrix,
         "lag_matrix": lag_matrix,
+        "full_scan_correlation_matrix": full_scan_matrix,
+        "full_scan_lag_matrix": full_scan_lag_matrix,
+        "similarity_lag_hours": float(similarity_lag_hours),
         "p_value_matrix": p_value_matrix,
         "significance_matrix": significance_matrix,
         "pairwise_results": pairwise_results,
@@ -339,12 +412,14 @@ def find_similar_roi_pairs(
     similar_pairs = []
 
     for (roi1, roi2), result in correlation_results["pairwise_results"].items():
-        if result["max_correlation"] >= threshold:
+        # Same quantity the matrix and the dendrogram show.
+        r_pair = result.get("similarity_correlation", result["max_correlation"])
+        if r_pair >= threshold:
             similar_pairs.append(
                 {
                     "roi1": roi1,
                     "roi2": roi2,
-                    "correlation": result["max_correlation"],
+                    "correlation": r_pair,
                     "lag_hours": result["optimal_lag_hours"],
                     "synchronized": abs(result["optimal_lag_hours"]) < 1.0,
                 }
@@ -360,7 +435,7 @@ def hierarchical_clustering(
     correlation_matrix: np.ndarray,
     roi_ids: List[int],
     method: str = "average",
-    threshold: float = 0.5,
+    threshold: float = 0.25,
 ) -> Dict[str, Any]:
     """
     Perform hierarchical clustering on ROIs based on correlation.
@@ -373,8 +448,10 @@ def hierarchical_clustering(
     Returns:
         Dictionary with clustering results
     """
-    # Convert correlation to distance (1 - correlation)
-    distance_matrix = 1 - correlation_matrix
+    # Correlation -> distance via (1 - r) / 2, so that an anti-phase pair
+    # (r = -1) sits at the far end of the tree (d = 1) instead of being merged
+    # with the synchronous ones. See correlation_to_distance().
+    distance_matrix = correlation_to_distance(correlation_matrix)
     np.fill_diagonal(distance_matrix, 0)  # Ensure diagonal is 0
 
     # Convert to condensed distance matrix for scipy
@@ -383,7 +460,8 @@ def hierarchical_clustering(
     # Perform hierarchical clustering
     linkage_matrix = hierarchy.linkage(condensed_dist, method=method)
 
-    # Cut tree at the caller-supplied distance threshold (default 0.5 → r ≥ 0.5)
+    # Cut tree at the caller-supplied DISTANCE threshold. Callers convert an
+    # r value with correlation_to_distance(), so r = 0.5 -> d = 0.25.
     cluster_labels = hierarchy.fcluster(linkage_matrix, t=threshold, criterion="distance")
 
     # Group ROIs by cluster

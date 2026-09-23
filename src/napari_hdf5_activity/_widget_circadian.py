@@ -262,13 +262,14 @@ class CircadianMixin:
             from ._circadian_similarity import (
                 hierarchical_clustering,
                 generate_similarity_summary,
+                correlation_to_distance,
             )
             results = self.fisher_analysis_results
             clustering_results = hierarchical_clustering(
                 results["correlation_matrix"],
                 results["roi_ids"],
                 method="average",
-                threshold=1.0 - r,
+                threshold=float(correlation_to_distance(r)),
             )
             results["clustering"] = clustering_results
             summary = generate_similarity_summary(results, clustering_results, threshold=r)
@@ -3522,6 +3523,7 @@ class CircadianMixin:
             calculate_roi_correlation_matrix,
             hierarchical_clustering,
             generate_similarity_summary,
+            correlation_to_distance,
         )
 
         # Use provided fraction_data or default to self.fraction_data
@@ -3559,7 +3561,7 @@ class CircadianMixin:
             correlation_results["correlation_matrix"],
             correlation_results["roi_ids"],
             method="average",
-            threshold=1.0 - r_threshold,
+            threshold=float(correlation_to_distance(r_threshold)),
         )
 
         correlation_results["clustering"] = clustering_results
@@ -4863,7 +4865,9 @@ class CircadianMixin:
                     if hasattr(self, "similarity_threshold_slider")
                     else 0.5
                 )
-                color_threshold = 1.0 - r_threshold
+                from ._circadian_similarity import correlation_to_distance
+
+                color_threshold = float(correlation_to_distance(r_threshold))
 
                 hierarchy.dendrogram(
                     linkage,
@@ -7568,7 +7572,9 @@ class CircadianMixin:
             if hasattr(self, "similarity_threshold_slider")
             else 0.5
         )
-        color_threshold = 1.0 - r_threshold
+        from ._circadian_similarity import correlation_to_distance
+
+        color_threshold = float(correlation_to_distance(r_threshold))
         hierarchy.dendrogram(
             linkage,
             labels=[str(r) for r in roi_ids],

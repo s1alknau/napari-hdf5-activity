@@ -1200,7 +1200,7 @@ Population:
 ## ROI Similarity Matrix
 
 !!! info "At a glance"
-    **Output:** a pairwise cross-correlation matrix, the optimal lag per pair, and UPGMA clusters.
+    **Output:** a pairwise **signed** correlation matrix (lag window ±3 h), the optimal lag per pair, and UPGMA clusters.
 
     **Use for:** finding synchronized or anti-phase ROI groups (social structure, dominance).
 
@@ -1211,10 +1211,61 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
 ### How It Works
 
 1. **Normalization**: Standardizes each ROI's activity (mean=0, std=1)
-2. **Cross-Correlation**: Calculates correlation at different time lags (±12h)
-3. **Peak Detection**: Finds maximum correlation and optimal lag
-4. **Significance Testing**: t-test for correlation significance
-5. **Clustering**: Groups ROIs by similarity using hierarchical clustering
+2. **Cross-Correlation**: Calculates correlation at different time lags (±12 h)
+3. **Similarity value**: takes the **signed** correlation from a narrow window around lag 0 (±3 h by default) — the value the matrix and the clustering use
+4. **Peak Detection**: additionally reports the maximum over the full ±12 h scan and its lag (descriptive)
+5. **Significance Testing**: t-test on the similarity value
+6. **Clustering**: Groups ROIs by similarity using hierarchical clustering, distance *d* = (1 − *r*)/2
+
+!!! warning "Changed on 2026-09-23 — what and why"
+    **Before:** the matrix stored `max_correlation`, the maximum of the *signed*
+    correlation over the whole ±12 h lag scan, and the clustering used
+    *d* = 1 − *r*.
+
+    **The problem:** for a circadian signal, lag and phase are circular. A
+    window of ±12 h is half a period at *T* = 24 h, so **every** phase
+    relationship is reachable inside it — an anti-phase pair peaks at ±12 h and
+    is numerically indistinguishable from a synchronous pair with a lag. Two
+    consequences followed:
+
+    - Anti-phase animals entered the matrix with a **positive** *r* and were
+      merged into the same cluster as the synchronous ones. The one pairwise
+      statement this method could make — who runs with whom and who against —
+      was lost. (Whether both are rhythmic at the same period is what the
+      [Coherence Analysis](#coherence-analysis) already answers.)
+    - The reported optimal lag pinned to the **window edge**: at *T* = 26 h the
+      anti-phase maximum lies at 13 h, outside the window, so the scan returned
+      a truncated edge value that reads like a measurement.
+
+    **Now:** the matrix value is the signed correlation from a narrow window
+    (±3 h, parameter `similarity_lag_hours`) — wide enough for the phase spread
+    within one chronotype, far too narrow for anti-phase to fold in. The
+    clustering maps *r* → *d* = (1 − *r*)/2, so +1 → 0, 0 → 0.5, −1 → 1: an
+    anti-phase pair now sits at the far end of the dendrogram. The full ±12 h
+    scan is still computed and returned as `full_scan_correlation_matrix` /
+    `full_scan_lag_matrix`.
+
+    **Why not simply take the largest |r| over the full scan?** For an
+    anti-phase pair |*r*| is equally large at lag 0 and at ±12 h. `argmax` would
+    hit a tie and pick whichever index comes first — the lag would become
+    arbitrary, not more correct.
+
+    Measured on synthetic traces (24 h cosine, 3 days, 10 min bins):
+
+    | Pair | matrix value now | old full-scan value |
+    |------|------------------|---------------------|
+    | 2 h apart, same phase | **+0.98** at −1.8 h | +0.98 at −1.8 h |
+    | anti-phase | **−1.00** at 0 h | +1.00 at −11.8 h |
+    | rhythmic vs. noise | **−0.08** | +0.09 at +11.5 h (edge) |
+
+    Clustering at *r* ≥ 0.5 groups the first pair and separates the anti-phase
+    animal; with the old values all three ended up in one cluster.
+
+    The rebuild also removed an impossible value: the per-lag normalisation by
+    *n* − |τ| can overshoot slightly at large lags, and the old matrix contained
+    entries up to **r = 1.03**. Distances derived from those were negative and
+    made `scipy.cluster.hierarchy` reject the linkage. The similarity value is
+    now clipped to [−1, 1].
 
 ??? note "Mathematical details, with the code for each step"
 
@@ -1317,25 +1368,50 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
 
     ---
 
-    **Step 5 — peak correlation and optimal lag**
+    **Step 5 — the similarity value (what the matrix stores)**
 
     ```
-    r_max = max_τ r_xy(τ)          τ_opt = argmax_τ r_xy(τ)
+    r_sim = r_xy(τ*)   with   τ* = argmax_{|τ| ≤ 3 h} |r_xy(τ)|      (sign kept)
     ```
 
     ```python
-    max_corr_idx = np.argmax(correlation_window)                              # (line 164)
-    max_correlation = correlation_window[max_corr_idx]     # r_max            (line 165)
-    optimal_lag = lag_hours[max_corr_idx]                  # τ_opt in hours    (line 166)
+    # Narrow window around lag 0: wide enough for the phase spread within one
+    # chronotype, far too narrow for anti-phase (±T/2) to fold in.
+    similarity_mask = np.abs(lag_hours) <= float(similarity_lag_hours)
+    similarity_idx_local = np.argmax(np.abs(correlation_window[similarity_mask]))
+    similarity_idx = np.where(similarity_mask)[0][similarity_idx_local]
+
+    # Clipped because the (n − |k|) normalisation is only approximately a
+    # Pearson r and can overshoot at large lags; the clustering needs a value
+    # in [−1, 1] to produce distances in [0, 1].
+    similarity_correlation = float(np.clip(correlation_window[similarity_idx], -1.0, 1.0))
+    similarity_lag = lag_hours[similarity_idx]
     ```
 
-    Pairs with \|τ<sub>opt</sub>\| < 1 h count as in-phase. Note that the code takes
-    `argmax`, not `argmax` of the absolute value: an anti-phase pair shows up as
-    a negative *r* near lag 0 rather than as a positive peak half a period away.
+    The **sign is kept**: an anti-phase pair stays at *r* ≈ −1 instead of
+    reappearing as a positive peak half a period away.
 
     ---
 
-    **Step 6 — significance of one pair**
+    **Step 6 — full-scan maximum (reported, not used for clustering)**
+
+    ```
+    r_max = max_τ r_xy(τ)          τ_opt = argmax_τ r_xy(τ)      over ±12 h
+    ```
+
+    ```python
+    # Descriptive only — see the "Changed on 2026-09-23" box above for why this
+    # value must not drive the matrix.
+    max_corr_idx = np.argmax(correlation_window)
+    max_correlation = correlation_window[max_corr_idx]     # r_max
+    optimal_lag = lag_hours[max_corr_idx]                  # τ_opt in hours
+    ```
+
+    Pairs with \|τ<sub>opt</sub>\| < 1 h count as in-phase.
+
+    ---
+
+    **Step 7 — significance of one pair**
 
     Under H₀: ρ = 0,
 
@@ -1344,6 +1420,9 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
     p = 2 · (1 − F_t,ν(|t|))                       (two-tailed)
     r_crit = √[ t²_crit / (n − 2 + t²_crit) ]      with t_crit = F⁻¹_t,ν(1 − α/2)
     ```
+
+    The test runs on the similarity value, i.e. on the number the matrix and the
+    dendrogram show.
 
     ```python
     t_stat = r * np.sqrt((n - 2) / (1 - r**2))          # t                    (line 72)
@@ -1357,18 +1436,21 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
 
     ---
 
-    **Step 7 — Bonferroni across all pairs, then clustering**
+    **Step 8 — Bonferroni across all pairs, then clustering**
 
     With *N* ROIs there are *N*(*N*−1)/2 simultaneous tests:
 
     ```
     α_corr = α / n_pairs,     n_pairs = N(N−1)/2
-    d_ij   = 1 − r_ij                    correlation → distance
+    d_ij   = (1 − r_ij) / 2              correlation → distance
     ```
 
     ```python
-    # 1 - r: perfectly correlated ROIs get distance 0, uncorrelated ones 1.
-    distance_matrix = 1 - correlation_matrix                                   # (line 377)
+    # (1 - r)/2 maps +1 → 0, 0 → 0.5, -1 → 1, so an anti-phase pair sits at the
+    # far end of the tree instead of being merged with the synchronous ones.
+    # Single-sourced in correlation_to_distance() so the dendrogram cut line
+    # and the clustering cannot drift apart.
+    distance_matrix = correlation_to_distance(correlation_matrix)
     np.fill_diagonal(distance_matrix, 0)
 
     # scipy wants the condensed (upper-triangle) form.
@@ -1378,8 +1460,9 @@ Computes pairwise cross-correlations between all ROIs to identify synchronized o
     # inter-cluster distance.
     linkage_matrix = hierarchy.linkage(condensed_dist, method=method)          # (line 384)
 
-    # Cut at d = 1 - r; the GUI slider sets r, the code default is r = 0.5.
-    cluster_labels = hierarchy.fcluster(linkage_matrix, t=threshold, criterion="distance")  # (line 387)
+    # Cut at d = (1 - r)/2; the GUI slider sets r, the default is r = 0.5,
+    # i.e. a cut at d = 0.25.
+    cluster_labels = hierarchy.fcluster(linkage_matrix, t=threshold, criterion="distance")
     ```
 
     **Important:** the clustering is exploratory and descriptive. Cluster
@@ -2960,6 +3043,12 @@ Please include:
 ---
 
 ## Changelog
+
+### Version 1.4 (2026-09-23 — ROI Similarity: phase-aware matrix)
+- **ROI Similarity (matrix value)**: the correlation matrix now stores the *signed* correlation from a narrow lag window (±3 h, `similarity_lag_hours`) instead of the maximum over the full ±12 h scan. Over half a period every phase relationship is reachable, so the old value could not separate "synchronous" from "anti-phase, shifted by T/2": anti-phase pairs entered the matrix positively and were clustered with the synchronous ones. The full scan is still computed and returned as `full_scan_correlation_matrix` / `full_scan_lag_matrix`.
+- **ROI Similarity (clustering distance)**: *d* = (1 − *r*)/2 instead of 1 − *r*, so anti-phase (*r* = −1) maps to *d* = 1 instead of an out-of-range 2. The mapping lives in `correlation_to_distance()`; the dendrogram cut line uses the same function, so slider and tree cannot drift apart. A slider value of *r* = 0.5 now cuts at *d* = 0.25.
+- **ROI Similarity (valid range)**: the similarity value is clipped to [−1, 1]. The per-lag normalisation by *n* − |τ| is only approximately a Pearson *r* and produced entries up to *r* = 1.03, from which negative distances followed and `scipy.cluster.hierarchy` rejected the linkage.
+- **ROI Similarity (significance)**: the t-test now runs on the similarity value, i.e. on the number the matrix and the dendrogram show, not on the full-scan maximum.
 
 ### Version 1.3 (2026 — Phase Clustering correctness fix)
 - **Phase Clustering (per-ROI)**: replaced the Hilbert circular-mean phase estimator with an activity-weighted circular mean of time-of-day. The previous method dwelt on the trough of the activity signal (because activity data spend most of their time near the minimum), forcing all ROIs to ~12 h regardless of true peak timing and inflating the population resultant length to an artefactual ~0.98. The new method points to when the animal is actually active, makes no waveform assumption, and yields per-ROI resultant lengths R_roi ∈ [0, 1] reflecting real rhythm concentration.
