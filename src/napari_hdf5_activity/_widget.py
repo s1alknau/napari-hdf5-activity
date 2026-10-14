@@ -7358,16 +7358,36 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         QTimer.singleShot(0, append_to_log)
 
     def cleanup_resources(self):
-        """Clean up resources when widget is destroyed."""
-        if self.current_worker:
+        """Clean up resources when the widget goes away.
+
+        Runs from __del__, so it must cope with a half-built or already
+        half-destroyed widget: attributes are missing when __init__ aborted,
+        and Qt may have deleted the C++ side of a child while the Python
+        wrapper is still alive.
+        """
+        if getattr(self, "current_worker", None):
             self._cancel_requested = True
 
-        if hasattr(self, "performance_timer"):
-            self.performance_timer.stop()
+        timer = getattr(self, "performance_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                # "Internal C++ object (QTimer) already deleted" - Qt got
+                # there first, so there is nothing left to stop. hasattr()
+                # cannot catch this: the Python wrapper outlives the C++
+                # object it points at.
+                pass
 
     def __del__(self):
         """Destructor to ensure proper cleanup."""
-        self.cleanup_resources()
+        try:
+            self.cleanup_resources()
+        except Exception:
+            # Python only prints exceptions raised in __del__ and carries on,
+            # which turns a teardown race into noise in the test log. There is
+            # nothing left to recover at this point anyway.
+            pass
 
 
 # ===================================================================

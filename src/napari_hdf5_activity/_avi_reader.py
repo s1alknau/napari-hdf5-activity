@@ -252,7 +252,13 @@ class AVIVideoReader:
 
     def __del__(self):
         """Destructor."""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Same reasoning as in the widget: during interpreter shutdown the
+            # reader may already be partly torn down, and an exception here
+            # would only be printed and swallowed.
+            pass
 
 
 def load_avi_with_metadata(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
