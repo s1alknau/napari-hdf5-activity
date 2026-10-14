@@ -60,6 +60,22 @@ testing = [
     "zarr>=3",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The rig environment also carries ImSwitch, and ImSwitch pulls in
+# arkitekt-next, which registers a pytest plugin. That plugin imports
+# arkitekt_next at startup, and arkitekt-next 0.30.1 asks rekuest-next for a
+# symbol newer releases no longer export:
+#
+#   ImportError: cannot import name 'abreakpoint' from 'rekuest_next.actors.context'
+#
+# pytest loads entry-point plugins before collecting anything, so the whole
+# run died before a single test of this package was reached. arkitekt is
+# unrelated to the analysis plugin, so the plugin is simply not loaded.
+# (arkitekt-next pins rekuest-next only from below, >= 0.18.2, which is why
+# an unrelated upgrade in the environment can break it at any time.)
+addopts = "-p no:arkitekt_next"
+
 [project.entry-points."napari.manifest"]
 napari-hdf5-activity = "napari_hdf5_activity:napari.yaml"
 
