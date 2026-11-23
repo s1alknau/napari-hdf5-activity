@@ -2130,7 +2130,9 @@ def run_baseline_analysis(
 
         logger.debug(f"Starting Pool with {num_processes} processes...")
         try:
-            with Pool(processes=num_processes) as pool:
+            from ._mp_utils import worker_spawn_environment
+
+            with worker_spawn_environment(), Pool(processes=num_processes) as pool:
                 roi_results = pool.map(_process_single_roi_movement, roi_args)
             logger.debug(f"Pool complete: {len(roi_results)} results")
         except (MemoryError, OSError) as exc:

@@ -5441,7 +5441,9 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             else:
                 # Recalculate safe process count from current available RAM
                 try:
-                    available_mb = psutil.virtual_memory().available / (1024 * 1024)
+                    from ._reader import get_available_memory
+                    # Free RAM capped by the free Windows commit charge
+                    available_mb = get_available_memory() / (1024 * 1024)
                     usable_mb = max(0, available_mb - 1024)  # keep 1 GB headroom
                     safe_processes = max(1, min(self.num_processes.value(), int(usable_mb / 800)))
                     if safe_processes < self.num_processes.value():

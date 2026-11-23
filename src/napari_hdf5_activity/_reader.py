@@ -24,6 +24,8 @@ Key entry points
 
 import os
 from concurrent.futures import ProcessPoolExecutor, wait
+
+from ._mp_utils import worker_spawn_environment
 import time
 from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 import numpy as np
@@ -31,6 +33,11 @@ import numpy as np
 import logging
 
 try:
+    # Worker processes compute on NumPy masks and never use the GPU; importing
+    # CuPy there would reserve ~1 GB of commit charge per worker.
+    from ._mp_utils import in_worker_process as _in_worker_process
+    if _in_worker_process():
+        raise ImportError("CuPy disabled in worker processes")
     import cupy as cp
     _CUPY_AVAILABLE = True
 except Exception:
@@ -90,19 +97,62 @@ MAX_CHUNK_SIZE = 200  # Maximum number of frames per chunk
 MEMORY_SAFETY_FACTOR = 0.25  # Use only 25% of available memory
 
 
+def _available_commit_bytes() -> Optional[int]:
+    """Free commit charge on Windows (RAM + page file not yet promised), else None.
+
+    Windows refuses an allocation once the commit limit is reached, even when
+    plenty of physical RAM is still free: every process reserves commit for
+    memory it may touch later.  Spawning a worker or allocating a frame chunk
+    then fails (MemoryError, "paging file too small", EOFError in the child).
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = _MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return int(stat.ullAvailPageFile)  # = available commit charge
+    except Exception:
+        pass
+    return None
+
+
 def get_available_memory() -> int:
-    """Get available system memory in bytes."""
+    """Memory that can actually be allocated now, in bytes.
+
+    Free physical RAM, capped on Windows by the free commit charge.
+    """
+    avail = None
     if PSUTIL_AVAILABLE:
         try:
-            return psutil.virtual_memory().available
+            avail = psutil.virtual_memory().available
         except Exception:
             pass
-    # Fallback to conservative estimate
-    return 2 * 1024 * 1024 * 1024  # 2 GB
+    commit = _available_commit_bytes()
+    if commit is not None:
+        avail = commit if avail is None else min(avail, commit)
+    if avail is None:
+        return 2 * 1024 * 1024 * 1024  # conservative fallback: 2 GB
+    return avail
 
 
 # Estimated memory overhead per worker process on Windows (napari + numba + llvmlite imports)
-WORKER_MEMORY_OVERHEAD_MB = 600  # ~500-700 MB per spawned process on Windows
+WORKER_MEMORY_OVERHEAD_MB = 400  # measured ~390 MB peak per worker: ~100 MB imports (no napari/CuPy, see _mp_utils) + chunk buffers
 
 
 def calculate_safe_process_count(
@@ -132,10 +182,9 @@ def calculate_safe_process_count(
     target = requested if requested is not None else cpu_based
 
     # Check available memory on Windows where worker memory is the bottleneck
-    if os.name == "nt" and PSUTIL_AVAILABLE:
+    if os.name == "nt":
         try:
-            mem = psutil.virtual_memory()
-            available_mb = mem.available / (1024 * 1024)
+            available_mb = get_available_memory() / (1024 * 1024)
             # Reserve 2 GB for the main process and OS
             usable_mb = max(0, available_mb - 2048)
             per_worker_mb = WORKER_MEMORY_OVERHEAD_MB + extra_per_worker_mb
@@ -519,6 +568,13 @@ def detect_file_structure_type(file_path: str) -> Dict[str, Any]:
         return info
 
     # ---- Zarr detection -----------------------------------------------
+    def _time_chunk(reader, path):
+        """Storage chunk length along the frame axis, or ``None``."""
+        try:
+            return int(reader._node(path).chunks[0])
+        except Exception:
+            return None
+
     try:
         with open_file_reader(file_path) as r:
             root_keys = r.keys("/")
@@ -537,6 +593,7 @@ def detect_file_structure_type(file_path: str) -> Dict[str, Any]:
                         "dtype_size": dt.itemsize,
                         "data_location": "frames",
                         "file_format": "zarr",
+                        "storage_chunk_frames": _time_chunk(r, "frames"),
                     }
 
             # Structure 2: /images group
@@ -556,6 +613,7 @@ def detect_file_structure_type(file_path: str) -> Dict[str, Any]:
                         "dtype_size": dt.itemsize,
                         "data_location": "images/frames",
                         "file_format": "zarr",
+                        "storage_chunk_frames": _time_chunk(r, "images/frames"),
                     }
 
                 # 2b: individual frame arrays inside /images
@@ -603,6 +661,7 @@ def detect_file_structure_type(file_path: str) -> Dict[str, Any]:
                             "dtype_size": dt.itemsize,
                             "data_location": key,
                             "file_format": "zarr",
+                            "storage_chunk_frames": _time_chunk(r, key),
                         }
 
             return {
@@ -1760,10 +1819,12 @@ def process_chunk(
         # the stored Delta-I but does not change any detection result.
         norm_factor = 65535.0 if chunk_data.dtype.itemsize >= 2 else 255.0
 
-        # Convert to int16 to compute frame diffs without uint8 wrap-around.
-        # int16 costs 2 bytes/pixel vs float32's 4 — peak memory is halved.
-        # Division by the dtype maximum is deferred to the final scalar divide.
-        frames_xp = xp.asarray(chunk_data, dtype=xp.int16)
+        # Frames stay in their storage dtype; each ROI's bounding-box crop is
+        # cast to a signed type so diffs cannot wrap around (int16 holds every
+        # uint8 difference, uint16 needs int32).  Division by the dtype maximum
+        # is deferred to the final scalar divide.
+        diff_dtype = xp.int16 if chunk_data.dtype.itemsize == 1 else xp.int32
+        frames_xp = xp.asarray(chunk_data)
         del chunk_data
 
         frame_shape = frames_xp.shape[1:]
@@ -1788,12 +1849,19 @@ def process_chunk(
                     logger.warning(f"ROI {roi_idx} has 0 pixels in mask")
                     continue
 
+                # Restrict to the mask's bounding box: indexing the full frame
+                # stack once per ROI scans every pixel of every frame.
+                rows = xp.flatnonzero(mask_bool.any(axis=1))
+                cols = xp.flatnonzero(mask_bool.any(axis=0))
+                r0, r1 = int(rows[0]), int(rows[-1]) + 1
+                c0, c1 = int(cols[0]), int(cols[-1]) + 1
+
                 # Extract masked pixels, diff, sum — all in int16/float32.
                 # Stored value is the per-pixel mean of the dtype-normalized diff,
                 # i.e. sum / (n_pixels * norm_factor), which lies in [0,1].
                 # The GUI "÷ ROI pixel count" checkbox shows this as-is (per-pixel mode)
                 # or multiplies by n_pixels * norm_factor for the MATLAB-equivalent pixel sum.
-                roi_pixels = frames_xp[:, mask_bool]                                                 # (N, n_pixels) int16
+                roi_pixels = frames_xp[:, r0:r1, c0:c1][:, mask_bool[r0:r1, c0:c1]].astype(diff_dtype)  # (N, n_pixels)
                 diffs      = xp.abs(xp.diff(roi_pixels, axis=0))                                     # (N-1, n_pixels) int16
                 roi_intensities_xp = diffs.sum(axis=1, dtype=xp.float32) / (n_pixels * norm_factor)  # (N-1,) in [0,1]
 
@@ -1908,30 +1976,32 @@ def _worker_init_masks(masks: List) -> None:
     _worker_masks = masks
 
 
+def _open_zarr_store(file_path: str):
+    """Open a Zarr store read-only (directory or zip store), or return ``None``."""
+    try:
+        import zarr
+        if os.path.isfile(file_path):
+            ZipStore = (
+                getattr(zarr, "ZipStore", None)
+                or getattr(getattr(zarr, "storage", None), "ZipStore", None)
+            )
+            if ZipStore is not None:
+                try:
+                    return zarr.open(ZipStore(file_path, mode="r"), mode="r")
+                except TypeError:
+                    return zarr.open(ZipStore(file_path), mode="r")
+        return zarr.open(file_path, mode="r")
+    except Exception as e:
+        logger.warning(f"Could not open Zarr store {file_path}: {e}")
+        return None
+
+
 def _worker_init(masks: List, file_path: str, structure_info: Dict) -> None:
     """Pool initializer for Zarr: open the store once per worker and cache masks."""
     global _worker_masks, _worker_zarr_store
     _worker_masks = masks
     if structure_info.get("file_format") == "zarr":
-        try:
-            import zarr, os
-            if os.path.isfile(file_path):
-                ZipStore = (
-                    getattr(zarr, "ZipStore", None)
-                    or getattr(getattr(zarr, "storage", None), "ZipStore", None)
-                )
-                if ZipStore is not None:
-                    try:
-                        _worker_zarr_store = zarr.open(ZipStore(file_path, mode="r"), mode="r")
-                    except TypeError:
-                        _worker_zarr_store = zarr.open(ZipStore(file_path), mode="r")
-                else:
-                    _worker_zarr_store = zarr.open(file_path, mode="r")
-            else:
-                _worker_zarr_store = zarr.open(file_path, mode="r")
-        except Exception as e:
-            logger.warning(f"Worker could not open Zarr store: {e}")
-            _worker_zarr_store = None
+        _worker_zarr_store = _open_zarr_store(file_path)
 
 
 def _process_single_chunk_dual_structure(
@@ -1964,6 +2034,33 @@ def _process_single_chunk_dual_structure(
         logger.error(f"Error processing dual-structure chunk {start_idx}-{end_idx}: {e}")
         masks = _worker_masks or []
         return start_idx, {roi_idx + 1: [] for roi_idx in range(len(masks))}
+
+
+def _process_chunk_task(args: Tuple):
+    """Pool task: process frames ``[start_idx, end_idx)`` of one file.
+
+    Returns ``(start_idx, end_idx, results, first_frame, last_frame)``.
+    ``results`` is ``None`` when the chunk could not be read or processed, so
+    the caller can retry it instead of leaving a silent gap.  The first and
+    last frame let the caller compute the frame difference across the chunk
+    border without reading any frame twice.
+    """
+    file_path, start_idx, end_idx, frame_interval, structure_info = args
+    try:
+        chunk = read_chunk_data_dual_structure(
+            file_path, start_idx, end_idx, structure_info, for_processing=True
+        )
+        if chunk is None or len(chunk) == 0:
+            logger.error(f"Failed to read chunk {start_idx}:{end_idx}")
+            return start_idx, end_idx, None, None, None
+        first, last = chunk[0].copy(), chunk[-1].copy()
+        results = process_chunk(
+            chunk, _worker_masks, start_idx * frame_interval, frame_interval
+        )
+        return start_idx, end_idx, results, first, last
+    except Exception as e:
+        logger.error(f"Error processing chunk {start_idx}:{end_idx}: {e!r}")
+        return start_idx, end_idx, None, None, None
 
 
 def process_single_file_in_parallel_dual_structure(
@@ -2028,6 +2125,13 @@ def process_single_file_in_parallel_dual_structure(
     else:
         actual_chunk_size = max(MIN_CHUNK_SIZE, min(chunk_size, per_worker_optimal))
 
+    # Align to the on-disk chunking along the time axis (Zarr / chunked HDF5):
+    # a task that straddles a storage chunk decompresses that chunk twice.
+    storage_chunk = int(structure_info.get("storage_chunk_frames") or 0)
+    if 1 < storage_chunk <= MAX_CHUNK_SIZE:
+        n_blocks = max(1, round(actual_chunk_size / storage_chunk))
+        actual_chunk_size = n_blocks * storage_chunk
+
     logger.info(
         f"Using chunk size: {actual_chunk_size} frames "
         f"(structure: {structure_info['type']}, workers: {num_processes}, "
@@ -2046,8 +2150,6 @@ def process_single_file_in_parallel_dual_structure(
             (file_path, start_idx, end_idx, frame_interval, structure_info)
         )
 
-    completed = 0
-
     # For Zarr files use the extended initializer that caches the store per worker.
     # For HDF5 use the lightweight mask-only initializer.
     is_zarr = structure_info.get("file_format") == "zarr"
@@ -2058,109 +2160,147 @@ def process_single_file_in_parallel_dual_structure(
         _pool_init    = _worker_init_masks
         _pool_initargs = (masks,)
 
+    # Bounded number of in-flight tasks: enough to keep every worker busy, small
+    # enough that finished-but-unmerged results never pile up in RAM.
+    max_in_flight = max(4, num_processes * 3)
+
+    # First/last frame of each finished chunk, kept only until the neighbouring
+    # chunk is done and the border diff has been computed.
+    edge_frames: Dict[int, Tuple[Any, Any]] = {}
+    done_starts = set()
+    failed_tasks: List[Tuple] = []
+    completed = 0
+
+    def _merge(res):
+        for roi_idx, vals in res.items():
+            roi_changes[roi_idx].extend(vals)
+
+    def _border(left_start: int, right_start: int):
+        """Diff between the last frame of one chunk and the first of the next."""
+        left, right = edge_frames.get(left_start), edge_frames.get(right_start)
+        if left is None or right is None:
+            return
+        _merge(process_chunk(
+            np.stack([left[1], right[0]]), masks,
+            (right_start - 1) * frame_interval, frame_interval,
+        ))
+
+    def _finish(start_idx, end_idx, res, first, last):
+        nonlocal completed
+        completed += 1
+        if res is None:
+            return
+        _merge(res)
+        edge_frames[start_idx] = (first, last)
+        done_starts.add(start_idx)
+        prev_start = start_idx - actual_chunk_size
+        if prev_start in done_starts:
+            _border(prev_start, start_idx)
+        if end_idx in done_starts:
+            _border(start_idx, end_idx)
+        # Drop edge frames once both neighbours are finished.
+        for s0 in (prev_start, start_idx, end_idx):
+            if s0 in edge_frames:
+                nxt = s0 + actual_chunk_size
+                left_done = s0 == 0 or (s0 - actual_chunk_size) in done_starts
+                right_done = nxt >= num_frames or nxt in done_starts
+                if left_done and right_done:
+                    del edge_frames[s0]
+
+    def _report(prefix):
+        if progress_callback:
+            percent = (completed / total_chunks) * 100
+            progress_callback(
+                percent,
+                f"{prefix} chunk {completed}/{total_chunks} for {os.path.basename(file_path)}",
+            )
+
+    pool_error = None
     try:
-        with ProcessPoolExecutor(
+        with worker_spawn_environment(), ProcessPoolExecutor(
             max_workers=num_processes,
             initializer=_pool_init,
             initargs=_pool_initargs,
         ) as executor:
-            # OPTIMIZED: Dynamic queue size based on available RAM
-            # Systems with lots of RAM can process more chunks in parallel
-            try:
-                import psutil
-
-                available_ram_gb = psutil.virtual_memory().available / (1024**3)
-
-                # Estimate RAM per chunk (conservative)
-                frame_size_mb = (frame_shape[0] * frame_shape[1] * dtype_size) / (
-                    1024**2
-                )
-                if len(frame_shape) > 2:  # RGB/RGBA
-                    frame_size_mb *= frame_shape[2]
-                chunk_size_mb = frame_size_mb * actual_chunk_size
-
-                # Calculate how many chunks can fit in 50% of available RAM
-                max_queue_from_ram = int(
-                    (available_ram_gb * 1024 * 0.5) / chunk_size_mb
-                )
-
-                # Use larger of: RAM-based limit or conservative default
-                max_queue_size = max(
-                    max(4, num_processes * 2), min(max_queue_from_ram, len(tasks))
-                )
-
-                logger.info(
-                    f"Dynamic queue sizing: {available_ram_gb:.1f}GB available RAM, "
-                    f"chunk={chunk_size_mb:.1f}MB, max_queue={max_queue_size} tasks"
-                )
-            except ImportError:
-                # Fallback if psutil not available: conservative default
-                max_queue_size = max(4, num_processes * 2)
-                logger.info(f"Queue size (no psutil): {max_queue_size} tasks")
-
             futures = {}
             task_iter = iter(tasks)
 
-            # Submit initial batch
-            for _ in range(min(max_queue_size, len(tasks))):
-                try:
-                    task = next(task_iter)
-                    future = executor.submit(_process_single_chunk_dual_structure, task)
-                    futures[future] = task[2]  # Store start_idx for tracking
-                except StopIteration:
-                    break
+            def _submit_next():
+                task = next(task_iter, None)
+                if task is not None:
+                    futures[executor.submit(_process_chunk_task, task)] = task
 
-            # Process results and submit new tasks as old ones complete
+            for _ in range(min(max_in_flight, len(tasks))):
+                _submit_next()
+
             while futures:
-                # Wait for next completion
                 done, _ = wait(futures.keys(), return_when="FIRST_COMPLETED")
-
                 for future in done:
+                    task = futures.pop(future)
                     try:
-                        start_idx, chunk_res = future.result(timeout=600)
-
-                        # Merge results
-                        for roi_idx in chunk_res:
-                            roi_changes[roi_idx].extend(chunk_res[roi_idx])
-
-                        completed += 1
-
-                        if progress_callback:
-                            percent = (completed / total_chunks) * 100
-                            msg = f"Dual-structure chunk {completed}/{total_chunks} for {os.path.basename(file_path)}"
-                            progress_callback(percent, msg)
-
+                        out = future.result()
                     except Exception as e:
-                        logger.error(f"Error processing dual-structure chunk: {e}")
+                        # Worker died (BrokenProcessPool) - retry this chunk later
+                        # in the main process instead of dropping its frames.
+                        logger.error(
+                            f"Chunk {task[1]}:{task[2]} lost in worker "
+                            f"({type(e).__name__}: {e}) - will retry"
+                        )
+                        failed_tasks.append(task)
                         completed += 1
-
-                    finally:
-                        # Remove completed future
-                        del futures[future]
-
-                        # Submit new task if available
+                        out = None
+                    if out is not None:
+                        if out[2] is None:
+                            failed_tasks.append(task)
+                        _finish(*out)
+                    if pool_error is None:
                         try:
-                            task = next(task_iter)
-                            new_future = executor.submit(
-                                _process_single_chunk_dual_structure, task
-                            )
-                            futures[new_future] = task[2]
-                        except StopIteration:
-                            pass  # No more tasks
+                            _submit_next()
+                        except Exception as e:  # pool broken: retry the rest later
+                            pool_error = e
+                    # Outside any except-block: a cancel raised by the callback
+                    # must abort the analysis, not be logged as a chunk error.
+                    _report("Parallel")
 
     except Exception as e:
-        # On Windows, workers often fail due to memory pressure from napari/numba imports.
-        # This is expected behavior — the single-threaded fallback works fine.
-        if "Auslagerungsdatei" in str(e) or "paging file" in str(e).lower() or "resource" in str(e).lower():
-            logger.info(
-                f"Multi-processing unavailable (insufficient memory for worker processes). "
-                f"Using single-threaded processing instead — this is normal on Windows."
+        if completed == 0 and not failed_tasks:
+            # Pool never got going - run everything single-threaded.
+            logger.warning(
+                f"Multi-processing failed ({type(e).__name__}: {e!r}). "
+                f"Using single-threaded fallback.",
+                exc_info=True,
             )
-        else:
-            logger.warning(f"Multi-processing failed: {e}. Using single-threaded fallback.")
-        return process_hdf5_file_dual_structure(
-            file_path, masks, actual_chunk_size, progress_callback, frame_interval
+            return process_hdf5_file_dual_structure(
+                file_path, masks, actual_chunk_size, progress_callback, frame_interval
+            )
+        if "canceled" in str(e).lower():
+            raise
+        pool_error = e
+
+    # Every chunk that did not finish successfully is processed here, in the
+    # main process: chunks whose worker died, failed reads, and chunks never
+    # submitted because the pool broke.
+    retry_tasks = [t for t in tasks if t[1] not in done_starts]
+    if retry_tasks:
+        logger.warning(
+            f"Processing {len(retry_tasks)} chunk(s) single-threaded after "
+            f"worker failure" + (f" ({pool_error!r})" if pool_error else "")
         )
+        global _worker_masks, _worker_zarr_store
+        saved = (_worker_masks, _worker_zarr_store)
+        _worker_masks = masks
+        if is_zarr and _worker_zarr_store is None:
+            _worker_zarr_store = _open_zarr_store(file_path)
+        try:
+            completed = total_chunks - len(retry_tasks)
+            for task in retry_tasks:
+                out = _process_chunk_task(task)
+                if out[2] is None:
+                    logger.error(f"Chunk {task[1]}:{task[2]} failed again - frames missing")
+                _finish(*out)
+                _report("Retry")
+        finally:
+            _worker_masks, _worker_zarr_store = saved
 
     # Sort results by time
     for roi_idx in roi_changes:
@@ -2199,8 +2339,42 @@ def process_hdf5_file_dual_structure(
     frame_interval: float = 5,
 ) -> Tuple[str, Dict, float]:
     """
-    Process a single HDF5 file with dual structure support (single-threaded).
+    Process a single HDF5 or Zarr file with dual structure support (single-threaded).
+
+    For Zarr the store is opened once for the whole run (via the same cache the
+    pool workers use) instead of once per chunk; re-opening a zip store means
+    re-parsing its whole central directory every time.
     """
+    global _worker_zarr_store
+    from ._io_abstraction import detect_file_format
+
+    try:
+        is_zarr = detect_file_format(file_path) == "zarr"
+    except ValueError:
+        is_zarr = False
+
+    if not is_zarr or _worker_zarr_store is not None:
+        return _process_file_sequential(
+            file_path, masks, chunk_size, progress_callback, frame_interval
+        )
+
+    _worker_zarr_store = _open_zarr_store(file_path)
+    try:
+        return _process_file_sequential(
+            file_path, masks, chunk_size, progress_callback, frame_interval
+        )
+    finally:
+        _worker_zarr_store = None
+
+
+def _process_file_sequential(
+    file_path: str,
+    masks: List[np.ndarray],
+    chunk_size: int,
+    progress_callback: Optional[Callable],
+    frame_interval: float,
+) -> Tuple[str, Dict, float]:
+    """Single-threaded chunk loop behind :func:`process_hdf5_file_dual_structure`."""
     start_all = time.time()
 
     # Detect structure (format-agnostic: works for both HDF5 and Zarr)
@@ -2522,7 +2696,9 @@ def process_hdf5_files(
         else:
             # Multi-threaded processing with memory management
             try:
-                with ProcessPoolExecutor(max_workers=num_processes) as executor:
+                with worker_spawn_environment(), ProcessPoolExecutor(
+                    max_workers=num_processes
+                ) as executor:
                     futures = []
                     for idx, file_path in enumerate(h5_files, 1):
                         future = executor.submit(
@@ -2565,7 +2741,11 @@ def process_hdf5_files(
                         f"Using single-threaded processing — this is normal on Windows."
                     )
                 else:
-                    logger.warning(f"Multi-processing failed: {e}. Using single-threaded fallback.")
+                    logger.warning(
+                f"Multi-processing failed ({type(e).__name__}: {e!r}). "
+                f"Using single-threaded fallback.",
+                exc_info=True,
+            )
                 # Fallback to single-threaded
                 for file_idx, file_path in enumerate(h5_files, 1):
                     fp_callback = file_progress_callback(
