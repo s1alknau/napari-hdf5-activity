@@ -919,7 +919,12 @@ class CircadianMixin:
         self.btn_batch_remove.clicked.connect(self._batch_remove_selected)
         btn_row.addWidget(self.btn_batch_remove)
 
-        self.btn_batch_clear = QPushButton("Clear")
+        self.btn_batch_clear = QPushButton("Reset Batch")
+        self.btn_batch_clear.setToolTip(
+            "Empty the table and remove the pooled data, so another recording\n"
+            "can be loaded and analysed on its own.\n"
+            "Loading a new raw file or starting a new analysis does this automatically."
+        )
         self.btn_batch_clear.clicked.connect(self._batch_clear)
         btn_row.addWidget(self.btn_batch_clear)
 
@@ -1052,12 +1057,71 @@ class CircadianMixin:
             f"Removed {len(rows)} dataset(s) — {self.batch_table.rowCount()} remaining."
         )
 
+    # Analysis state that a pooled batch load overwrites with composite ROI ids.
+    _POOLED_STATE_ATTRS = (
+        "merged_results",
+        "merged_results_raw",
+        "movement_data",
+        "fraction_data",
+        "quiescence_data",
+        "sleep_data",
+        "sleep_quality_data",
+        "roi_statistics",
+        "roi_summary",
+        "quiescence_bouts",
+        "roi_baseline_means",
+        "roi_upper_thresholds",
+        "roi_lower_thresholds",
+        "fisher_analysis_results",
+        "_all_method_results",
+    )
+
+    def _drop_pooled_state(self):
+        """Forget pooled multi-dataset data so nothing stale is analysed or saved."""
+        for attr in self._POOLED_STATE_ATTRS:
+            if hasattr(self, attr):
+                setattr(self, attr, {})
+        self._pop_spectrum_data = None
+
     def _batch_clear(self):
-        """Empty the batch table. Already-loaded data stays until reloaded."""
+        """Reset batch mode: empty the table and drop pooled data, if any."""
+        was_pooled = self._batch_is_active()
         self.batch_table.setRowCount(0)
         self.batch_status_label.setText("No datasets loaded.")
         self._batch_result = None
-        self._log_message("Batch table cleared.")
+        if was_pooled:
+            self._drop_pooled_state()
+            self.fisher_results_text.setPlainText(
+                "Batch reset — pooled data removed.\n\n"
+                "Load a results file or run a new analysis."
+            )
+            self._log_message("Batch reset: pooled data removed.")
+        else:
+            self._log_message("Batch table cleared.")
+
+    def _leave_batch_mode(self, reason: str):
+        """End batch mode because new data is coming in (new file / new analysis).
+
+        Without this, a freshly analysed recording kept being treated as part of
+        the old pool: temperature control, rhythm analysis and the HDF5 save all
+        used the previous batch's composition and environment records.
+        """
+        if not hasattr(self, "batch_table"):
+            return
+        pooled = self._batch_is_active()
+        if not pooled and self.batch_table.rowCount() == 0:
+            return
+        self.batch_table.setRowCount(0)
+        self.batch_status_label.setText("No datasets loaded.")
+        self._batch_result = None
+        if pooled:
+            self._drop_pooled_state()
+            self._log_message(
+                f"Batch mode ended ({reason}) — pooled data removed. "
+                f"Re-add the results files to pool again."
+            )
+        else:
+            self._log_message(f"Batch table cleared ({reason}).")
 
     def _batch_rebuild_table(self, specs):
         """Repopulate the table from *specs*, re-applying main-dataset rules to row 0."""

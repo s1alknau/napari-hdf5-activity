@@ -2708,6 +2708,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         )
         if not file_paths:
             return
+        if hasattr(self, "_leave_batch_mode"):
+            self._leave_batch_mode("new file loaded")
 
         # Handle single or multiple files
         if len(file_paths) == 1:
@@ -3148,6 +3150,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         )
         if not directory:
             return
+        if hasattr(self, "_leave_batch_mode"):
+            self._leave_batch_mode("new directory loaded")
 
         # Check if the selected directory is itself a Zarr store
         # zarr v2 uses .zgroup/.zarray, zarr v3 uses zarr.json
@@ -3293,6 +3297,8 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
 
     def _load_zarr_file(self, zarr_path: str):
         """Load a Zarr store directory as an activity recording."""
+        if hasattr(self, "_leave_batch_mode"):
+            self._leave_batch_mode("new Zarr store loaded")
         self.file_path = zarr_path
         self.recording_start_datetime = _parse_recording_start_datetime(zarr_path)
         basename = os.path.basename(zarr_path.rstrip("/\\"))
@@ -4840,6 +4846,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 "ERROR: No ROIs detected. Please run ROI detection first."
             )
             return
+
+        # A new analysis replaces whatever is loaded - leave batch mode so the
+        # result is not treated as part of a previously pooled batch.
+        if hasattr(self, "_leave_batch_mode"):
+            self._leave_batch_mode("new analysis started")
 
         # Quick validation using calc module
         is_valid, error_msg = validate_analysis_parameters(
