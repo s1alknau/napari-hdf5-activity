@@ -189,6 +189,79 @@ def test_compare_to_q10_bound_flags_an_unexplainable_rhythm():
     assert exceedances[max(exceedances)] == pytest.approx(result["min_exceedance"])
 
 
+# ------------------------------------------------------- sensor cleaning
+
+def test_clean_removes_error_codes_and_dropouts():
+    v = np.full(2000, 23.0)
+    v[100:105] = -2.1          # failed read held for 5 samples
+    v[500:850] = 0.0           # 29 min dropout
+    cleaned, info = T.clean_sensor_series(v, "temperature", sample_interval_s=5.0)
+    assert np.allclose(cleaned, 23.0)
+    assert info["n_invalid"] == 355
+    assert info["n_gaps"] == 2
+    assert info["longest_gap_s"] == pytest.approx(350 * 5.0)
+    assert set(info["invalid_values"]) == {-2.1, 0.0}
+
+
+def test_clean_keeps_quantisation_flicker_and_real_steps():
+    """0.1 °C flicker and a real, sustained 1.5 °C change are genuine data."""
+    v = np.where(np.arange(4000) % 7 < 3, 23.1, 23.0)
+    v[2000:] += 1.5            # sustained change, not a spike
+    cleaned, info = T.clean_sensor_series(v, "temperature", sample_interval_s=5.0)
+    assert info["n_invalid"] == 0
+    assert np.array_equal(cleaned, v)
+
+
+def test_clean_removes_in_range_spike():
+    v = np.full(1000, 23.0)
+    v[400:403] = 30.0          # plausible value, impossible jump
+    cleaned, info = T.clean_sensor_series(v, "temperature", sample_interval_s=5.0)
+    assert info["n_invalid"] == 3
+    assert np.allclose(cleaned, 23.0)
+
+
+def test_daily_swing_ignores_quantisation_flicker():
+    t = np.arange(0, 72 * 3600, 5.0)
+    v = np.where((t // 5) % 3 == 0, 23.1, 23.0)   # flicker only, no real change
+    swing = T.daily_temperature_swing(t, v)
+    assert swing["peak_to_trough"] == pytest.approx(0.0)
+
+
+def _plateau_with_dips(hours=72.0, step_s=60.0):
+    """Warm-up ramp, then a 23.2 °C plateau with a 1 °C dip for 3 h each day."""
+    t = np.arange(0.0, hours * 3600.0, step_s)
+    h = t / 3600.0
+    v = np.full_like(t, 23.2)
+    v[(h % 24.0) >= 21.0] = 22.2                     # short, sharp daily dip
+    v = np.where(h < 4.0, 21.6 + 0.4 * h, v)          # warm-up from 21.6 °C
+    return t, v
+
+
+def test_daily_swing_skips_warmup_and_sees_sharp_dips():
+    t, v = _plateau_with_dips()
+    swing = T.daily_temperature_swing(t, v, warmup_hours=6.0)
+    # Daily dip is 1.0 °C; the 21.6 °C warm-up start must not count
+    assert swing["peak_to_trough"] == pytest.approx(1.0)
+    assert all(s == pytest.approx(1.0) for s in swing["per_cycle"])
+
+
+def test_daily_swing_exceeds_cosinor_swing_for_non_sinusoidal_trace():
+    """The cosinor fit underestimates plateau-and-dip traces."""
+    from napari_hdf5_activity._cosinor_analysis import single_cosinor_analysis
+
+    t, v = _plateau_with_dips()
+    cos = single_cosinor_analysis(v, period_hours=24.0, sampling_interval=60.0)
+    swing = T.daily_temperature_swing(t, v)
+    assert swing["peak_to_trough"] > 2.0 * cos["amplitude"]
+
+
+def test_daily_swing_without_full_cycle_uses_remaining_data():
+    t, v = _plateau_with_dips(hours=20.0)
+    swing = T.daily_temperature_swing(t, v, warmup_hours=6.0)
+    assert "error" not in swing
+    assert len(swing["per_cycle"]) == 1
+
+
 def test_compare_to_q10_bound_accepts_a_sufficient_swing():
     """A large temperature cycle with a small rhythm is NOT flagged."""
     result = T.compare_to_q10_bound(0.02, 5.0)      # 4 % ptp vs 5 °C swing

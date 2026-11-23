@@ -362,7 +362,30 @@ class TelemetryMixin:
                             if reader.is_array(ds_path):
                                 # Store array data for plotting
                                 try:
-                                    self.telemetry_timeseries[ds_name] = reader.read_all(ds_path)
+                                    data = reader.read_all(ds_path)
+                                    kind = (
+                                        "temperature" if ds_name in ("temperature", "temperature_celsius")
+                                        else "humidity" if ds_name in ("humidity", "humidity_percent")
+                                        else None
+                                    )
+                                    if kind is not None:
+                                        # Interpolate over failed sensor reads
+                                        # (-2.1 / 0.0 °C codes, dropouts)
+                                        from ._temperature import clean_sensor_series
+                                        data, info = clean_sensor_series(
+                                            data, kind,
+                                            sample_interval_s=float(
+                                                getattr(self, "telemetry_frame_interval", None) or 5.0
+                                            ),
+                                        )
+                                        if info["n_invalid"]:
+                                            self._log_message(
+                                                f"⚠ {ds_name}: removed {info['n_invalid']} invalid "
+                                                f"samples in {info['n_gaps']} gap(s), longest "
+                                                f"{info['longest_gap_s'] / 60:.1f} min "
+                                                f"(values {info['invalid_values']}) - interpolated"
+                                            )
+                                    self.telemetry_timeseries[ds_name] = data
                                 except Exception:
                                     pass
 

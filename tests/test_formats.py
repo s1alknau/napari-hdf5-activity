@@ -63,7 +63,7 @@ def hdf5_recording(tmp_path):
         f.attrs["frame_interval"] = 5.0
         _create_array(f, "frames", _frames())
         ts = f.create_group("timeseries")
-        _create_array(ts, "temperature_celsius", np.full(N_FRAMES, 20.0, "f4"))
+        _create_array(ts, "temperature_celsius", np.linspace(20.0, 21.0, N_FRAMES).astype("f4"))
     return str(path)
 
 
@@ -74,7 +74,7 @@ def zarr_recording(tmp_path):
     root.attrs["frame_interval"] = 5.0
     _create_array(root, "frames", _frames())
     ts = root.create_group("timeseries")
-    _create_array(ts, "temperature_celsius", np.full(N_FRAMES, 20.0, "f4"))
+    _create_array(ts, "temperature_celsius", np.linspace(20.0, 21.0, N_FRAMES).astype("f4"))
     return str(path)
 
 

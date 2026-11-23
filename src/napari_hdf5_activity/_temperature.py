@@ -56,6 +56,92 @@ TEMPERATURE_KEYS = (
 
 HUMIDITY_KEYS = ("humidity", "humidity_percent")
 
+# Physically plausible ranges for the lab environment.  Anything outside is a
+# failed sensor read: the recordings contain -2.1 °C error codes (5-sample
+# blocks, one failed read held for 25 s) and 0.0 °C dropouts lasting minutes.
+VALID_RANGES = {
+    "temperature": (5.0, 45.0),
+    "humidity": (0.5, 100.0),
+}
+# A plausible-looking value that deviates this far from the local median of
+# its neighbours is a glitch, not a temperature change (the chamber cannot
+# change by 2 °C within minutes).
+SPIKE_THRESHOLDS = {"temperature": 2.0, "humidity": 15.0}
+
+
+def _rolling_median(values: np.ndarray, window: int) -> np.ndarray:
+    """Centered rolling median that ignores NaN; window in samples (odd)."""
+    window = max(1, int(window) | 1)
+    if window == 1 or values.size == 0:
+        return values.copy()
+    half = window // 2
+    padded = np.pad(values, half, mode="edge")
+    view = np.lib.stride_tricks.sliding_window_view(padded, window)
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmedian(view, axis=1)
+
+
+def clean_sensor_series(
+    values: Sequence[float],
+    kind: str = "temperature",
+    sample_interval_s: float = 5.0,
+    spike_window_s: float = 600.0,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Remove failed sensor reads from an environment timeseries.
+
+    Marks as invalid: non-finite values, values outside ``VALID_RANGES[kind]``,
+    and isolated spikes deviating more than ``SPIKE_THRESHOLDS[kind]`` from the
+    rolling median of the surrounding ``spike_window_s``.  Invalid samples are
+    replaced by linear interpolation between the nearest valid neighbours.
+
+    The 0.1 °C quantisation flicker of the sensor is NOT touched: those are
+    genuine readings at the sensor's resolution.
+
+    Returns ``(cleaned, info)`` with ``info`` holding ``n_invalid``,
+    ``n_gaps``, ``longest_gap_s`` and ``invalid_values`` (distinct removed
+    values, for the log).
+    """
+    v = np.asarray(values, dtype=float).copy()
+    info: Dict[str, Any] = {
+        "n_invalid": 0, "n_gaps": 0, "longest_gap_s": 0.0, "invalid_values": [],
+    }
+    if v.size == 0:
+        return v, info
+
+    lo, hi = VALID_RANGES.get(kind, (-np.inf, np.inf))
+    bad = ~np.isfinite(v) | (v < lo) | (v > hi)
+
+    # Spike test against the median of the remaining plausible values
+    thr = SPIKE_THRESHOLDS.get(kind)
+    if thr is not None and (~bad).sum() > 2:
+        masked = np.where(bad, np.nan, v)
+        window = int(round(spike_window_s / max(sample_interval_s, 1e-9)))
+        med = _rolling_median(masked, window)
+        with np.errstate(invalid="ignore"):
+            bad |= np.abs(v - med) > thr
+
+    if not bad.any():
+        return v, info
+    if bad.all():
+        info["n_invalid"] = int(v.size)
+        info["error"] = "No valid samples"
+        return v, info
+
+    idx = np.arange(v.size)
+    info["invalid_values"] = sorted(
+        {round(float(x), 2) for x in v[bad] if np.isfinite(x)}
+    )[:10]
+    v[bad] = np.interp(idx[bad], idx[~bad], v[~bad])
+
+    runs = np.split(idx[bad], np.flatnonzero(np.diff(idx[bad]) > 1) + 1)
+    info["n_invalid"] = int(bad.sum())
+    info["n_gaps"] = len(runs)
+    info["longest_gap_s"] = float(max(len(r) for r in runs) * sample_interval_s)
+    return v, info
+
 
 # ---------------------------------------------------------------------------
 # Reading the temperature record
@@ -125,12 +211,44 @@ def extract_environment_from_file(
                 f"'{temp_source}' at {interval:g} s intervals"
             )
 
+            # Failed sensor reads (-2.1 / 0.0 °C codes, dropouts) would
+            # dominate every downstream statistic - interpolate over them.
+            temperature, t_info = clean_sensor_series(
+                temperature, "temperature", sample_interval_s=interval
+            )
+            if t_info["n_invalid"]:
+                _log(
+                    f"  ⚠ Removed {t_info['n_invalid']} invalid temperature samples "
+                    f"in {t_info['n_gaps']} gap(s), longest "
+                    f"{t_info['longest_gap_s'] / 60:.1f} min "
+                    f"(values {t_info['invalid_values']}) - interpolated"
+                )
+            if "error" in t_info or np.ptp(temperature) == 0:
+                # Sensor stuck on one value (or only error codes): there is no
+                # temperature signal to test against.
+                _log(
+                    "  ⚠ Temperature sensor delivered a constant value "
+                    f"({float(temperature[0]):.1f} °C) for the whole recording - "
+                    "sensor stuck, temperature analysis skipped"
+                )
+                return None
+            if humidity is not None:
+                humidity, h_info = clean_sensor_series(
+                    humidity, "humidity", sample_interval_s=interval
+                )
+                if h_info["n_invalid"]:
+                    _log(
+                        f"  ⚠ Removed {h_info['n_invalid']} invalid humidity samples "
+                        f"in {h_info['n_gaps']} gap(s) - interpolated"
+                    )
+
             env = {
                 "times": times.tolist(),
                 "temperature": temperature.tolist(),
                 "temperature_source": temp_source,
                 "units": "celsius",
                 "frame_interval": interval,
+                "temperature_cleaning": t_info,
             }
             if humidity is not None:
                 env["humidity"] = humidity.tolist()
@@ -491,6 +609,65 @@ def q10_amplitude_bound(
         "rate_ratio": ratio,
         # peak-to-trough modulation as a fraction of the mean
         "max_modulation": ratio - 1.0,
+    }
+
+
+def daily_temperature_swing(
+    times_s: Sequence[float],
+    values: Sequence[float],
+    warmup_hours: float = 6.0,
+    period_hours: float = 24.0,
+    min_coverage: float = 0.75,
+    smooth_minutes: float = 5.0,
+) -> Dict[str, Any]:
+    """Largest raw max-min temperature range within one cycle, after warm-up.
+
+    The cosinor peak-to-trough underestimates a temperature trace that is not
+    sinusoidal (long plateaus with short, sharp dips).  This is the
+    conservative counterpart for the Q10 ceiling: the raw range of each
+    ``period_hours`` window, skipping the first ``warmup_hours`` in which the
+    chamber equilibrates.  Windows covering less than ``min_coverage`` of a
+    cycle are ignored.  The largest window range is returned as
+    ``peak_to_trough``.
+    """
+    t = np.asarray(times_s, dtype=float)
+    v = np.asarray(values, dtype=float)
+    ok = np.isfinite(t) & np.isfinite(v)
+    t, v = t[ok], v[ok]
+    if t.size < 3:
+        return {"error": "Not enough temperature samples"}
+
+    # Smooth the sensor's quantisation flicker (one 0.1 °C step back and
+    # forth) before taking max-min, otherwise every window gains up to two
+    # steps of spurious range.  5-minute rolling median.
+    if t.size > 2:
+        dt = float(np.median(np.diff(t)))
+        if dt > 0:
+            v = _rolling_median(v, int(round(smooth_minutes * 60.0 / dt)))
+
+    period_s = float(period_hours) * 3600.0
+    start = t[0] + float(warmup_hours) * 3600.0
+    swings = []
+    w0 = start
+    while w0 < t[-1]:
+        sel = (t >= w0) & (t < w0 + period_s)
+        if sel.sum() >= 2:
+            covered = t[sel][-1] - t[sel][0]
+            if covered >= min_coverage * period_s:
+                swings.append(float(v[sel].max() - v[sel].min()))
+        w0 += period_s
+
+    if not swings:
+        # Recording shorter than one full cycle after warm-up: use what is left
+        sel = t >= start
+        if sel.sum() < 2:
+            return {"error": "No data after warm-up"}
+        swings = [float(v[sel].max() - v[sel].min())]
+
+    return {
+        "peak_to_trough": max(swings),
+        "per_cycle": swings,
+        "warmup_hours": float(warmup_hours),
     }
 
 
@@ -926,6 +1103,21 @@ def summarize_temperature_control(
                 )
                 q10_result["temperature_amplitude"] = float(temp_amp)
 
+                # Conservative variant: raw daily max-min after warm-up.
+                # Larger than the cosinor swing for non-sinusoidal traces,
+                # so it gives the most generous temperature explanation.
+                swing = daily_temperature_swing(
+                    times, values, period_hours=period_hours
+                )
+                if "error" not in swing and "error" not in q10_result:
+                    conservative = compare_to_q10_bound(
+                        mean_rel, swing["peak_to_trough"], q10_values=q10_values
+                    )
+                    if "error" not in conservative:
+                        conservative["per_cycle"] = swing["per_cycle"]
+                        conservative["warmup_hours"] = swing["warmup_hours"]
+                        q10_result["conservative"] = conservative
+
     return {
         "interindividual_spread": spread,
         "q10": q10_result,
@@ -1058,10 +1250,33 @@ def generate_temperature_summary(results: Dict[str, Any]) -> str:
                 f"    Q10 = {q:g}  →  at most "
                 f"{100 * bound['max_modulation']:.2f} % modulation"
             )
+        cons = q10.get("conservative")
+        if cons:
+            lines.append(
+                f"  Raw daily swing (max-min per cycle, after "
+                f"{cons['warmup_hours']:g} h warm-up): "
+                f"{cons['temperature_peak_to_trough']:.3f} °C  "
+                f"(per cycle: {', '.join(f'{x:.2f}' for x in cons['per_cycle'])})"
+            )
+            for q in sorted(cons["bounds"]):
+                bound = cons["bounds"][q]
+                lines.append(
+                    f"    Q10 = {q:g}  →  at most "
+                    f"{100 * bound['max_modulation']:.2f} % modulation"
+                )
         lines.append(
             f"  Observed rhythm: "
             f"{100 * q10['observed_peak_to_trough']:.1f} % peak-to-trough"
         )
+        if cons:
+            lines.append(
+                f"  → {q10['min_exceedance']:.1f}× larger than the cosinor-based ceiling, "
+                f"{cons['min_exceedance']:.1f}× larger than the raw-swing ceiling."
+            )
+            if cons["temperature_sufficient"]:
+                lines.append(
+                    "  ⚠ With the raw daily swing the temperature COULD account for the rhythm."
+                )
         if q10["temperature_sufficient"]:
             lines.append(
                 "  ⚠ The temperature swing is large enough to account for the rhythm."

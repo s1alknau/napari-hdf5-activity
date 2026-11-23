@@ -3833,32 +3833,56 @@ class CircadianMixin:
                 maxima = [100 * q10["bounds"][q]["max_modulation"] for q in q_keys]
                 observed = 100 * q10["observed_peak_to_trough"]
                 positions = np.arange(len(q_keys))
-                ax.bar(positions, maxima, color="#d62728", edgecolor="black",
-                       linewidth=0.5, label="max. temperature could cause")
+                cons = q10.get("conservative")
+                dt_cos = q10.get("temperature_peak_to_trough", float("nan"))
+                width = 0.38 if cons else 0.8
+                offset = width / 2 if cons else 0.0
+                ax.bar(positions - offset, maxima, width=width, color="#f4a3a3",
+                       edgecolor="black", linewidth=0.5,
+                       label=f"max. from cosinor ΔT ({dt_cos:.2f} °C)")
+                bar_sets = [(positions - offset, maxima)]
+                if cons:
+                    maxima_c = [100 * cons["bounds"][q]["max_modulation"] for q in q_keys]
+                    ax.bar(positions + offset, maxima_c, width=width, color="#d62728",
+                           edgecolor="black", linewidth=0.5,
+                           label=f"max. from daily max-min ΔT "
+                                 f"({cons['temperature_peak_to_trough']:.2f} °C)")
+                    bar_sets.append((positions + offset, maxima_c))
                 ax.axhline(observed, color="#1f77b4", linewidth=2.0,
                            label=f"observed rhythm ({observed:.0f} %)")
                 ax.set_xticks(positions)
                 ax.set_xticklabels([f"Q10 = {q:g}" for q in q_keys], fontsize=8)
                 ax.set_yscale("log")
                 ax.set_ylim(1, max(observed * 3, 200))
-                for pos, val in zip(positions, maxima):
-                    ax.text(pos, val * 1.15, f"{val:.1f} %", ha="center",
-                            fontsize=8)
+                for xs, vals in bar_sets:
+                    for pos, val in zip(xs, vals):
+                        ax.text(pos, val * 1.15, f"{val:.1f} %", ha="center",
+                                fontsize=7)
+                # Quote the conservative (smallest) exceedance when available
+                exceed = cons["min_exceedance"] if cons else q10["min_exceedance"]
+                sufficient = cons["temperature_sufficient"] if cons else q10["temperature_sufficient"]
                 ax.text(
                     0.5, 0.93,
-                    f"observed rhythm is {q10['min_exceedance']:.0f}× larger\n"
-                    f"than temperature can explain",
+                    (f"observed rhythm is {exceed:.1f}× larger\n"
+                     f"than temperature can explain"
+                     if not sufficient else
+                     "temperature swing COULD\nexplain the rhythm"),
                     transform=ax.transAxes, fontsize=9, va="top", ha="center",
-                    fontweight="bold", color="#070",
-                    bbox=dict(boxstyle="round", facecolor="#e0f0e0", alpha=0.9),
+                    fontweight="bold", color="#b00" if sufficient else "#070",
+                    bbox=dict(boxstyle="round",
+                              facecolor="#f8e0e0" if sufficient else "#e0f0e0",
+                              alpha=0.9),
                 )
                 ax.set_ylabel("Peak-to-trough modulation (%, log)", fontsize=9)
             else:
                 ax.text(0.5, 0.5, "Q10 bound unavailable", ha="center",
                         va="center", transform=ax.transAxes)
+            _cons = q10.get("conservative") if q10 else None
             ax.set_title(
                 f"5. Q10 ceiling  (ΔT = "
-                f"{q10.get('temperature_peak_to_trough', float('nan')):.2f} °C)",
+                f"{q10.get('temperature_peak_to_trough', float('nan')):.2f} °C cosinor"
+                + (f" / {_cons['temperature_peak_to_trough']:.2f} °C daily max-min)"
+                   if _cons else ")"),
                 fontsize=10, fontweight="bold",
             )
             ax.grid(True, alpha=0.3, axis="y")
