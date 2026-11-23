@@ -4651,7 +4651,11 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             self.labeled_frame = labeled_frame
             self.main_labeled_frame = labeled_frame.copy()
 
-            self.viewer.layers.remove(self._roi_edit_layer)
+            # The edit layer may already be gone (deleted by the user or by
+            # "Clear ROI Detection"); its .data is still valid, so only remove
+            # it from the viewer if it is actually still there.
+            if self._roi_edit_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._roi_edit_layer)
             del self._roi_edit_layer
             self.btn_apply_roi_edits.setEnabled(False)
 
