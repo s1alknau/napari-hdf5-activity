@@ -8,9 +8,11 @@ This document describes the performance optimizations implemented in napari-hdf5
 1. [Overview](#overview)
 2. [RGB to Grayscale Conversion](#rgb-to-grayscale-conversion)
 3. [Dynamic RAM Management](#dynamic-ram-management)
-4. [Worker Thread Management](#worker-thread-management)
-5. [Recommended Settings](#recommended-settings)
-6. [Performance Benchmarks](#performance-benchmarks)
+4. [Parallel Processing on Windows](#parallel-processing-on-windows)
+5. [Chunking, Border Frames and Failed Workers](#chunking-border-frames-and-failed-workers)
+6. [Worker Thread Management](#worker-thread-management)
+7. [Recommended Settings](#recommended-settings)
+8. [Performance Benchmarks](#performance-benchmarks)
 
 ---
 
@@ -20,7 +22,9 @@ Processing large HDF5 files with high resolution (e.g., 1920×1080) and RGB chan
 
 ### Key Optimizations
 - **Vectorized RGB→Grayscale conversion**: 10-100× faster than frame-by-frame processing
-- **Dynamic RAM-based task queueing**: Automatically adapts to available system memory
+- **Memory-aware worker count**: Sized from the memory Windows can still commit, not just free RAM
+- **Lean worker processes**: Workers no longer import napari or CuPy (~390 MB instead of ~1 GB each)
+- **Chunk-aligned, gap-free parallel reading**: Each Zarr storage chunk is decompressed once; no frame difference is lost at chunk borders; chunks of a crashed worker are recomputed
 - **Improved worker thread management**: Prevents duplicate analyses and ensures clean shutdown
 
 ---
@@ -73,73 +77,124 @@ grayscale_stack = grayscale_stack.astype(image_stack.dtype)
 ## Dynamic RAM Management
 
 ### Problem
-Processing large files in parallel can exhaust system RAM, leading to:
-- System slowdown (swapping)
-- Out-of-memory errors
-- Unpredictable behavior
+Processing large files in parallel can exhaust system memory, leading to
+swapping, out-of-memory errors, and — on Windows — worker processes that cannot
+even be started.
 
-The old system submitted all tasks to the processing queue at once, regardless of available RAM.
+On Windows the limit that matters is the **commit limit** (physical RAM + page
+file), not free RAM. Every process reserves commit for memory it *may* touch;
+once the limit is reached, allocations fail even with gigabytes of RAM still
+free. In one observed case 14 GB of RAM were free while the commit charge was at
+35.5 / 35.5 GB, and new worker processes hung while starting.
 
 ### Solution
-Dynamic queue sizing based on available system memory using `psutil`:
+**Number of workers** — `calculate_safe_process_count()` budgets ~400 MB per
+worker (measured peak ~390 MB, see below) plus the ROI masks, against
 
 ```python
-# Calculate available RAM
-available_ram_gb = psutil.virtual_memory().available / (1024**3)
-
-# Estimate RAM per chunk
-chunk_size_mb = (frame_width × frame_height × channels × dtype_size × chunk_frames) / (1024**2)
-
-# Calculate safe queue size (use 50% of available RAM)
-max_queue_size = int((available_ram_gb × 1024 × 0.5) / chunk_size_mb)
+available = min(psutil.virtual_memory().available,   # free RAM
+                free_commit_charge)                     # Windows only, GlobalMemoryStatusEx
 ```
 
-### Behavior by System
+keeping 2 GB in reserve for napari and the OS. The CPU-based default is
+`min(4, 75 % of cores)` on Windows. When memory is tight, fewer workers start and
+the analysis gets slower instead of stalling. The Analysis tab applies the same
+check to the *Number of Processes* setting before each run.
 
-| System RAM | Available | Chunk Size | Max Queue | Behavior |
-|------------|-----------|------------|-----------|----------|
-| **64 GB** (Workstation) | 48 GB | 100 MB | ~240 tasks | Maximum parallelization |
-| **32 GB** (High-end) | 24 GB | 100 MB | ~120 tasks | High parallelization |
-| **16 GB** (Mid-range) | 8 GB | 100 MB | ~40 tasks | Balanced |
-| **8 GB** (Low-end) | 2 GB | 100 MB | ~10 tasks | Conservative, safe |
+**Chunk size** — `calculate_optimal_chunk_size()` sizes chunks from the frame
+size and the memory budget, divided by the number of workers, and then rounds to
+whole Zarr storage chunks (see below).
 
-**Benefits:**
-- High-end systems: Utilize full RAM for maximum speed
-- Low-end systems: Prevent swapping and crashes
-- Automatic adaptation: No manual configuration needed
-- Safe fallback: Conservative defaults if psutil unavailable
-
-### Queue Management Strategy
+**Tasks in flight** — at most `max(4, 3 × workers)` chunks are submitted at a
+time; a new one is submitted whenever one finishes. Finished results are merged
+immediately, so memory use stays flat regardless of file length.
 
 ```
-Processing Pipeline:
-┌─────────────────────────────────────────┐
-│ HDF5 File (1000 chunks)                 │
-└──────────────┬──────────────────────────┘
-               │
+Processing pipeline:
+┌──────────────────────────────────────────┐
+│ Recording (e.g. 1037 chunks of 50 frames)│
+└──────────────┬───────────────────────────┘
                ▼
     ┌──────────────────────┐
-    │  Active Queue        │  ← Dynamic size (e.g., 40 tasks)
-    │  [Task 1] [Task 2]   │
-    │  [Task 3] [Task 4]   │
-    │      ...             │
-    └──────────────────────┘
-               │
+    │ In flight: ≤ 3×N     │  ← refilled as chunks finish
+    └──────────┬───────────┘
                ▼
     ┌──────────────────────┐
-    │ Process Pool (4)     │
-    │ [P1] [P2] [P3] [P4] │
-    └──────────────────────┘
-               │
+    │ Process pool (N)     │  ← N from the memory check
+    └──────────┬───────────┘
                ▼
-         Results merged
+   Results merged + border diffs added
 ```
 
-**How it works:**
-1. Submit initial batch of tasks (based on available RAM)
-2. As tasks complete, submit new tasks one-by-one
-3. Maintain constant RAM usage
-4. Process continues until all chunks processed
+**If the page file is small**, the commit limit is low even on machines with
+plenty of RAM. Letting Windows manage the page file size (*System Properties →
+Advanced → Performance → Virtual memory → Automatically manage*) raises it on
+demand.
+
+---
+
+## Parallel Processing on Windows
+
+Windows has no `fork`: every worker is a fresh Python interpreter that, by
+default, first re-runs the parent's main script. Inside napari that script is
+`napari-script.py`, so every worker imported all of napari (Qt, vispy, numba, …)
+it never uses. Workers starting at the same time also wrote napari's theme icons
+to the same cache files and collided:
+
+```
+PermissionError: [Errno 13] Permission denied: '...\napari\Cache\...\_themes\dark\3D.svg'
+```
+
+— the pool broke and the analysis fell back to a single process.
+
+All three process pools (frame reading, multi-file batches, per-ROI movement
+detection) are now created inside `worker_spawn_environment()`
+(`_mp_utils.py`). While a pool lives it
+
+1. hides the parent's `__main__.__file__`, so workers do not re-run the main
+   script — the worker functions live in this package, not in `__main__`;
+2. sets a flag that makes workers skip the CuPy import — they compute on NumPy
+   masks, and initialising CUDA reserves ~1 GB of commit per process;
+3. runs BLAS/OpenMP single-threaded per worker (`OPENBLAS_NUM_THREADS=1` etc.) —
+   the parallelism comes from the processes, and a many-threaded OpenBLAS
+   reserves hundreds of MB per process.
+
+Everything is restored afterwards, also when the pool raises.
+
+| Per worker | Main script executed | Commit charge |
+|------------|----------------------|---------------|
+| Before | parent + every worker | ~1070 MB |
+| After | parent only | ~390 MB |
+
+---
+
+## Chunking, Border Frames and Failed Workers
+
+**Storage-aligned chunks.** The recording plugin writes Zarr frames in storage
+chunks of 50 frames. A task that straddles two storage chunks decompresses both,
+so task boundaries are rounded to whole storage chunks
+(`storage_chunk_frames`, read from the store).
+
+**Border frames.** Activity is the difference between consecutive frames, so a
+chunk of *n* frames yields *n − 1* values; the difference between the last frame
+of one chunk and the first of the next used to be lost — about 2 % of all values
+with 50-frame chunks. Workers now return their first and last frame, and the
+main process computes the border differences from them. No frame is read twice,
+and parallel and sequential processing give identical results.
+
+**Failed workers.** If a worker dies (e.g. out of memory), its chunk — and any
+chunk not yet submitted once the pool is broken — is recomputed in the main
+process instead of being dropped. Previously all remaining chunks were
+discarded without a message, leaving gaps in the activity trace. Only a chunk
+that fails a second time is reported as missing.
+
+**ROI bounding boxes.** Each ROI is evaluated on its mask's bounding box instead
+of the full frame, and the cast to a signed type (int16 for uint8, int32 for
+uint16 — int16 overflowed above 32 767) happens after cropping.
+
+**Sequential fallback.** When no pool can be used, the Zarr store is opened once
+for the whole run instead of once per chunk; for zip stores that meant parsing
+the entire central directory every time.
 
 ---
 
@@ -273,6 +328,21 @@ def _analysis_done(self):
 - Improvement: ~7-10% due to reduced I/O overhead
 - Optimal: 50 frames for external SSD
 
+### Three-Day Zarr Recording (2026-11)
+
+| | |
+|---|---|
+| File | Zarr directory store, 46 GB on disk |
+| Frames | 51 840 (72 h at 5 s), 1024 × 1224, uint8, 50-frame storage chunks |
+| ROIs | 6 |
+| Workers | 4 (Windows, 32 GB RAM) |
+| **Time** | **84 s — 615 frames/s** |
+| Values per ROI | 51 839 of 51 839 (no gaps) |
+| For comparison | ~130 frames/s single-threaded with plain `zarr` + NumPy (see the User Guide, *Processing Zarr Recordings Without the Plugin*) |
+
+When a second analysis runs at the same time, both slow down markedly — they
+compete for CPU, memory and disk.
+
 ### Scalability Analysis
 
 **Speedup by Process Count:**
@@ -338,16 +408,9 @@ Chunk: 6.2 MB × 100 = 620 MB
 Total: 620 MB × 4 × 2 ≈ 5 GB (peak usage)
 ```
 
-### Dynamic Queue Calculation
+### Tasks in Flight
 ```python
-# Conservative estimate: use 50% of available RAM
-usable_ram = available_ram × 0.5
-
-# How many chunks fit?
-max_chunks = usable_ram / chunk_memory
-
-# Ensure minimum parallelism
-max_queue = max(4, min(max_chunks, total_chunks))
+max_in_flight = max(4, num_processes * 3)   # submitted at once, refilled as they finish
 ```
 
 ---
@@ -381,6 +444,18 @@ max_queue = max(4, min(max_chunks, total_chunks))
 2. Check log for "STOP requested"
 3. Restart application if frozen
 
+### "Multi-processing failed" / analysis runs single-threaded
+**Symptoms:** Log shows `Multi-processing failed (...)` or `MemoryError reading
+chunk`, processing is much slower than expected
+
+**Causes and solutions:**
+1. Commit limit reached (Windows): close memory-heavy programs or enlarge the
+   page file — see [Dynamic RAM Management](#dynamic-ram-management)
+2. Two analyses running in parallel (e.g. two napari windows) share CPU, RAM and
+   disk; run them one after the other
+3. The log now prints the exception type and traceback — include it when
+   reporting a problem
+
 ### "Analysis already running" Message
 **Cause:** Trying to start new analysis while one is running
 
@@ -409,5 +484,5 @@ Potential areas for further improvement:
 
 ---
 
-**Last Updated:** 2025-12-28
-**Version:** 1.0
+**Last Updated:** 2026-11-23
+**Version:** 1.1

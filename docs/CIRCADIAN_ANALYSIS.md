@@ -522,6 +522,19 @@ n = ROIs × datasets instead of a single recording's worth.
 A single row behaves exactly like the old "Load Results from HDF5" button — same
 results, same ROI labels, same colours.
 
+### Leaving batch mode
+
+**Reset Batch** empties the table **and** removes the pooled data (activity
+traces with composite ROI ids, thresholds, extended-analysis results), so
+another recording can be loaded and analysed on its own. Without a pooled load
+it only clears the table and leaves a normal single-dataset analysis untouched.
+
+Batch mode also ends automatically — with a note in the log — as soon as new
+data comes in: loading a file, a directory or a Zarr store in the Input tab, or
+starting a new analysis. Without this, a freshly analysed recording would still
+be treated as part of the previous pool by the Temperature Control, the rhythm
+analysis and **Save Results to HDF5**. To pool again, re-add the results files.
+
 ### ROI naming and colours
 
 | Dataset | ROI keys | Labels | Colour |
@@ -633,10 +646,34 @@ residual. A surviving peak at essentially the same period means temperature does
 not explain the rhythm — *provided the two are not collinear*.
 
 **Test 5, the Q10 ceiling,** is a physiological limit rather than a statistical
-test, which is why it still works under collinearity. Metabolic rate scales as
-`Q10^(ΔT/10)`, so the measured temperature swing sets a hard upper bound on the
-modulation it could cause. A rhythm several-fold larger than that bound cannot be
-thermally driven, whatever the correlation says.
+test, which is why it still works under collinearity. Q10 is the factor by which
+a biological rate rises per 10 °C (van 't Hoff rule; typically 2–3 for
+metabolism and activity of ectotherms). A rate therefore changes by at most
+`Q10^(ΔT/10)` over a temperature swing ΔT, which caps the peak-to-trough
+modulation temperature could cause at `Q10^(ΔT/10) − 1`. A rhythm several-fold
+larger than that bound cannot be thermally driven, whatever the correlation
+says. The observed modulation is twice the mean cosinor amplitude relative to
+the MESOR.
+
+Panel 5 shows the bound for Q10 = 2, 2.5 and 3 with **two** estimates of ΔT:
+
+| ΔT | How it is measured | Character |
+|----|--------------------|-----------|
+| **Cosinor** (light bars) | Peak-to-trough of a 24 h cosine fitted to the temperature | Robust, but underestimates traces that are not sinusoidal — long plateaus with short, sharp dips are common in incubators |
+| **Daily max-min** (dark bars) | Largest raw max-min range in any 24 h window, after skipping the first 6 h (chamber warm-up) and smoothing the sensor's 0.1 °C flicker with a 5-min median | Conservative: the largest swing temperature actually made |
+
+The verdict box quotes the **conservative** (daily max-min) result and turns red
+if even that bound could account for the rhythm. Example from a 72 h recording:
+cosinor ΔT 0.53 °C, daily max-min 1.2 °C; with Q10 = 3 temperature could cause at
+most 6 % or 14 % modulation, against 78 % observed — the rhythm is 5.5× larger
+than the conservative bound.
+
+> The van 't Hoff rule and the typical Q10 range are textbook physiology. Using
+> them as an upper bound on rhythm amplitude is a plausibility estimate made by
+> this plugin, not an established published test — describe it as such in a
+> methods section (formula, ΔT used, Q10 range), and note its assumption that
+> activity scales with temperature like metabolic rate (threshold effects are not
+> covered).
 
 **Test 6** exploits a fact the other tests ignore: every ROI in a dish sees the
 *identical* temperature trace, so its between-individual variance is exactly zero.
@@ -698,6 +735,36 @@ Results files saved from now on include the temperature record, so the analysis
 works from a results file alone. **Re-save older results files** to make them
 self-contained — this matters for batch mode, where each pooled dataset needs its
 own temperature record and only the main dataset's raw file is typically loaded.
+
+### Sensor read errors
+
+The temperature sensor occasionally fails to deliver a reading, and the recording
+stores a placeholder instead. Seen in practice:
+
+| Stored value | Pattern | Cause |
+|--------------|---------|-------|
+| −2.1 °C | Blocks of exactly 5 samples, dozens per recording | One failed sensor read, held for 25 s |
+| 0.0 °C | One run of minutes (8–29 min observed) | Sensor dropout |
+
+A single −2.1 °C sample would turn a 1 °C daily swing into a 25 °C one and wreck
+every test above, so temperature (and humidity) is cleaned on reading, in the
+Temperature Control and in the Telemetry tab alike:
+
+- values outside 5–45 °C (humidity 0.5–100 %) are invalid,
+- so are values deviating more than 2 °C (humidity 15 %) from the median of the
+  surrounding 10 minutes — the chamber cannot change that fast,
+- invalid samples are replaced by linear interpolation between their valid
+  neighbours; the log reports how many, in how many gaps, the longest gap and
+  the removed values.
+
+The sensor's **0.1 °C flicker** between two neighbouring values is left alone:
+those are genuine readings at the sensor's resolution, not errors. Real
+temperature events — e.g. a heater cycling for a few hours — are kept as well;
+check the Telemetry plot if a recording shows unexpectedly large swings.
+
+If the sensor reported one constant value for the entire recording (a stuck
+sensor), the Temperature Control is skipped with a warning instead of testing
+against a signal with zero variance. The raw file itself is never modified.
 
 ### With pooled datasets
 

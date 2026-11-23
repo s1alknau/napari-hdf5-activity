@@ -10,6 +10,7 @@
 6. [Frame Viewer Tab](#frame-viewer-tab)
 7. [Workflow Examples](#workflow-examples)
 8. [Tips and Tricks](#tips-and-tricks)
+9. [Processing Zarr Recordings Without the Plugin](#processing-zarr-recordings-without-the-plugin)
 
 ## Getting Started
 
@@ -80,6 +81,16 @@ The plugin has 5 tabs:
 1. Click **"Load File"**
 2. Select the `.zarr` directory
 3. Plugin reads the Zarr array and treats it identically to an HDF5 stacked-frames dataset
+
+Large stores are processed in parallel, one storage chunk at a time (the
+recording plugin writes 50-frame chunks), so each chunk is decompressed only
+once. A 46 GB recording (51 840 frames, 1024 × 1224 px) takes about 1.5 min with
+four worker processes. The number of workers adapts to the memory Windows can
+still commit, so the analysis slows down rather than stalls when RAM is tight —
+see [Performance](../PERFORMANCE_OPTIMIZATIONS.md).
+
+To read a Zarr recording in your own scripts, without the plugin, see
+[Processing Zarr Recordings Without the Plugin](#processing-zarr-recordings-without-the-plugin).
 
 #### AVI Files
 
@@ -305,6 +316,31 @@ Threshold = baseline_mean + (multiplier × baseline_std)
 - Useful for recordings with technical artifacts
 - Recommended: ON if you observe sudden jumps
 
+**Steps at light/dark transitions.** Even with no animal movement, |ΔI| is not
+zero: camera and LED noise always contribute, and that noise floor grows with
+image brightness. When the illumination switches between phases (white LED on/off,
+IR power changing), the floor jumps — visible as steps in the activity trace at
+ZT 12, 24, 36, … The step height differs per ROI because the illumination change
+is not uniform across the plate. Two options remove it; both read the light/dark
+phases from the LED data in the file (`white_led_power`, or `phase_str`) and
+only one can be active at a time:
+
+**Adaptive Illumination Baseline:**
+- Shifts each light/dark period so its resting floor (15th percentile) matches
+  the median floor of all periods — an **additive** correction
+- The shift ramps smoothly over ±2 min around each transition
+- Recommended: ON when the activity trace steps at light/dark transitions
+
+**Per-Phase Normalization:**
+- Divides each light/dark period by its own resting floor — a **multiplicative**
+  correction that equalises the floor *and* scales the noise width with it
+- Intended for setups where the noise width changes noticeably with the
+  illumination, not only the level
+- On the recordings tested so far both options levelled the steps equally well
+  (residual step 1–5 %) and Per-Phase Normalization brought no extra benefit for
+  the noise width — try both and keep the one that gives the flatter baseline
+  for your rig
+
 ### Running the Analysis
 
 1. Ensure data and ROIs are loaded
@@ -369,20 +405,35 @@ After analysis completes:
 
 ### Exporting Results
 
-**Excel Export:**
-1. Click **"Export to Excel"**
-2. Choose save location
-3. Generated file includes multiple sheets:
-   - Movement_Data: Raw movement values
-   - Activity_Fraction: Activity percentage
-   - Sleep_Data: Sleep bout information
-   - Statistics: Summary statistics
-   - Parameters: Analysis configuration
-   - Metadata: File and recording info
+There are three ways to save results. Only one of them produces a file the
+plugin can load again:
 
-**CSV Export:**
-- Same data as Excel, but in CSV format
-- Compatible with all analysis software
+| Button | Where | Writes | Reload in plugin |
+|--------|-------|--------|------------------|
+| **Save Results** | Results tab | Excel workbook | – |
+| **Save Metadata (Excel)** | Results tab | `<name>_metadata.xlsx` | – |
+| **Save Results to HDF5** | Extended Analysis tab | `<name>_comprehensive_results.h5` | ✓ **Load Results from HDF5**, batch pooling |
+
+**Save Results (Excel)** — one workbook with the sheets `Summary`,
+`Raw_Intensity`, `Movement`, `Fraction_Movement`, `Sleep`, `Quiescence`,
+`Lighting_Conditions` (when LED data exists) and `Real_Amplitude_MATLAB` /
+`Real_Amplitude_Sensor`.
+
+**Save Metadata (Excel)** — the recording's metadata and telemetry
+(temperature, humidity, LED, timing) plus the analysis results, in one Excel
+file. Despite the HDF5 metadata it contains, it does **not** create an HDF5
+file. (Up to plugin version 0.2.0 this button was labelled *Save with HDF5
+Metadata*.)
+
+**Save Results to HDF5** — everything needed to continue later: activity
+traces, movement/sleep data, thresholds, ROI masks, LED and temperature
+records, analysis parameters and the extended-analysis results. This is the
+file type the **Batch Datasets** group pools and the Temperature Control reads
+when no raw recording is loaded.
+
+Every save ends with a dialog: on success it names the file and folder — after
+checking that the file actually exists on disk — and on failure it states the
+reason (for example a missing `openpyxl` or no write permission).
 
 **Plot Export:**
 1. Click **"Save All Plots"**
@@ -470,11 +521,11 @@ ROI 1: SIGNIFICANT circadian rhythm detected
 
 ### Exporting Extended Analysis
 
-1. Click **"Export Circadian Results"**
-2. Choose save location
-3. Results saved as:
-   - CSV: Periodogram data for each ROI
-   - Excel: Summary tables with parameters and statistics
+- **Export Current Analysis (Excel)** — the method currently shown
+- **Export All Analyses (Excel)** — every method run in this session, one
+  workbook
+- **Save Results to HDF5** — the complete state including these results, so it
+  can be reloaded (see [Exporting Results](#exporting-results))
 
 ---
 
@@ -732,6 +783,124 @@ For each recording:
 
 ---
 
+## Processing Zarr Recordings Without the Plugin
+
+A Zarr recording is an ordinary directory of compressed array chunks. Any
+Python environment with `zarr` and `numpy` can read it — useful for custom
+analyses, other tracking tools, or checking a recording on a machine without
+napari. Nothing has to be converted first.
+
+```bash
+pip install "zarr>=3" numpy pandas   # zarr-python 3 reads v2 and v3 stores
+```
+
+### Store layout
+
+| Path | Content |
+|------|---------|
+| *(root attributes)* | Recording metadata: `frame_interval` (s), `created_human`, `light_duration_min`, `dark_duration_min`, `start_with_light`, LED powers per phase, frame counts, … |
+| `images/frames` | All frames, shape `(T, H, W)`, `uint8`, chunks of 50 frames, Blosc/LZ4 compressed. Older stores keep them at `frames` |
+| `timeseries/<name>` | One value per frame, e.g. `recording_elapsed_sec`, `temperature_celsius`, `humidity_percent`, `white_led_power` (%), `ir_led_power` (%), `phase_str` (`light`/`dark`), `frame_mean_intensity` |
+| `rois` | Reserved for ROI definitions (empty in current recordings) |
+
+Data is read lazily: indexing an array decompresses only the chunks that
+contain the requested frames. A three-day recording can be 40–50 GB on disk,
+so never call `frames[:]` on the whole array.
+
+### Look inside
+
+```python
+import zarr
+
+root = zarr.open("D:/recordings/nematostella_timelapse_20260522_122817.zarr", mode="r")
+print(list(root.keys()))                   # top-level groups
+print(sorted(root["timeseries"].keys()))   # one value per frame each
+print(dict(root.attrs))                    # recording metadata
+
+frames = root["images/frames"]             # older stores: root["frames"]
+print(frames.shape, frames.dtype, frames.chunks)
+first = frames[0]                          # decompresses only the 50-frame chunk holding it
+```
+
+### Telemetry as a table
+
+```python
+import pandas as pd
+
+ts = root["timeseries"]
+columns = ["recording_elapsed_sec", "temperature_celsius", "humidity_percent",
+           "white_led_power", "ir_led_power", "phase_str", "frame_mean_intensity"]
+telemetry = pd.DataFrame({k: ts[k][:] for k in columns if k in ts})
+
+# Failed sensor reads are stored as -2.1 or 0.0 °C - drop and interpolate
+temp = telemetry["temperature_celsius"].where(telemetry["temperature_celsius"].between(5, 45))
+telemetry["temperature_celsius"] = temp.interpolate(limit_direction="both")
+```
+
+The plugin applies the same cleaning (plus a spike test) when it reads
+temperature — see [Temperature Control](CIRCADIAN_ANALYSIS.md#temperature-control).
+
+### Activity per ROI
+
+The script below computes the plugin's raw activity signal — the mean absolute
+frame-to-frame difference inside each circular ROI, divided by the dtype maximum
+— one storage chunk at a time, so memory use stays at a few hundred MB for any
+recording length. On a real recording it matches the plugin's values to within
+10⁻⁹. It stops before thresholding, normalisation and sleep detection; for those,
+load the result into the plugin or apply your own method.
+
+```python
+import numpy as np
+import zarr
+
+path = "D:/recordings/nematostella_timelapse_20260522_122817.zarr"
+root = zarr.open(path, mode="r")
+frames = root["images/frames"] if "images" in root else root["frames"]
+interval_s = float(root.attrs.get("frame_interval", 5.0))
+
+# ROI circles as (centre_x, centre_y, radius) in pixels - e.g. read off the
+# plugin's ROI layer, or from your own detection
+rois = [(200, 250, 120), (600, 250, 120), (1000, 250, 120),
+        (200, 750, 120), (600, 750, 120), (1000, 750, 120)]
+height, width = frames.shape[1:3]
+yy, xx = np.mgrid[0:height, 0:width]
+masks = [(xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2 for cx, cy, r in rois]
+
+step = frames.chunks[0]                          # read whole storage chunks only
+norm = float(np.iinfo(frames.dtype).max)         # 255 for uint8
+signed = np.int16 if frames.dtype.itemsize == 1 else np.int32  # no wrap-around
+activity = [[] for _ in masks]
+previous = None                                  # last frame of the previous chunk
+
+for start in range(0, frames.shape[0], step):
+    block = frames[start:start + step].astype(signed)
+    if previous is not None:                     # keep the diff across the chunk border
+        block = np.concatenate([previous[None], block])
+    previous = block[-1]
+    for values, mask in zip(activity, masks):
+        pixels = block[:, mask]                  # (frames, pixels inside the ROI)
+        values.extend((np.abs(np.diff(pixels, axis=0)).mean(axis=1) / norm).tolist())
+
+activity = np.array(activity)                    # (n_rois, n_frames - 1)
+time_h = np.arange(activity.shape[1]) * interval_s / 3600.0   # time of the earlier frame
+np.savetxt("activity.csv", np.column_stack([time_h, activity.T]), delimiter=",",
+           header="time_h," + ",".join(f"roi_{i + 1}" for i in range(len(rois))))
+```
+
+On one core this runs at roughly 130 frames/s for 1024 × 1224 frames, so a
+three-day recording (51 840 frames) takes about 6–7 minutes; the plugin's
+parallel pipeline needs about 1.5 minutes for the same file.
+
+### Viewing the frames elsewhere
+
+- **napari** without the plugin: `napari.Viewer().add_image(frames)` — napari
+  reads the Zarr array lazily, one chunk per displayed frame.
+- **Fiji**: *File › Import › HDF5/N5/Zarr/OME-NGFF* opens Zarr **v2** stores
+  (stores with `.zgroup` files); whether v3 stores (`zarr.json`) open depends on
+  the Fiji/N5 version.
+
+---
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -747,8 +916,9 @@ For each recording:
 ## Support and Resources
 
 - **GitHub Issues**: https://github.com/s1alknau/napari-hdf5-activity/issues
-- **Documentation**: https://github.com/s1alknau/napari-hdf5-activity/docs
-- **napari Hub**: https://napari-hub.org/plugins/napari-hdf5-activity
+- **Documentation**: https://s1alknau.github.io/Nematostella-time-series/
+- **Installation**: not yet on PyPI or the napari hub — install from source,
+  `pip install "napari-hdf5-activity[zarr] @ git+https://github.com/s1alknau/napari-hdf5-activity.git"`
 - **napari Documentation**: https://napari.org/
 
 ---
