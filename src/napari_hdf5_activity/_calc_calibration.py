@@ -20,6 +20,7 @@ def run_calibration_analysis_with_precomputed_baseline(
     frame_mean_data: Optional[Dict] = None,
     adaptive_illumination_baseline: bool = False,
     led_data: Optional[Dict] = None,
+    phase_normalization: bool = False,
     frame_interval: float = 5.0,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -53,6 +54,7 @@ def run_calibration_analysis_with_precomputed_baseline(
             "enable_detrending": enable_detrending,
             "enable_jump_correction": enable_jump_correction,
             "adaptive_illumination_baseline": adaptive_illumination_baseline,
+            "phase_normalization": phase_normalization,
             "frame_interval": frame_interval,
             "uses_precomputed_calibration_baseline": True,
             "calibration_rois_processed": len(calibration_baseline_statistics),
@@ -81,17 +83,11 @@ def run_calibration_analysis_with_precomputed_baseline(
         processed_data = normalized_data
 
     # Step 1b: Adaptive illumination baseline equalization
-    if adaptive_illumination_baseline and led_data:
-        from ._calc import extract_illumination_periods, equalize_signal_per_illumination_period
-        all_times = [t for data in processed_data.values() for t, _ in data]
-        rec_start = min(all_times) if all_times else 0.0
-        rec_end = max(all_times) if all_times else None
-        periods = extract_illumination_periods(led_data, rec_start, rec_end)
-        if periods:
-            processed_data = {
-                roi: equalize_signal_per_illumination_period(data, periods)
-                for roi, data in processed_data.items()
-            }
+    if (adaptive_illumination_baseline or phase_normalization) and led_data:
+        from ._calc import equalize_illumination_periods
+        processed_data = equalize_illumination_periods(
+            processed_data, led_data, "scale" if phase_normalization else "shift"
+        )
 
     # Amplitude check on raw values (before any normalization)
     from ._calc import check_roi_activity, apply_minmax_normalization

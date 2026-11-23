@@ -1610,6 +1610,7 @@ class CircadianMixin:
                     _sv("threshold_multiplier", "threshold_multiplier")
                     _sv("baseline_duration", "baseline_duration_minutes")
                     _sv("adaptive_illumination_baseline", "adaptive_illumination_baseline", is_check=True)
+                    _sv("phase_normalization", "phase_normalization", is_check=True)
                     _sv("enable_detrending", "enable_detrending", is_check=True)
                     _sv("jump_correction", "jump_correction", is_check=True)
                     _sv("bin_size_seconds", "bin_size_seconds")
@@ -1731,6 +1732,7 @@ class CircadianMixin:
                 ("threshold_multiplier",     "Threshold multiplier "),
                 ("baseline_duration_minutes","Baseline duration (min)"),
                 ("adaptive_illumination_baseline", "Adaptive baseline"),
+                ("phase_normalization",      "Per-phase normalization"),
                 ("bin_size_seconds",         "Bin size (s)         "),
                 ("quiescence_threshold",     "Quiescence threshold "),
                 ("sleep_threshold_minutes",  "Sleep threshold (min)"),
@@ -2033,6 +2035,7 @@ class CircadianMixin:
                     "threshold_multiplier": _gv("threshold_multiplier"),
                     "baseline_duration_minutes": _gv("baseline_duration"),
                     "adaptive_illumination_baseline": _gv("adaptive_illumination_baseline"),
+                    "phase_normalization": _gv("phase_normalization"),
                     "enable_detrending": _gv("enable_detrending"),
                     "jump_correction": _gv("jump_correction"),
                     # Behavior

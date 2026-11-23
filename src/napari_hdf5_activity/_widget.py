@@ -1058,6 +1058,28 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
             "Applies to all threshold methods."
         )
         preprocessing_layout.addWidget(self.adaptive_illumination_baseline)
+
+        self.phase_normalization = QCheckBox("Per-Phase Normalization")
+        self.phase_normalization.setChecked(False)
+        self.phase_normalization.setToolTip(
+            "Divide each light/dark period by its own resting floor (multiplicative).\n"
+            "Removes steps at L/D transitions caused by the illumination change:\n"
+            "the |dI| noise floor grows with image brightness, so both level and\n"
+            "noise width change between phases. Adaptive Illumination Baseline only\n"
+            "shifts the level; this option also equalizes the noise width.\n"
+            "Uses the LED / phase data stored in the file. Replaces Adaptive\n"
+            "Illumination Baseline when both are checked.\n"
+            "Applies to all threshold methods."
+        )
+        preprocessing_layout.addWidget(self.phase_normalization)
+
+        # The two illumination corrections are alternatives - keep one active.
+        self.phase_normalization.toggled.connect(
+            lambda on: on and self.adaptive_illumination_baseline.setChecked(False)
+        )
+        self.adaptive_illumination_baseline.toggled.connect(
+            lambda on: on and self.phase_normalization.setChecked(False)
+        )
         preprocessing_layout.addStretch()
         threshold_layout.addLayout(preprocessing_layout)
 
@@ -5269,18 +5291,20 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         # Preprocessing params shared by all threshold methods
         jump_correction = self.enable_jump_correction.isChecked()
         aib = self.adaptive_illumination_baseline.isChecked()
+        phase_norm = self.phase_normalization.isChecked()
         led_data = None
-        if aib:
+        if aib or phase_norm:
+            label = "Per-Phase Normalization" if phase_norm else "Adaptive Illumination Baseline"
             led_data = self._extract_led_data_from_hdf5()
             if led_data is None:
                 self._log_message(
-                    "⚠️ Adaptive Illumination Baseline: checkbox is ON but no white LED "
-                    "channel found in file (need 'led_white_power_percent' or similar). "
-                    "Adaptive baseline will NOT be applied."
+                    f"⚠️ {label}: checkbox is ON but no white LED / phase "
+                    "channel found in file (need 'led_white_power_percent', "
+                    "'phase_str' or similar). It will NOT be applied."
                 )
             else:
                 self._log_message(
-                    f"✓ Adaptive Illumination Baseline: LED data extracted "
+                    f"✓ {label}: LED data extracted "
                     f"({len(led_data.get('times', []))} time points)."
                 )
         params.update(
@@ -5288,6 +5312,7 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
                 "enable_jump_correction": jump_correction,
                 "frame_mean_data": self._extract_frame_mean_from_hdf5() if jump_correction else None,
                 "adaptive_illumination_baseline": aib,
+                "phase_normalization": phase_norm,
                 "led_data": led_data,
             }
         )
@@ -7446,6 +7471,8 @@ def prepare_analysis_parameters(widget, method):
                 base_params["adaptive_illumination_baseline"] = aib.isChecked()
             else:
                 base_params["adaptive_illumination_baseline"] = False
+            pn = getattr(widget, "phase_normalization", None)
+            base_params["phase_normalization"] = bool(pn.isChecked()) if hasattr(pn, "isChecked") else False
 
         except Exception as e:
             print(f"Warning: Could not extract baseline parameters: {e}")

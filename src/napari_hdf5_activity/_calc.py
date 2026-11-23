@@ -1760,9 +1760,16 @@ def equalize_signal_per_illumination_period(
     floor_percentile: float = 15.0,
     use_mode: bool = False,
     transition_ramp_minutes: float = 2.0,
+    mode: str = "shift",
 ) -> List[Tuple[float, float]]:
     """
     Level-correct activity signal so all illumination periods share the same baseline floor.
+
+    ``mode="shift"`` (default) adds a per-period offset, which aligns the floors
+    but leaves the noise width of each period unchanged.  ``mode="scale"``
+    multiplies each period by ``global_floor / period_floor`` instead; because
+    the |dI| noise floor grows with image brightness, this equalises both the
+    floor and the noise width when the illumination changes between phases.
 
     For each L/D period the resting floor is estimated as a low percentile of
     the period's frame-to-frame differences (default 15%). This is robust
@@ -1826,13 +1833,24 @@ def equalize_signal_per_illumination_period(
         return data
 
     global_floor = float(np.median(valid_floors))
+    scale = mode == "scale"
+    if scale and global_floor <= 0:
+        logger.warning("Per-phase normalization: non-positive floor, falling back to shift")
+        scale = False
 
-    # Step 1: per-frame shift as a piecewise-constant step function.
+    # Step 1: per-frame correction as a piecewise-constant step function.
+    # In scale mode the correction is a log-factor so the boundary blur below
+    # interpolates multiplicatively.
     per_frame_shift = np.zeros_like(values, dtype=float)
     for mask, floor in zip(period_masks, period_floors):
         if floor is None:
             continue
-        per_frame_shift[mask] = global_floor - floor
+        if scale:
+            if floor <= global_floor * 1e-3:
+                continue  # floor ~0 (e.g. after detrending) - leave period as is
+            per_frame_shift[mask] = np.log(global_floor / floor)
+        else:
+            per_frame_shift[mask] = global_floor - floor
 
     # Step 2: blur the step function with a Gaussian so frames near a L/D
     # boundary receive a smoothly-interpolated shift instead of a jump.
@@ -1849,15 +1867,45 @@ def equalize_signal_per_illumination_period(
         except ImportError:
             pass  # scipy missing — keep hard step (fail-safe)
 
-    corrected = np.clip(values + per_frame_shift, 0.0, None)
+    if scale:
+        corrected = np.clip(values * np.exp(per_frame_shift), 0.0, None)
+    else:
+        corrected = np.clip(values + per_frame_shift, 0.0, None)
 
     logger.debug(
-        f"Signal equalization: {len(valid_floors)} periods, "
+        f"Signal equalization ({'scale' if scale else 'shift'}): {len(valid_floors)} periods, "
         f"floors {[f'{f:.4f}' for f in valid_floors]}, global ref={global_floor:.4f}, "
         f"floor_method={'mode' if use_mode else f'p{floor_percentile:.0f}'}, "
         f"transition_ramp_min={transition_ramp_minutes:.1f}"
     )
     return list(zip(times, corrected))
+
+
+def equalize_illumination_periods(
+    processed_data: Dict[int, List[Tuple[float, float]]],
+    led_data: Optional[Dict],
+    mode: str = "shift",
+) -> Dict[int, List[Tuple[float, float]]]:
+    """Apply :func:`equalize_signal_per_illumination_period` to every ROI.
+
+    Shared step 1b of all threshold methods.  ``mode`` is ``"shift"``
+    (Adaptive Illumination Baseline) or ``"scale"`` (Per-Phase Normalization).
+    Returns *processed_data* unchanged when no usable L/D periods exist.
+    """
+    if not led_data:
+        return processed_data
+    all_times = [t for data in processed_data.values() for t, _ in data]
+    rec_start = min(all_times) if all_times else 0.0
+    rec_end = max(all_times) if all_times else None
+    periods = extract_illumination_periods(led_data, rec_start, rec_end)
+    if not periods:
+        logger.warning("Illumination equalization: no usable periods found, using global baseline")
+        return processed_data
+    logger.info(f"Illumination equalization ({mode}): {len(periods)} periods")
+    return {
+        roi: equalize_signal_per_illumination_period(data, periods, mode=mode)
+        for roi, data in processed_data.items()
+    }
 
 
 def _process_single_roi_movement(
@@ -1945,6 +1993,7 @@ def run_baseline_analysis(
     frame_mean_data: Optional[Dict] = None,
     adaptive_illumination_baseline: bool = False,
     led_data: Optional[Dict] = None,
+    phase_normalization: bool = False,
     baseline_duration_minutes: float = 200.0,
     multiplier: float = 1.0,
     frame_interval: float = 5.0,
@@ -2003,6 +2052,8 @@ def run_baseline_analysis(
             "enable_matlab_norm": enable_matlab_norm,
             "enable_detrending": enable_detrending,
             "enable_jump_correction": enable_jump_correction,
+            "adaptive_illumination_baseline": adaptive_illumination_baseline,
+            "phase_normalization": phase_normalization,
             "baseline_duration_minutes": baseline_duration_minutes,
             "multiplier": multiplier,
             "frame_interval": frame_interval,
@@ -2042,19 +2093,10 @@ def run_baseline_analysis(
     # Step 1b: Equalize signal level across illumination periods (adaptive baseline).
     # Must run BEFORE threshold computation so thresholds and movement detection
     # both operate on the same equalized signal space.
-    if adaptive_illumination_baseline and led_data:
-        all_times = [t for data in processed_data.values() for t, _ in data]
-        rec_start = min(all_times) if all_times else 0.0
-        rec_end = max(all_times) if all_times else None
-        periods = extract_illumination_periods(led_data, rec_start, rec_end)
-        if periods:
-            logger.info(f"Adaptive illumination baseline: equalizing signal across {len(periods)} periods")
-            processed_data = {
-                roi: equalize_signal_per_illumination_period(data, periods)
-                for roi, data in processed_data.items()
-            }
-        else:
-            logger.warning("Adaptive illumination baseline: no usable periods found, using global baseline")
+    if (adaptive_illumination_baseline or phase_normalization) and led_data:
+        processed_data = equalize_illumination_periods(
+            processed_data, led_data, "scale" if phase_normalization else "shift"
+        )
 
     # Step 1c: Calculate baseline thresholds from equalized/processed data.
     # Thresholds are now in the same signal space as movement detection.

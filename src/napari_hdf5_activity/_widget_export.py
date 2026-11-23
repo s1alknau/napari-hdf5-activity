@@ -946,6 +946,7 @@ class ExportMixin:
                         "Detrending Enabled",
                         "Jump Correction Enabled",
                         "Adaptive Illumination Baseline",
+                        "Per-Phase Normalization",
                         "Bin Size (s)",
                         "Quiescence Threshold",
                         "Sleep Threshold (min)",
@@ -981,6 +982,11 @@ class ExportMixin:
                         (
                             self.adaptive_illumination_baseline.isChecked()
                             if hasattr(self, "adaptive_illumination_baseline")
+                            else "N/A"
+                        ),
+                        (
+                            self.phase_normalization.isChecked()
+                            if hasattr(self, "phase_normalization")
                             else "N/A"
                         ),
                         self.bin_size_seconds.value(),
@@ -2941,5 +2947,7 @@ class ExportMixin:
             params["jump_correction_enabled"] = self.enable_jump_correction.isChecked()
         if hasattr(self, "adaptive_illumination_baseline"):
             params["adaptive_illumination_baseline"] = self.adaptive_illumination_baseline.isChecked()
+        if hasattr(self, "phase_normalization"):
+            params["phase_normalization"] = self.phase_normalization.isChecked()
 
         return params

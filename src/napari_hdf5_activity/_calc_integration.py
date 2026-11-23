@@ -1984,16 +1984,17 @@ def integrate_analysis_with_widget(widget) -> bool:
             kwargs["enable_jump_correction"] = False
             kwargs["frame_mean_data"] = None
 
-        if hasattr(widget, "adaptive_illumination_baseline") and hasattr(
-            widget.adaptive_illumination_baseline, "isChecked"
-        ):
-            kwargs["adaptive_illumination_baseline"] = widget.adaptive_illumination_baseline.isChecked()
-            if kwargs["adaptive_illumination_baseline"] and hasattr(widget, "_extract_led_data_from_hdf5"):
-                kwargs["led_data"] = widget._extract_led_data_from_hdf5() or {}
-            else:
-                kwargs["led_data"] = {}
+        def _checked(name):
+            obj = getattr(widget, name, None)
+            return bool(obj.isChecked()) if hasattr(obj, "isChecked") else False
+
+        kwargs["adaptive_illumination_baseline"] = _checked("adaptive_illumination_baseline")
+        kwargs["phase_normalization"] = _checked("phase_normalization")
+        if (
+            kwargs["adaptive_illumination_baseline"] or kwargs["phase_normalization"]
+        ) and hasattr(widget, "_extract_led_data_from_hdf5"):
+            kwargs["led_data"] = widget._extract_led_data_from_hdf5() or {}
         else:
-            kwargs["adaptive_illumination_baseline"] = False
             kwargs["led_data"] = {}
 
         # Add method-specific parameters
