@@ -2237,11 +2237,15 @@ class CircadianMixin:
                     f"✓ Successfully saved comprehensive results for {len(self.merged_results)} ROIs"
                 )
                 self.fisher_results_text.setPlainText("\n".join(summary_lines))
+                self._notify_saved(file_path, "Results saved to HDF5")
         except Exception as e:
             self.fisher_results_text.setPlainText(
                 f"ERROR saving results to HDF5:\n\n{str(e)}"
             )
-            self._log_message(f"ERROR saving results: {e}")
+            self._notify_save_failed(
+                f"Could not save\n{file_path}\n\n{str(e).splitlines()[0] if str(e) else e!r}",
+                title="HDF5 save failed",
+            )
 
     def run_fisher_analysis(self):
         """Run rhythmic pattern analysis on movement data using selected method."""

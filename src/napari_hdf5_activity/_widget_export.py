@@ -59,6 +59,46 @@ class ExportMixin:
     - UI widgets: self.frame_interval, self.bin_size_seconds, etc.
     """
 
+    # ------------------------------------------------------------------
+    # Save feedback
+    # ------------------------------------------------------------------
+
+    def _notify_saved(self, paths, title: str = "Saved") -> bool:
+        """Confirm a finished save in a dialog, after checking the files exist.
+
+        A save that reported success but left no file behind is shown as a
+        failure instead, so the user never has to go looking.
+        """
+        if isinstance(paths, str):
+            paths = [paths]
+        paths = [p for p in paths if p]
+        missing = [p for p in paths if not os.path.exists(p)]
+        if not paths or missing:
+            self._notify_save_failed(
+                "The save finished, but the file was not found on disk:\n\n"
+                + "\n".join(missing or ["(no file name)"]),
+                title=f"{title} - file missing",
+            )
+            return False
+        names = "\n".join(f"  • {os.path.basename(p)}" for p in paths)
+        folder = os.path.dirname(os.path.abspath(paths[0]))
+        self._log_message(f"✓ Saved: {', '.join(paths)}")
+        try:
+            QMessageBox.information(
+                self, title, f"Saved successfully:\n\n{names}\n\nFolder:\n{folder}"
+            )
+        except Exception:
+            pass  # headless / no Qt app: the log line above is enough
+        return True
+
+    def _notify_save_failed(self, reason: str, title: str = "Save failed"):
+        """Show why a save did not produce a file (also written to the log)."""
+        self._log_message(f"❌ {title}: {reason}")
+        try:
+            QMessageBox.critical(self, title, reason)
+        except Exception:
+            pass
+
     # --- paste methods here ---
 
     def export_results_for_matlab_compatibility(self):
@@ -187,6 +227,7 @@ class ExportMixin:
 
         saved_files = []
         sheets_created = []
+        excel_error = None
 
         try:
             # === SAVE COMPLETE EXCEL VERSION ===
@@ -216,6 +257,7 @@ class ExportMixin:
                 )
                 self._log_message("   Install with: pip install pandas openpyxl")
             except Exception as e:
+                excel_error = e
                 self._log_message(f"❌ Excel save failed: {e}")
                 import traceback
 
@@ -251,15 +293,19 @@ class ExportMixin:
                 self.results_label.setText(
                     "❌ All save attempts failed - check log for details"
                 )
-                self._log_message("❌ No files were saved successfully")
+                self._notify_save_failed(
+                    f"No file was written to\n{excel_path}\n\n"
+                    + (f"Reason: {excel_error}" if excel_error
+                       else "Excel export needs pandas and openpyxl."),
+                )
 
         except Exception as e:
             error_msg = f"Save operation failed: {e}"
             self.results_label.setText(error_msg)
-            self._log_message(f"❌ {error_msg}")
             import traceback
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
+            self._notify_save_failed(error_msg)
 
     def _show_save_success_dialog_complete(self, saved_files, sheets_created):
         """Show success dialog with complete file and sheet details."""
@@ -1359,14 +1405,14 @@ class ExportMixin:
             self.results_label.setText(
                 f"Results saved to {os.path.basename(file_path)}"
             )
-            self._log_message(f"Excel results saved: {file_path}")
+            self._notify_saved(file_path, "Results saved")
 
         except Exception as e:
             self.results_label.setText(f"Error saving results: {str(e)}")
-            self._log_message(f"ERROR saving results: {str(e)}")
             import traceback
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
+            self._notify_save_failed(f"Could not save {file_path}:\n\n{e}")
 
     def show_threshold_statistics(self):
         """Show detailed hysteresis statistics."""
@@ -1545,7 +1591,7 @@ class ExportMixin:
             default_name = f"hdf5_metadata_{int(time.time())}"
 
         base_path, _ = QFileDialog.getSaveFileName(
-            self, dialog_title, default_name, "All Files (*)"
+            self, dialog_title + " (Excel)", default_name, "Excel Files (*.xlsx)"
         )
 
         if not base_path:
@@ -1556,6 +1602,7 @@ class ExportMixin:
         # Ensure .xlsx extension for the main export
         excel_path_meta = f"{base_path}_metadata.xlsx"
         saved_files = []
+        excel_error = None
 
         try:
             # === AUTOMATIC LEGACY ENHANCEMENT INTEGRATION ===
@@ -1698,10 +1745,12 @@ class ExportMixin:
                 self._log_message("Excel with metadata saved successfully")
 
             except ImportError:
+                excel_error = "Excel export needs pandas and openpyxl."
                 self._log_message(
                     "Excel export not available (missing pandas/openpyxl)"
                 )
             except Exception as e:
+                excel_error = e
                 self._log_message(f"Excel save failed: {e}")
 
             # Update UI with legacy enhancement information
@@ -1775,15 +1824,19 @@ class ExportMixin:
                         saved_files, metadata_dict
                     )
             else:
-                self.results_label.setText("All save attempts failed - check log")
+                self.results_label.setText("❌ Metadata export failed - see log")
+                self._notify_save_failed(
+                    f"No file was written to\n{excel_path_meta}\n\n"
+                    f"Reason: {excel_error or 'unknown, see log'}"
+                )
 
         except Exception as e:
             error_msg = f"Save with metadata failed: {e}"
             self.results_label.setText(error_msg)
-            self._log_message(error_msg)
             import traceback
 
             self._log_message(f"Traceback: {traceback.format_exc()}")
+            self._notify_save_failed(error_msg)
 
     def _create_legacy_enhanced_sheets(
         self, writer, ts_data: dict, unit_info: dict, source_name: str

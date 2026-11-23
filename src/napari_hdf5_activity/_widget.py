@@ -1913,9 +1913,12 @@ class HDF5AnalysisWidget(TelemetryMixin, ExportMixin, FrameViewerMixin, Circadia
         self.btn_save_results.setStyleSheet(
             "QPushButton { background-color: #2196F3; color: white; font-weight: bold; }"
         )
-        self.btn_save_with_metadata = QPushButton("Save with HDF5 Metadata")
+        self.btn_save_with_metadata = QPushButton("Save Metadata (Excel)")
         self.btn_save_with_metadata.setToolTip(
-            "Save analysis results including comprehensive HDF5 metadata"
+            "Write the recording's metadata and telemetry plus the analysis results\n"
+            "to an Excel file (<name>_metadata.xlsx).\n"
+            "This does NOT create an HDF5 file - to save reloadable results as HDF5\n"
+            "use 'Save Results to HDF5' in the Extended Analysis tab."
         )
         self.btn_save_with_metadata.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }"
